@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@tradebot/core": "workspace:*",
+    "@tradebot/ingest": "workspace:*",
     "@tradebot/store": "workspace:*",
     "postgres": "^3.4.7"
   },

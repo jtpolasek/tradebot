@@ -1,0 +1,29 @@
+{
+  "name": "@tradebot/store",
+  "version": "0.0.1",
+  "type": "module",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "dev": "tsc -p tsconfig.json --watch",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "node --import tsx/esm src/migrate.ts"
+  },
+  "dependencies": {
+    "@tradebot/core": "workspace:*",
+    "dotenv": "^16.5.0",
+    "drizzle-orm": "^0.44.2",
+    "postgres": "^3.4.7"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "drizzle-kit": "^0.31.1",
+    "tsx": "^4.19.2",
+    "vitest": "^3.2.4"
+  }
+}

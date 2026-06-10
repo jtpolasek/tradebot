@@ -1,0 +1,25 @@
+{
+  "name": "tradebot",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "turbo run build",
+    "test": "turbo run test",
+    "dev": "turbo run dev",
+    "db:up": "docker compose up -d db",
+    "db:up:test": "docker compose --profile test up -d db-test",
+    "db:migrate": "node --import tsx/esm packages/store/src/migrate.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.2",
+    "turbo": "^2.5.4",
+    "typescript": "^5.8.3",
+    "vitest": "^3.2.4"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "packageManager": "pnpm@11.5.3"
+}

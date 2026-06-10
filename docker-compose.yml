@@ -1,0 +1,25 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: tradebot
+      POSTGRES_PASSWORD: tradebot
+      POSTGRES_DB: tradebot
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  db-test:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: tradebot
+      POSTGRES_PASSWORD: tradebot
+      POSTGRES_DB: tradebot_test
+    ports:
+      - "5434:5432"
+    profiles:
+      - test
+
+volumes:
+  pgdata:

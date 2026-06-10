@@ -1,0 +1,21 @@
+{
+  "name": "@tradebot/runner",
+  "version": "0.0.1",
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@tradebot/core": "workspace:*",
+    "@tradebot/store": "workspace:*",
+    "postgres": "^3.4.7"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.2",
+    "vitest": "^3.2.4"
+  }
+}

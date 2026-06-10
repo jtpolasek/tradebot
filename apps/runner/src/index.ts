@@ -1,7 +1,9 @@
 import { config, createLogger, EventBus } from "@tradebot/core";
-import { getDb, closeDb } from "@tradebot/store";
-import { ChainWatcher, Recorder } from "@tradebot/ingest";
+import { getDb, closeDb, getActiveWallets } from "@tradebot/store";
+import { ChainWatcher, Recorder, deserializeEvent } from "@tradebot/ingest";
+import { Decoder } from "@tradebot/decoder";
 import postgres from "postgres";
+import { readFileSync } from "fs";
 import { join } from "path";
 import { fileURLToPath } from "url";
 
@@ -10,14 +12,71 @@ const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const logger = createLogger("runner");
 const bus = new EventBus();
 
+function parseArgs(): { replayFile: string | null; speed: number } {
+  const args = process.argv.slice(2);
+  let replayFile: string | null = null;
+  let speed = 1;
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === "--replay" && args[i + 1]) {
+      replayFile = args[++i]!;
+    } else if (args[i] === "--speed" && args[i + 1]) {
+      speed = Math.max(1, parseFloat(args[++i]!));
+    }
+  }
+  return { replayFile, speed };
+}
+
+async function runReplay(file: string, speed: number): Promise<void> {
+  logger.info({ file, speed }, "Replay mode — reading JSONL file");
+
+  const lines = readFileSync(file, "utf-8")
+    .split("\n")
+    .filter((l) => l.trim().length > 0);
+
+  const events = lines.map((l) => deserializeEvent(l));
+  events.sort((a, b) => a.observedAt - b.observedAt);
+
+  const originTs = events[0]?.observedAt ?? Date.now();
+  const wallStart = Date.now();
+
+  for (const event of events) {
+    const targetDelay = (event.observedAt - originTs) / speed;
+    const elapsed = Date.now() - wallStart;
+    const wait = targetDelay - elapsed;
+    if (wait > 0) {
+      await new Promise<void>((r) => setTimeout(r, wait));
+    }
+    bus.emit("raw-tx", event);
+  }
+
+  logger.info({ count: events.length }, "Replay complete");
+}
+
 async function main() {
-  logger.info("Starting tradebot runner...");
+  const { replayFile, speed } = parseArgs();
+  logger.info({ replayFile, speed }, "Starting tradebot runner...");
 
   const pg = postgres(config.DATABASE_URL, { max: 1 });
   await pg`select 1`;
   await pg.end();
   const db = getDb(config.DATABASE_URL);
   logger.info("Database connection ok.");
+
+  const wallets = await getActiveWallets(db);
+  const walletAddresses = wallets.map((w) => w.address);
+
+  const decoder = new Decoder({ bus, db, wallets: walletAddresses });
+  decoder.start();
+
+  bus.on("raw-tx", (event) => {
+    logger.debug({ chain: event.chain, source: event.source, txHash: event.txHash }, "raw-tx");
+  });
+
+  if (replayFile) {
+    await runReplay(replayFile, speed);
+    await closeDb();
+    process.exit(0);
+  }
 
   const recordingsDir = join(__dirname, "../../../recordings");
   const recorder = new Recorder(recordingsDir);
@@ -44,10 +103,6 @@ async function main() {
     }),
   ];
 
-  bus.on("raw-tx", (event) => {
-    logger.debug({ chain: event.chain, source: event.source, txHash: event.txHash }, "raw-tx");
-  });
-
   for (const watcher of watchers) {
     await watcher.start();
   }
@@ -56,6 +111,7 @@ async function main() {
 
   async function shutdown() {
     logger.info("Shutting down...");
+    decoder.stop();
     for (const watcher of watchers) watcher.stop();
     await closeDb();
     process.exit(0);

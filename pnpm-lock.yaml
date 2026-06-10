@@ -29,6 +29,9 @@ importers:
       '@tradebot/core':
         specifier: workspace:*
         version: link:../../packages/core
+      '@tradebot/decoder':
+        specifier: workspace:*
+        version: link:../../packages/decoder
       '@tradebot/ingest':
         specifier: workspace:*
         version: link:../../packages/ingest
@@ -64,6 +67,31 @@ importers:
       '@types/node':
         specifier: ^22.0.0
         version: 22.19.20
+      vitest:
+        specifier: ^3.2.4
+        version: 3.2.6(@types/node@22.19.20)(tsx@4.22.4)
+
+  packages/decoder:
+    dependencies:
+      '@tradebot/core':
+        specifier: workspace:*
+        version: link:../core
+      '@tradebot/store':
+        specifier: workspace:*
+        version: link:../store
+      p-queue:
+        specifier: ^8.1.0
+        version: 8.1.1
+      viem:
+        specifier: ^2.31.3
+        version: 2.52.2(typescript@5.9.3)(zod@3.25.76)
+    devDependencies:
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.19.20
+      dotenv:
+        specifier: ^16.5.0
+        version: 16.6.1
       vitest:
         specifier: ^3.2.4
         version: 3.2.6(@types/node@22.19.20)(tsx@4.22.4)
@@ -1210,6 +1238,14 @@ packages:
       typescript:
         optional: true
 
+  p-queue@8.1.1:
+    resolution: {integrity: sha512-aNZ+VfjobsWryoiPnEApGGmf5WmNsCo9xu8dfaYamG5qaLP7ClhLN6NgsFe6SwJ2UbLEBK5dv9x8Mn5+RVhMWQ==}
+    engines: {node: '>=18'}
+
+  p-timeout@6.1.4:
+    resolution: {integrity: sha512-MyIV3ZA/PmyBN/ud8vV9XzwTrNtR4jFrObymZYnZqMmW0zA8Z17vnT0rBgFE/TlohB+YCHqXMgZzb3Csp49vqg==}
+    engines: {node: '>=14.16'}
+
   pathe@2.0.3:
     resolution: {integrity: sha512-WUjGcAqP1gQacoQe+OBJsFA7Ld4DyXuUIjZ5cc75cLHvJ7dtNsTugphxIADwspS+AraAUePCKrSVtPLFj/F88w==}
 
@@ -2149,6 +2185,13 @@ snapshots:
       typescript: 5.9.3
     transitivePeerDependencies:
       - zod
+
+  p-queue@8.1.1:
+    dependencies:
+      eventemitter3: 5.0.1
+      p-timeout: 6.1.4
+
+  p-timeout@6.1.4: {}
 
   pathe@2.0.3: {}
 

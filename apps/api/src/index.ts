@@ -28,25 +28,33 @@ import {
 
 const API_KEY = process.env["API_KEY"] ?? "";
 const PORT = Number(process.env["API_PORT"] ?? 3001);
+const CORS_ORIGIN = process.env["CORS_ORIGIN"] ?? "http://localhost:3000";
+
+if (!API_KEY) {
+  console.warn("[api] WARNING: API_KEY is not set — all requests will be accepted. Set API_KEY in .env.");
+}
 
 const db = getDb();
 
 const app = Fastify({ logger: { level: process.env["LOG_LEVEL"] ?? "info" } });
 await app.register(wsPlugin);
 
-// Auth middleware — skip for OPTIONS preflight
+// Auth: always enforce when API_KEY is set; warn-only when unset (dev convenience)
 app.addHook("preHandler", async (req, reply) => {
   if (req.method === "OPTIONS") return;
   if (API_KEY && req.headers["x-api-key"] !== API_KEY) {
-    reply.code(401).send({ error: "Unauthorized" });
+    return reply.code(401).send({ error: "Unauthorized" });
   }
 });
 
-// CORS headers for dashboard
-app.addHook("onSend", async (_req, reply) => {
-  reply.header("Access-Control-Allow-Origin", "*");
-  reply.header("Access-Control-Allow-Methods", "GET,POST,PATCH,DELETE,OPTIONS");
-  reply.header("Access-Control-Allow-Headers", "Content-Type,X-Api-Key");
+// CORS: restrict to configured dashboard origin
+app.addHook("onSend", async (req, reply) => {
+  const origin = req.headers["origin"];
+  if (origin === CORS_ORIGIN) {
+    reply.header("Access-Control-Allow-Origin", CORS_ORIGIN);
+    reply.header("Access-Control-Allow-Methods", "GET,POST,PATCH,DELETE,OPTIONS");
+    reply.header("Access-Control-Allow-Headers", "Content-Type,X-Api-Key");
+  }
 });
 
 app.options("*", async (_req, reply) => reply.send());

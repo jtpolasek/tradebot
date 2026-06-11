@@ -158,6 +158,25 @@ describe("SignalDeduper", () => {
     deduper.resolveConfirmed(makeEvent(), makeSignal({ source: "confirmed" }));
     expect(deduper.hasPending("eth", "0xabc123")).toBe(false);
   });
+
+  it("evicts mempool signals that never confirm (TTL prune)", () => {
+    let clock = 1_000_000;
+    const ttlDeduper = new SignalDeduper(() => clock);
+
+    // A dropped tx that never confirms.
+    ttlDeduper.trackMempoolWithNonce(makeSignal({ txHash: "0xdropped" }), "0xaaa", 1);
+    expect(ttlDeduper.pendingCount).toBe(1);
+
+    // Advance past the 15-min TTL + prune interval; the next insert triggers a prune.
+    clock += 16 * 60_000;
+    ttlDeduper.trackMempool(makeSignal({ txHash: "0xfresh" }));
+
+    // The stale entry is gone (and its nonce mapping too), only the fresh one remains.
+    expect(ttlDeduper.pendingCount).toBe(1);
+    expect(ttlDeduper.hasPending("eth", "0xdropped")).toBe(false);
+    expect(ttlDeduper.hasPending("eth", "0xfresh")).toBe(true);
+    expect(ttlDeduper.resolveReplaced("eth", "0xaaa", 1)).toBeNull();
+  });
 });
 
 // ---------------------------------------------------------------------------

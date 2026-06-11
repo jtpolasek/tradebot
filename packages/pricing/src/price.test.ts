@@ -1,0 +1,213 @@
+import { describe, it, expect, vi, beforeEach } from "vitest";
+import { getUsdPrice, getLiquidityUsd, sqrtPriceX96ToPrice, clearCaches } from "./price.js";
+import { WETH, QUOTE_ASSETS } from "@tradebot/core";
+
+const Q96 = 2 ** 96;
+const ETH_USDC = QUOTE_ASSETS.eth[0]!; // 0xa0b86991c...
+const ETH_WETH = WETH.eth;             // 0xc02aaa39b...
+const CHAINLINK_FEED_ETH = "0x5f4ec3df9cbd43714fe2740f5e3616155c5b8419";
+const UNI_FACTORY = "0x1f98431c8ad98523631ae4a59f267346ea31f984";
+const NULL_ADDR = "0x0000000000000000000000000000000000000000";
+const FAKE_POOL = "0xaabbccddaabbccddaabbccddaabbccddaabbccdd";
+
+// 0x11... < all quote asset addresses → always token0 in pools with USDC/WETH
+const FAKE_TOKEN_LO = "0x1111111111111111111111111111111111111111";
+// 0xde... > all quote asset addresses → always token1 in pools with USDC/WETH
+const FAKE_TOKEN_HI = "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+
+// Args-aware mock: handler can be a plain value or a function called with (args)
+type Handler = ((args?: unknown[]) => unknown) | unknown;
+function makeClient(overrides: Record<string, Handler> = {}) {
+  return {
+    readContract: vi.fn(async ({ address, functionName, args }: {
+      address: string;
+      functionName: string;
+      args?: unknown[];
+    }) => {
+      const key = `${address.toLowerCase()}:${functionName}`;
+      if (key in overrides) {
+        const h = overrides[key];
+        return typeof h === "function" ? h(args) : h;
+      }
+      if (functionName === "getPool") return NULL_ADDR;
+      throw new Error(`Unmocked: ${key}`);
+    }),
+  };
+}
+
+// ─── sqrtPriceX96 math ────────────────────────────────────────────────────────
+
+describe("sqrtPriceX96ToPrice", () => {
+  it("returns 1.0 when sqrtPriceX96 = 2^96 and equal decimals", () => {
+    // sqrt(1) * 2^96 → price = 1.0
+    const price = sqrtPriceX96ToPrice(BigInt(Math.round(Q96)), 18, 18);
+    expect(price).toBeCloseTo(1.0, 10);
+  });
+
+  it("case: token0 (18 dec) is target token, token1 (18 dec) is WETH, price = 0.0005 WETH/token", () => {
+    // price_token0_in_token1_raw = 0.0005 (same as human since both 18 dec)
+    // sqrtPriceX96 = sqrt(0.0005) * 2^96
+    const sqrtPriceX96 = BigInt(Math.round(Math.sqrt(0.0005) * Q96));
+    const price = sqrtPriceX96ToPrice(sqrtPriceX96, 18, 18);
+    expect(price).toBeCloseTo(0.0005, 6);
+  });
+
+  it("case: token0 (18 dec) is WETH, token1 (18 dec) is target; caller must invert", () => {
+    // price_WETH_in_token1_raw = 2000 → sqrtPriceX96 encodes sqrt(2000)
+    const sqrtPriceX96 = BigInt(Math.round(Math.sqrt(2000) * Q96));
+    const priceWethInToken = sqrtPriceX96ToPrice(sqrtPriceX96, 18, 18);
+    expect(priceWethInToken).toBeCloseTo(2000, 0);
+    // caller inverts to get token price in WETH
+    expect(1 / priceWethInToken).toBeCloseTo(0.0005, 6);
+  });
+
+  it("handles decimal mismatch: USDC (6 dec) as token0, WETH (18 dec) as token1", () => {
+    // 1 USDC = 0.0005 WETH (ETH at $2000)
+    // price_USDC_in_WETH_raw = 0.0005 * 10^(18-6) = 0.0005 * 1e12 = 5e8
+    const rawPrice = 0.0005 * 10 ** (18 - 6);
+    const sqrtPriceX96 = BigInt(Math.round(Math.sqrt(rawPrice) * Q96));
+    const price = sqrtPriceX96ToPrice(sqrtPriceX96, 6, 18);
+    expect(price).toBeCloseTo(0.0005, 4);
+  });
+});
+
+// ─── getUsdPrice with mocked RPC ──────────────────────────────────────────────
+
+describe("getUsdPrice", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    clearCaches();
+  });
+
+  it("returns 1.0 for USDC (stablecoin) without any RPC calls", async () => {
+    const client = makeClient();
+    const price = await getUsdPrice("eth", ETH_USDC, client);
+    expect(price).toBe(1.0);
+    expect(client.readContract).not.toHaveBeenCalled();
+  });
+
+  it("returns Chainlink price for WETH", async () => {
+    // Chainlink answer: 2500 USD with 8 decimal places
+    const answer = BigInt(Math.round(2500 * 1e8));
+    const client = makeClient({
+      [`${CHAINLINK_FEED_ETH}:latestRoundData`]: [0n, answer, 0n, 0n, 0n],
+    });
+    const price = await getUsdPrice("eth", ETH_WETH, client);
+    expect(price).toBeCloseTo(2500, 0);
+  });
+
+  it("falls back to DefiLlama when Chainlink fails, returns null when both fail", async () => {
+    // Chainlink throws on call (handler is a function that throws)
+    const client = makeClient({
+      [`${CHAINLINK_FEED_ETH}:latestRoundData`]: () => { throw new Error("RPC down"); },
+    });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, status: 500 }));
+    const price = await getUsdPrice("eth", ETH_WETH, client);
+    expect(price).toBeNull();
+  });
+
+  it("prices a non-quote token via V3 pool — token is token0 (FAKE_TOKEN_LO < USDC)", async () => {
+    // FAKE_TOKEN_LO (18 dec) is token0, USDC (6 dec) is token1
+    // We want price_FAKE_TOKEN_LO_in_USDC_human = 0.00025 USDC/token
+    // price_raw = 0.00025 * 10^(6-18) = 0.00025 / 1e12 = 2.5e-16
+    const rawPrice = 0.00025 * 10 ** (6 - 18);
+    const sqrtPriceX96 = BigInt(Math.round(Math.sqrt(rawPrice) * Q96));
+
+    const client = makeClient({
+      // getPool: only return FAKE_POOL for USDC pairs, null otherwise
+      [`${UNI_FACTORY}:getPool`]: (args?: unknown[]) => {
+        const a = (args?.[0] as string)?.toLowerCase();
+        const b = (args?.[1] as string)?.toLowerCase();
+        return (a === ETH_USDC || b === ETH_USDC) ? FAKE_POOL : NULL_ADDR;
+      },
+      [`${FAKE_POOL}:slot0`]: [sqrtPriceX96, 0, 0, 0, 0, 0, true],
+      [`${FAKE_POOL}:liquidity`]: 1_000_000n,
+      [`${FAKE_POOL}:token0`]: FAKE_TOKEN_LO,
+      [`${FAKE_POOL}:token1`]: ETH_USDC,
+      [`${FAKE_TOKEN_LO}:decimals`]: 18,
+      [`${ETH_USDC}:decimals`]: 6,
+    });
+
+    const price = await getUsdPrice("eth", FAKE_TOKEN_LO, client);
+    // USDC = $1.00, so USD price = 0.00025
+    expect(price).toBeCloseTo(0.00025, 6);
+  });
+
+  it("prices a non-quote token via V3 pool — token is token1 (FAKE_TOKEN_HI > WETH)", async () => {
+    // WETH (18 dec) is token0, FAKE_TOKEN_HI (18 dec) is token1
+    // price_WETH_in_FAKE_TOKEN_raw = 2000 (both 18 dec, ratio = 1:1)
+    // WETH price = $2500 via Chainlink
+    // FAKE_TOKEN price = (1/2000) WETH * $2500 = $1.25
+    const sqrtPriceX96 = BigInt(Math.round(Math.sqrt(2000) * Q96));
+    const chainlinkAnswer = BigInt(Math.round(2500 * 1e8));
+
+    const client = makeClient({
+      [`${CHAINLINK_FEED_ETH}:latestRoundData`]: [0n, chainlinkAnswer, 0n, 0n, 0n],
+      // getPool: only return FAKE_POOL for WETH pairs
+      [`${UNI_FACTORY}:getPool`]: (args?: unknown[]) => {
+        const a = (args?.[0] as string)?.toLowerCase();
+        const b = (args?.[1] as string)?.toLowerCase();
+        return (a === ETH_WETH || b === ETH_WETH) ? FAKE_POOL : NULL_ADDR;
+      },
+      [`${FAKE_POOL}:slot0`]: [sqrtPriceX96, 0, 0, 0, 0, 0, true],
+      [`${FAKE_POOL}:liquidity`]: 5_000_000n,
+      [`${FAKE_POOL}:token0`]: ETH_WETH,
+      [`${FAKE_POOL}:token1`]: FAKE_TOKEN_HI,
+      [`${ETH_WETH}:decimals`]: 18,
+      [`${FAKE_TOKEN_HI}:decimals`]: 18,
+    });
+
+    const price = await getUsdPrice("eth", FAKE_TOKEN_HI, client);
+    expect(price).toBeCloseTo(1.25, 2);
+  });
+
+  it("falls back to DefiLlama when no V3 pool exists", async () => {
+    const client = makeClient(); // all getPool → NULL_ADDR by default
+
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        coins: { [`ethereum:${FAKE_TOKEN_HI}`]: { price: 0.042 } },
+      }),
+    }));
+
+    const price = await getUsdPrice("eth", FAKE_TOKEN_HI, client);
+    expect(price).toBeCloseTo(0.042, 4);
+  });
+});
+
+// ─── getLiquidityUsd with mocked RPC ─────────────────────────────────────────
+
+describe("getLiquidityUsd", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    clearCaches();
+  });
+
+  it("returns quote reserve × quoteUsdPrice × 2", async () => {
+    // Pool: FAKE_TOKEN_LO(token0,18dec) / USDC(token1,6dec)
+    // USDC balance in pool = 500_000 human USDC = 500_000 * 1e6 raw
+    // liquidityUsd = 500_000 * 1.0 * 2 = 1_000_000
+    const sqrtPriceX96 = BigInt(Math.round(Q96)); // arbitrary, just needs to be non-zero
+
+    const client = makeClient({
+      [`${UNI_FACTORY}:getPool`]: FAKE_POOL,
+      [`${FAKE_POOL}:slot0`]: [sqrtPriceX96, 0, 0, 0, 0, 0, true],
+      [`${FAKE_POOL}:liquidity`]: 1_000_000n,
+      [`${FAKE_POOL}:token0`]: FAKE_TOKEN_LO,
+      [`${FAKE_POOL}:token1`]: ETH_USDC,
+      [`${FAKE_TOKEN_LO}:decimals`]: 18,
+      [`${ETH_USDC}:decimals`]: 6,
+      [`${ETH_USDC}:balanceOf`]: BigInt(500_000 * 1e6),
+    });
+
+    const liq = await getLiquidityUsd("eth", FAKE_TOKEN_LO, client);
+    expect(liq).toBeCloseTo(1_000_000, 0);
+  });
+
+  it("returns null when no pool found", async () => {
+    const client = makeClient(); // all getPool → NULL_ADDR
+    const liq = await getLiquidityUsd("eth", FAKE_TOKEN_HI, client);
+    expect(liq).toBeNull();
+  });
+});

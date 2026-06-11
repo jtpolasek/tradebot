@@ -3,3 +3,4 @@ export * from "./schema.js";
 export * from "./repositories/wallets.js";
 export * from "./repositories/chainState.js";
 export * from "./repositories/tokens.js";
+export * from "./repositories/priceMarks.js";

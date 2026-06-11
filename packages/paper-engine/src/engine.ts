@@ -10,6 +10,7 @@ import {
   updateFill,
   voidFill,
   upsertPosition,
+  closePositionByKey,
   getPosition,
   getOpenPositions,
   latestSnapshot,
@@ -414,13 +415,12 @@ export class PaperEngine {
 
       if (next.position.quantity < 1e-10) {
         this.positions.delete(key);
-        await upsertPosition(this.db, {
+        // Stamp closedAt so the flat position doesn't reload as a zombie at boot.
+        await closePositionByKey(this.db, {
           chain: signal.chain,
           tokenAddress: token.address,
-          qty: 0,
-          avgCostUsd: 0,
-          realizedPnlUsd: next.position.realizedPnlUsd,
           sourceWalletId: signal.walletId,
+          realizedPnlUsd: next.position.realizedPnlUsd,
         });
       } else {
         this.positions.set(key, {
@@ -532,14 +532,13 @@ export class PaperEngine {
         sourceWalletId: prov.sourceWalletId,
       });
     } else {
+      // No position existed before the provisional fill — close the row it created.
       this.positions.delete(prov.posKey);
-      await upsertPosition(this.db, {
+      await closePositionByKey(this.db, {
         chain: prov.chain,
         tokenAddress: prov.tokenAddress,
-        qty: 0,
-        avgCostUsd: 0,
-        realizedPnlUsd: 0,
         sourceWalletId: prov.sourceWalletId,
+        realizedPnlUsd: 0,
       });
     }
 

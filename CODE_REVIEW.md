@@ -22,7 +22,7 @@ Review of the Sonnet-built implementation against `PLAN.md`. Status in `CLAUDE.m
 - [x] **1.3 Mempool WS never independently recovers.** Fixed: the mempool `close` handler now schedules an independent reconnect (guarded so teardown/replacement doesn't double-open) instead of waiting for the main socket to cycle.
 - [x] **1.4 No wallet hot-reload.** Fixed: both the watcher (`startWalletReload` → reconnect) and the decoder (`reloadWallets` → `setWallets`) poll the DB every 60s, so a wallet added at runtime starts producing signals without a restart.
 - [x] **1.5 `resolveWalletId` falls back to raw address.** Fixed: the decoder now carries each wallet's DB UUID (`WalletIdentity`) and looks the id up from an in-memory map; a tracked address with no resolved id is skipped (logged) instead of writing a non-UUID FK. Removed the DB-lookup fallback entirely.
-- [ ] **1.6 Positions never closed.** Sell-to-zero leaves `closedAt` null; zombie rows reload at boot and get marked forever.
+- [x] **1.6 Positions never closed.** Fixed: added `closePositionByKey` (stamps `closedAt`) and the engine now calls it when a sell empties a position and when a voided provisional had no prior position — so flat rows no longer reload as open zombies. DB-backed regression test added.
 - [ ] **1.7 Deduper maps grow unboundedly** — dropped mempool txs never evicted.
 
 ## P2 — Dropped plan requirements

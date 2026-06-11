@@ -85,6 +85,29 @@ export async function closePosition(db: Db, id: string, realizedPnlUsd: number):
   }).where(eq(positions.id, id));
 }
 
+/**
+ * Close the open position matching (chain, token, sourceWalletId) by stamping `closedAt`,
+ * so a sell-to-zero doesn't leave a qty-0 "open" zombie that reloads at boot.
+ */
+export async function closePositionByKey(
+  db: Db,
+  key: { chain: ChainId; tokenAddress: string; sourceWalletId: string | null; realizedPnlUsd: number }
+): Promise<void> {
+  await db
+    .update(positions)
+    .set({ closedAt: new Date(), realizedPnlUsd: String(key.realizedPnlUsd), qty: "0" })
+    .where(
+      and(
+        eq(positions.chain, key.chain),
+        eq(positions.tokenAddress, key.tokenAddress.toLowerCase()),
+        isNull(positions.closedAt),
+        ...(key.sourceWalletId !== null
+          ? [eq(positions.sourceWalletId, key.sourceWalletId)]
+          : [isNull(positions.sourceWalletId)])
+      )
+    );
+}
+
 function rowToPosition(row: typeof positions.$inferSelect): PositionRow {
   return {
     id: row.id,

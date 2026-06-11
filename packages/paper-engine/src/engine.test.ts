@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vites
 import { randomUUID } from "crypto";
 import { sql } from "drizzle-orm";
 import { EventBus, type TradeSignal, type TokenRef } from "@tradebot/core";
-import { getDb, closeDb, insertWallet } from "@tradebot/store";
+import { getDb, closeDb, insertWallet, getOpenPositions } from "@tradebot/store";
 import { PaperEngine } from "./engine.js";
 
 // Require test DB
@@ -219,6 +219,34 @@ describe("PaperEngine integration", () => {
     const signal = makeSignal({ walletId, tokenOut: TOKEN_A, tokenIn: USDC });
     const result = engine.decide(signal, 1_000_000);
     expect(result).toEqual({ action: "skip", reason: "insufficient-balance" });
+  });
+
+  it("closes the position (no zombie open row) when a sell empties it", async () => {
+    const bus = new EventBus();
+    await db.execute(sql`TRUNCATE positions CASCADE`);
+    await db.execute(sql`TRUNCATE portfolio_snapshots CASCADE`);
+    const engine = new PaperEngine(db, bus, cfg() as never, mockRpcClient as never);
+    await engine.start();
+
+    const TOKEN_Z: TokenRef = { chain: "eth", address: "0xeeee000000000000000000000000000000000009", symbol: "TKNZ", decimals: 18 };
+    vi.mocked(getUsdPrice).mockResolvedValue(10);
+
+    // One buy, then several sells — once the remaining position value drops below the sell
+    // notional the engine sells the full remainder, driving qty to zero.
+    bus.emit("trade-signal", makeSignal({ walletId, side: "buy", tokenIn: USDC, tokenOut: TOKEN_Z }));
+    await new Promise<void>((r) => setTimeout(r, 200));
+    for (let i = 0; i < 4; i++) {
+      bus.emit("trade-signal", makeSignal({ walletId, side: "sell", tokenIn: TOKEN_Z, tokenOut: USDC }));
+      await new Promise<void>((r) => setTimeout(r, 150));
+    }
+
+    engine.stop();
+
+    // In-memory position is gone, and — the regression — no qty-0 "open" row remains in the DB.
+    const key = `eth:${TOKEN_Z.address.toLowerCase()}:${walletId}`;
+    expect(engine.getPositions().has(key)).toBe(false);
+    const openRows = await getOpenPositions(db);
+    expect(openRows.some((p) => p.tokenAddress === TOKEN_Z.address.toLowerCase())).toBe(false);
   });
 
   it("decide returns skip for zero-weight leader", async () => {

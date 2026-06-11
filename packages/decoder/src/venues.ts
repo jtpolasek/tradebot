@@ -30,6 +30,10 @@ export const VENUE_TOPIC_MAP: Record<string, keyof typeof VENUE_ABIS> = {
 // Pre-computed for reference (matches PLAN.md §status.md Critical Technical Details)
 export const TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
 
+// WETH wrap/unwrap events — used to detect native-ETH legs of a swap from receipt logs.
+export const WETH_DEPOSIT_TOPIC = topicHash("Deposit(address,uint256)");
+export const WETH_WITHDRAWAL_TOPIC = topicHash("Withdrawal(address,uint256)");
+
 // Known factory/singleton addresses for pool-origin verification
 export const KNOWN_FACTORIES: Record<ChainId, { v2?: string; v3?: string; v4PoolManager?: string }> = {
   eth: {

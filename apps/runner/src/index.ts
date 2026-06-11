@@ -83,7 +83,7 @@ async function main() {
   const weightProvider = new BrainWeightProvider();
   const scorerJob = startScorerJob(db, weightProvider);
 
-  const engine = new PaperEngine(db, bus, config, ethRpcClient, weightProvider);
+  const engine = new PaperEngine(db, bus, config, rpcClients, weightProvider);
   await engine.start();
 
   bus.on("raw-tx", (event) => {

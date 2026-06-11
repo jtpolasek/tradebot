@@ -268,4 +268,49 @@ describe("Decoder class", () => {
     expect(signals[0]!.tokenOut.address).toBe(MEME);
     expect(signals[0]!.venue).toBe("balance-delta");
   });
+
+  it("decodes a token→ETH sell from a WETH Withdrawal log (no ERC-20 inbound)", async () => {
+    const { Decoder } = await import("./decoder.js");
+    const bus = new EventBus();
+    const decoder = new Decoder({ bus, db: {} as never, wallets: [WALLET], rpcUrls: { eth: "http://0.0.0.0:1", base: "http://0.0.0.0:1" } });
+    decoder.start();
+
+    const signals: TradeSignal[] = [];
+    bus.on("trade-signal", (s) => signals.push(s));
+
+    const ROUTER = "0xcccccccccccccccccccccccccccccccccccccccc";
+    const MEME = "0x4444444444444444444444444444444444444444";
+    const padded = (addr: string) => `0x000000000000000000000000${addr.slice(2)}`;
+    const TRANSFER = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+    const WITHDRAWAL = "0x7fcf532c15f0a6db0bd6d0e038bea71d30d808c7d98cb3bf7268a95bf5081b65";
+
+    // Wallet sends MEME to router; router unwraps WETH and sends raw ETH back (Withdrawal log,
+    // no ERC-20 inbound Transfer to the wallet).
+    const logs = [
+      {
+        address: MEME,
+        topics: [TRANSFER, padded(WALLET), padded(ROUTER)],
+        data: "0x000000000000000000000000000000000000000000003635c9adc5dea00000",
+      },
+      {
+        address: WETH,
+        topics: [WITHDRAWAL, padded(ROUTER)],
+        data: "0x0000000000000000000000000000000000000000000000000de0b6b3a7640000", // 1 WETH
+      },
+    ];
+
+    const event: RawTxEvent = {
+      chain: "eth", source: "confirmed", txHash: "0x444", from: WALLET, to: ROUTER,
+      blockNumber: 4, observedAt: Date.now(), status: "success", logs,
+    };
+
+    bus.emit("raw-tx", event);
+    await tick();
+
+    expect(signals).toHaveLength(1);
+    expect(signals[0]!.side).toBe("sell"); // sold MEME for ETH
+    expect(signals[0]!.tokenIn.address).toBe(MEME);
+    expect(signals[0]!.tokenOut.address).toBe(WETH);
+    expect(signals[0]!.venue).toBe("balance-delta");
+  });
 });

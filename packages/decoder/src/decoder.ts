@@ -1,7 +1,7 @@
 import { createPublicClient, http } from "viem";
 import { mainnet, base } from "viem/chains";
 import PQueue from "p-queue";
-import { createLogger, isQuoteAsset, NATIVE_TOKEN_PLACEHOLDER } from "@tradebot/core";
+import { createLogger, isQuoteAsset, NATIVE_TOKEN_PLACEHOLDER, WETH } from "@tradebot/core";
 import type { EventBus, RawTxEvent, TradeSignal, ChainId } from "@tradebot/core";
 import type { Db } from "@tradebot/store";
 import { getActiveWallets } from "@tradebot/store";
@@ -10,7 +10,7 @@ import { strategyA } from "./strategyA.js";
 import { strategyC } from "./strategyC.js";
 import { analyzePairs } from "./balanceDelta.js";
 import { SignalDeduper } from "./deduper.js";
-import { TRANSFER_TOPIC } from "./venues.js";
+import { TRANSFER_TOPIC, WETH_WITHDRAWAL_TOPIC } from "./venues.js";
 import type { NormalizedTransfer } from "./types.js";
 
 const logger = createLogger("decoder");
@@ -197,9 +197,28 @@ export class Decoder {
       });
     }
 
-    // Handle WETH Deposit/Withdrawal from logs
-    // (WETH Deposit = wallet receives WETH, treat as inbound ETH equivalent)
-    // Already covered by ERC-20 Transfer from WETH contract if present
+    // Native ETH received: routers unwrap WETH→ETH and send raw ETH to the wallet, which produces
+    // no ERC-20 Transfer log. Detect it via WETH Withdrawal events when the wallet received no
+    // token (i.e. a token→ETH sell). This is the workhorse path for sells into native ETH.
+    if (inbound.length === 0 && outbound.length > 0) {
+      const wethAddr = WETH[event.chain];
+      let withdrawnWad = 0n;
+      for (const l of event.logs) {
+        if (l.topics[0]?.toLowerCase() === WETH_WITHDRAWAL_TOPIC && l.address.toLowerCase() === wethAddr) {
+          withdrawnWad += l.data && l.data !== "0x" ? BigInt(l.data) : 0n;
+        }
+      }
+      if (withdrawnWad > 0n) {
+        inbound = [{
+          tokenAddress: wethAddr,
+          symbol: "WETH",
+          decimals: 18,
+          amountRaw: withdrawnWad,
+          amountHuman: Number(withdrawnWad) / 1e18,
+          direction: "in",
+        }];
+      }
+    }
 
     if (outbound.length === 0 || inbound.length === 0) return null;
 

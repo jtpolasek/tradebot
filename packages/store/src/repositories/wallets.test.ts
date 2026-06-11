@@ -7,6 +7,8 @@ import { fileURLToPath } from "url";
 import * as schema from "../schema.js";
 import { insertWallet, getActiveWallets, setWalletActive } from "./wallets.js";
 import { getLastBlock, upsertLastBlock } from "./chainState.js";
+import { insertSignal } from "./signals.js";
+import { insertFill, getRecentFills } from "./paperFills.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -95,5 +97,57 @@ describe("chainState repository", () => {
     expect(await getLastBlock(db as Parameters<typeof getLastBlock>[0], "eth")).toBe(19_000_000);
     await upsertLastBlock(db as Parameters<typeof upsertLastBlock>[0], "eth", 19_000_001);
     expect(await getLastBlock(db as Parameters<typeof getLastBlock>[0], "eth")).toBe(19_000_001);
+  });
+});
+
+describe("paperFills repository", () => {
+  it("preserves the signal chain when reading fills", async () => {
+    const wallet = await insertWallet(db as Parameters<typeof insertWallet>[0], {
+      chain: "base",
+      address: "0x1111111111111111111111111111111111111111",
+      label: "Base leader",
+      active: true,
+    });
+
+    const observedAt = Date.now();
+    await insertSignal(db as Parameters<typeof insertSignal>[0], {
+      id: "11111111-1111-4111-8111-111111111111",
+      chain: "base",
+      walletId: wallet.id,
+      txHash: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      source: "confirmed",
+      side: "buy",
+      tokenIn: { chain: "base", address: "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", symbol: "", decimals: 18 },
+      tokenOut: { chain: "base", address: "0x4b9834edf361f5b7a2b7ac7aed3687304ba1aba3", symbol: "", decimals: 18 },
+      amountIn: 1n,
+      amountOut: 1n,
+      venue: "balance-delta",
+      observedAt,
+      confirmedAt: observedAt,
+      blockNumber: 1,
+    });
+
+    await insertFill(db as Parameters<typeof insertFill>[0], {
+      id: "22222222-2222-4222-8222-222222222222",
+      signalId: "11111111-1111-4111-8111-111111111111",
+      decidedAt: observedAt,
+      decision: "skipped",
+      skipReason: "no-liquidity-data",
+      side: "buy",
+      token: { chain: "base", address: "0x4b9834edf361f5b7a2b7ac7aed3687304ba1aba3", symbol: "", decimals: 18 },
+      quoteToken: { chain: "base", address: "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", symbol: "", decimals: 18 },
+      qty: 0,
+      priceUsd: 0,
+      notionalUsd: 0,
+      feeUsd: 0,
+      slippageBps: 0,
+      latencyMs: 0,
+      provisional: false,
+    });
+
+    const fills = await getRecentFills(db as Parameters<typeof getRecentFills>[0], new Date(observedAt - 1_000), 10);
+    expect(fills).toHaveLength(1);
+    expect(fills[0]?.token.chain).toBe("base");
+    expect(fills[0]?.quoteToken.chain).toBe("base");
   });
 });

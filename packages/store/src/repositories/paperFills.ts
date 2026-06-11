@@ -1,6 +1,6 @@
 import { eq, and, gte, desc } from "drizzle-orm";
 import type { Db } from "../db.js";
-import { paperFills } from "../schema.js";
+import { paperFills, tradeSignals } from "../schema.js";
 import type { PaperFill, TokenRef, ChainId } from "@tradebot/core";
 
 export type StoredFill = PaperFill & { voided: boolean };
@@ -29,12 +29,12 @@ export async function insertFill(db: Db, fill: PaperFill): Promise<void> {
 export async function updateFill(
   db: Db,
   id: string,
-  updates: { priceUsd: number; notionalUsd: number; provisional: boolean }
+  updates: { priceUsd?: number; notionalUsd?: number; provisional?: boolean }
 ): Promise<void> {
   await db.update(paperFills).set({
-    priceUsd: String(updates.priceUsd),
-    notionalUsd: String(updates.notionalUsd),
-    provisional: updates.provisional,
+    ...(updates.priceUsd !== undefined ? { priceUsd: String(updates.priceUsd) } : {}),
+    ...(updates.notionalUsd !== undefined ? { notionalUsd: String(updates.notionalUsd) } : {}),
+    ...(updates.provisional !== undefined ? { provisional: updates.provisional } : {}),
   }).where(eq(paperFills.id, id));
 }
 
@@ -43,20 +43,32 @@ export async function voidFill(db: Db, id: string): Promise<void> {
 }
 
 export async function getFill(db: Db, id: string): Promise<StoredFill | null> {
-  const rows = await db.select().from(paperFills).where(eq(paperFills.id, id)).limit(1);
+  const rows = await db
+    .select({
+      fill: paperFills,
+      chain: tradeSignals.chain,
+    })
+    .from(paperFills)
+    .innerJoin(tradeSignals, eq(paperFills.signalId, tradeSignals.id))
+    .where(eq(paperFills.id, id))
+    .limit(1);
   const row = rows[0];
   if (!row) return null;
-  return rowToFill(row);
+  return rowToFill(row.fill, row.chain as ChainId);
 }
 
 export async function getRecentFills(db: Db, since: Date, limit: number): Promise<StoredFill[]> {
   const rows = await db
-    .select()
+    .select({
+      fill: paperFills,
+      chain: tradeSignals.chain,
+    })
     .from(paperFills)
+    .innerJoin(tradeSignals, eq(paperFills.signalId, tradeSignals.id))
     .where(gte(paperFills.decidedAt, since))
     .orderBy(desc(paperFills.decidedAt))
     .limit(limit);
-  return rows.map(rowToFill);
+  return rows.map((row) => rowToFill(row.fill, row.chain as ChainId));
 }
 
 export type CopiedFillRow = {
@@ -71,7 +83,6 @@ export type CopiedFillRow = {
 };
 
 export async function getCopiedFills(db: Db): Promise<CopiedFillRow[]> {
-  const { tradeSignals } = await import("../schema.js");
   const rows = await db
     .select({
       id: paperFills.id,
@@ -99,8 +110,7 @@ export async function getCopiedFills(db: Db): Promise<CopiedFillRow[]> {
   }));
 }
 
-function rowToFill(row: typeof paperFills.$inferSelect): StoredFill {
-  const chain: ChainId = "eth";
+function rowToFill(row: typeof paperFills.$inferSelect, chain: ChainId): StoredFill {
   const token: TokenRef = { chain, address: row.tokenAddress, symbol: "", decimals: 18 };
   const quoteToken: TokenRef = { chain, address: row.quoteAddress, symbol: "", decimals: 6 };
   return {

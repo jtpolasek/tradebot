@@ -43,9 +43,15 @@ type InMemoryPosition = {
 type ProvisionalEntry = {
   fillId: string;
   signalId: string;
-  cashSpent: number;
-  qtyBought: number;
+  side: "buy" | "sell";
   posKey: string;
+  chain: ChainId;
+  tokenAddress: string;
+  sourceWalletId: string;
+  qty: number;
+  // Pre-trade snapshot, used to reverse the fill exactly on void/replace.
+  prevPortfolio: AccountingPortfolio;
+  prevPosition: InMemoryPosition | null;
 };
 
 export class PaperEngine {
@@ -56,13 +62,20 @@ export class PaperEngine {
   private queue: PQueue;
   private snapshotTimer: ReturnType<typeof setInterval> | null = null;
 
+  private readonly rpcClients: Record<ChainId, RpcClient>;
+
   constructor(
     private readonly db: Db,
     private readonly bus: EventBus,
     private readonly cfg: Config,
-    private readonly rpcClient: RpcClient,
+    rpcClients: RpcClient | Record<ChainId, RpcClient>,
     private readonly weights: WeightProvider = constantWeights,
   ) {
+    // Accept either a single client (legacy/tests) or a per-chain map.
+    this.rpcClients =
+      "eth" in rpcClients && "base" in rpcClients
+        ? (rpcClients as Record<ChainId, RpcClient>)
+        : { eth: rpcClients as RpcClient, base: rpcClients as RpcClient };
     this.cashUsd = cfg.PAPER_STARTING_CASH_USD;
     this.portfolio = { cashUsd: this.cashUsd, realizedPnlUsd: 0, feesPaidUsd: 0 };
     this.queue = new PQueue({ concurrency: 4 });
@@ -72,20 +85,20 @@ export class PaperEngine {
     await this.loadState();
 
     this.bus.on("trade-signal", (signal) => {
-      void this.queue.add(() => this.handleSignal(signal));
+      this.enqueue("handleSignal", () => this.handleSignal(signal), { txHash: signal.txHash });
     });
 
     this.bus.on("signal-confirmed", ({ signalId, confirmed }) => {
-      void this.queue.add(() => this.handleConfirmed(signalId, confirmed));
+      this.enqueue("handleConfirmed", () => this.handleConfirmed(signalId, confirmed), { signalId });
     });
 
     this.bus.on("signal-voided", ({ signalId, reason }) => {
-      void this.queue.add(() => this.handleVoided(signalId, reason as "reverted" | "replaced"));
+      this.enqueue("handleVoided", () => this.handleVoided(signalId, reason as "reverted" | "replaced"), { signalId });
     });
 
     // Snapshot every 5 minutes
     this.snapshotTimer = setInterval(
-      () => void this.queue.add(() => this.takeSnapshot()),
+      () => this.enqueue("takeSnapshot", () => this.takeSnapshot()),
       5 * 60_000
     );
 
@@ -97,6 +110,19 @@ export class PaperEngine {
       clearInterval(this.snapshotTimer);
       this.snapshotTimer = null;
     }
+  }
+
+  /** Enqueue work, catching errors so a failed handler never becomes an unhandled rejection. */
+  private enqueue(label: string, work: () => Promise<void>, ctx: Record<string, unknown> = {}): void {
+    void this.queue
+      .add(async () => {
+        try {
+          await work();
+        } catch (err) {
+          logger.error({ err, ...ctx }, `${label} failed`);
+        }
+      })
+      .catch((err: unknown) => logger.error({ err, ...ctx }, `${label} enqueue failed`));
   }
 
   private async loadState(): Promise<void> {
@@ -176,7 +202,7 @@ export class PaperEngine {
     // Get liquidity (needed for decide)
     let liquidityUsd: number | null = null;
     try {
-      liquidityUsd = await getLiquidityUsd(signal.chain, token.address, this.rpcClient);
+      liquidityUsd = await getLiquidityUsd(signal.chain, token.address, this.rpcClients[signal.chain]);
     } catch {
       // proceed with null — will skip with no-liquidity-data
     }
@@ -211,7 +237,7 @@ export class PaperEngine {
     // Get price
     let priceUsd = 0;
     try {
-      priceUsd = (await getUsdPrice(signal.chain, token.address, this.rpcClient)) ?? 0;
+      priceUsd = (await getUsdPrice(signal.chain, token.address, this.rpcClients[signal.chain])) ?? 0;
     } catch {
       priceUsd = 0;
     }
@@ -252,6 +278,13 @@ export class PaperEngine {
     let fillPrice: number;
     let qty: number;
     let notionalUsd: number;
+
+    // Snapshot pre-trade state so a provisional (mempool) fill can be reversed exactly on void/replace.
+    const snapKey = posKey(signal.chain, token.address, signal.walletId);
+    const provisional = signal.source === "mempool";
+    const prevPortfolio: AccountingPortfolio = { ...this.portfolio };
+    const prePos = this.positions.get(snapKey);
+    const prevPosition: InMemoryPosition | null = prePos ? { ...prePos } : null;
 
     if (signal.side === "buy") {
       fillPrice = priceUsd * (1 + slippageBps / 10_000);
@@ -406,7 +439,6 @@ export class PaperEngine {
       }
     }
 
-    const provisional = signal.source === "mempool";
     const fill: PaperFill = {
       id: fillId,
       signalId: signal.id,
@@ -426,14 +458,18 @@ export class PaperEngine {
 
     await insertFill(this.db, fill);
 
-    if (provisional && signal.side === "buy") {
-      const key = posKey(signal.chain, token.address, signal.walletId);
+    if (provisional) {
       this.provisionals.set(signal.id, {
         fillId,
         signalId: signal.id,
-        cashSpent: notionalUsd + feeUsd,
-        qtyBought: qty,
-        posKey: key,
+        side: signal.side,
+        posKey: snapKey,
+        chain: signal.chain,
+        tokenAddress: token.address,
+        sourceWalletId: signal.walletId,
+        qty,
+        prevPortfolio,
+        prevPosition,
       });
     }
 
@@ -452,41 +488,59 @@ export class PaperEngine {
     const token: TokenRef = confirmed.side === "buy" ? confirmed.tokenOut : confirmed.tokenIn;
     let newPrice = 0;
     try {
-      newPrice = (await getUsdPrice(confirmed.chain, token.address, this.rpcClient)) ?? 0;
+      newPrice = (await getUsdPrice(confirmed.chain, token.address, this.rpcClients[confirmed.chain])) ?? 0;
     } catch { /* keep 0 */ }
 
-    if (newPrice > 0) {
-      await updateFill(this.db, prov.fillId, {
-        priceUsd: newPrice,
-        notionalUsd: prov.qtyBought * newPrice,
-        provisional: false,
-      });
-    } else {
-      await updateFill(this.db, prov.fillId, {
-        priceUsd: newPrice,
-        notionalUsd: 0,
-        provisional: false,
-      });
+    // Re-price failed — keep the provisional fill at its mempool estimate rather than
+    // zeroing a real fill. Just clear the provisional flag.
+    if (newPrice <= 0) {
+      await updateFill(this.db, prov.fillId, { provisional: false });
+      this.provisionals.delete(signalId);
+      logger.warn({ signalId }, "confirmed re-price unavailable — keeping mempool estimate");
+      return;
     }
 
+    // Update the recorded fill to the confirmed price (qty fixed). Cash/position were already
+    // committed at the estimate; mempool→confirm is seconds apart, so we don't retroactively
+    // rewrite the ledger (other trades may have touched the position in between).
+    await updateFill(this.db, prov.fillId, {
+      priceUsd: newPrice,
+      notionalUsd: prov.qty * newPrice,
+      provisional: false,
+    });
+
     this.provisionals.delete(signalId);
-    logger.debug({ signalId }, "provisional fill confirmed");
+    logger.debug({ signalId, newPrice }, "provisional fill confirmed");
   }
 
   private async handleVoided(signalId: string, reason: "reverted" | "replaced"): Promise<void> {
     const prov = this.provisionals.get(signalId);
     if (!prov) return;
 
-    // Restore cash and position
-    this.cashUsd += prov.cashSpent;
-    this.portfolio.cashUsd = this.cashUsd;
+    // Restore portfolio and position to the exact pre-trade snapshot, then persist.
+    this.portfolio = { ...prov.prevPortfolio };
+    this.cashUsd = this.portfolio.cashUsd;
 
-    const pos = this.positions.get(prov.posKey);
-    if (pos) {
-      pos.qty -= prov.qtyBought;
-      if (pos.qty < 1e-10) {
-        this.positions.delete(prov.posKey);
-      }
+    if (prov.prevPosition) {
+      this.positions.set(prov.posKey, { ...prov.prevPosition });
+      await upsertPosition(this.db, {
+        chain: prov.chain,
+        tokenAddress: prov.tokenAddress,
+        qty: prov.prevPosition.qty,
+        avgCostUsd: prov.prevPosition.avgCostUsd,
+        realizedPnlUsd: prov.prevPosition.realizedPnlUsd,
+        sourceWalletId: prov.sourceWalletId,
+      });
+    } else {
+      this.positions.delete(prov.posKey);
+      await upsertPosition(this.db, {
+        chain: prov.chain,
+        tokenAddress: prov.tokenAddress,
+        qty: 0,
+        avgCostUsd: 0,
+        realizedPnlUsd: 0,
+        sourceWalletId: prov.sourceWalletId,
+      });
     }
 
     await voidFill(this.db, prov.fillId);

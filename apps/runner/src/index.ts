@@ -68,9 +68,8 @@ async function main() {
   logger.info("Database connection ok.");
 
   const wallets = await getActiveWallets(db);
-  const walletAddresses = wallets.map((w) => w.address);
 
-  const decoder = new Decoder({ bus, db, wallets: walletAddresses });
+  const decoder = new Decoder({ bus, db, wallets: wallets.map((w) => ({ address: w.address, id: w.id })) });
   decoder.start();
 
   // RPC clients for pricing (loose structural interfaces for viem compat)

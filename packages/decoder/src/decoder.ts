@@ -6,6 +6,11 @@ import type { EventBus, RawTxEvent, TradeSignal, ChainId } from "@tradebot/core"
 import type { Db } from "@tradebot/store";
 import { getActiveWallets } from "@tradebot/store";
 import { TokenMetadataResolver } from "./tokenMetadata.js";
+
+/** A tracked wallet's address + its DB UUID, so signals carry a valid FK. */
+export type WalletIdentity = { address: string; id: string };
+
+const WALLET_RELOAD_MS = 60_000;
 import { strategyA } from "./strategyA.js";
 import { strategyC } from "./strategyC.js";
 import { analyzePairs } from "./balanceDelta.js";
@@ -18,7 +23,7 @@ const logger = createLogger("decoder");
 type DecoderOpts = {
   bus: EventBus;
   db: Db;
-  wallets: string[];
+  wallets: WalletIdentity[];
   /** Override RPC URLs for testing; defaults to Alchemy from env */
   rpcUrls?: { eth?: string; base?: string };
 };
@@ -31,11 +36,13 @@ export class Decoder {
   private readonly meta: TokenMetadataResolver;
   private readonly deduper = new SignalDeduper();
   private readonly queue = new PQueue({ concurrency: 4 });
+  private walletReloadTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(opts: DecoderOpts) {
     this.bus = opts.bus;
     this.db = opts.db;
-    this.wallets = new Set(opts.wallets.map((w) => w.toLowerCase()));
+    this.wallets = new Set();
+    this.applyWallets(opts.wallets);
 
     const ethUrl = opts.rpcUrls?.eth ?? `https://eth-mainnet.g.alchemy.com/v2/${process.env["ALCHEMY_API_KEY"] ?? ""}`;
     const baseUrl = opts.rpcUrls?.base ?? `https://base-mainnet.g.alchemy.com/v2/${process.env["BASE_ALCHEMY_API_KEY"] ?? process.env["ALCHEMY_API_KEY"] ?? ""}`;
@@ -49,23 +56,56 @@ export class Decoder {
     this.bus.on("raw-tx", (event) => {
       void this.handleRawTx(event);
     });
+    const timer = setInterval(() => void this.reloadWallets(), WALLET_RELOAD_MS);
+    timer.unref?.();
+    this.walletReloadTimer = timer;
     logger.info("Decoder started");
   }
 
   stop(): void {
+    if (this.walletReloadTimer) {
+      clearInterval(this.walletReloadTimer);
+      this.walletReloadTimer = null;
+    }
     logger.info("Decoder stopped");
   }
 
-  /** Exposed for testing to update the wallet set at runtime. */
-  setWallets(wallets: string[]): void {
-    this.wallets = new Set(wallets.map((w) => w.toLowerCase()));
-    this.walletIds.clear();
+  /** Replace the tracked wallet set + id map (Phase 6 hot-reload). */
+  setWallets(wallets: WalletIdentity[]): void {
+    this.applyWallets(wallets);
+  }
+
+  private applyWallets(wallets: WalletIdentity[]): void {
+    const next = new Set<string>();
+    const nextIds = new Map<string, string>();
+    for (const w of wallets) {
+      const addr = w.address.toLowerCase();
+      next.add(addr);
+      nextIds.set(addr, w.id);
+    }
+    this.wallets = next;
+    this.walletIds = nextIds;
+  }
+
+  /** Poll the DB so wallets added at runtime start producing signals without a restart. */
+  private async reloadWallets(): Promise<void> {
+    try {
+      const wallets = await getActiveWallets(this.db);
+      this.applyWallets(wallets.map((w) => ({ address: w.address, id: w.id })));
+    } catch (err) {
+      logger.warn({ err }, "wallet reload failed");
+    }
   }
 
   private async handleRawTx(event: RawTxEvent): Promise<void> {
     const wallet = this.wallets.has(event.from.toLowerCase()) ? event.from.toLowerCase() : null;
     if (!wallet) return;
-    const walletId = await this.resolveWalletId(event.chain, wallet);
+    const walletId = this.walletIds.get(wallet);
+    if (!walletId) {
+      // Tracked address with no resolved UUID — skip rather than write a bad FK.
+      logger.warn({ chain: event.chain, wallet }, "no wallet id for tracked address — skipping");
+      return;
+    }
 
     try {
       if (event.status === "reverted") {
@@ -121,7 +161,7 @@ export class Decoder {
     }
 
     // Fall through to Strategy B (balance delta)
-    const bResult = await this.runStrategyB(event, wallet);
+    const bResult = await this.runStrategyB(event, wallet, walletId);
     if (bResult) {
       await this.resolveAndEmitConfirmed(event, bResult);
     }
@@ -147,7 +187,8 @@ export class Decoder {
 
   private async runStrategyB(
     event: RawTxEvent,
-    wallet: string
+    wallet: string,
+    walletId: string
   ): Promise<TradeSignal | null> {
     if (!event.logs) return null;
 
@@ -226,25 +267,7 @@ export class Decoder {
     if (result.status === "skipped" || result.side === "unknown") return null;
     if (!result.tokenIn || !result.tokenOut) return null;
 
-    const walletId = await this.resolveWalletId(event.chain, wallet);
     return this.buildSignalFromDelta(event, walletId, result.tokenIn, result.tokenOut, result.side as "buy" | "sell");
-  }
-
-  private async resolveWalletId(chain: ChainId, address: string): Promise<string> {
-    const key = `${chain}:${address.toLowerCase()}`;
-    const cached = this.walletIds.get(key);
-    if (cached) return cached;
-
-    try {
-      const wallets = await getActiveWallets(this.db, chain);
-      for (const wallet of wallets) {
-        this.walletIds.set(`${wallet.chain}:${wallet.address.toLowerCase()}`, wallet.id);
-      }
-    } catch {
-      // Unit tests can pass a lightweight Db stub; keep those isolated tests working.
-    }
-
-    return this.walletIds.get(key) ?? address;
   }
 
   private buildSignal(

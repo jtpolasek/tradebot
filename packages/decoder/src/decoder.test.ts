@@ -189,11 +189,12 @@ async function tick(ms = 100) {
 
 describe("Decoder class", () => {
   const WALLET = "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+  const WALLET_ID = "11111111-1111-1111-1111-111111111111";
 
   it("emits no signal-voided when a reverted tx has no pending mempool signal", async () => {
     const { Decoder } = await import("./decoder.js");
     const bus = new EventBus();
-    const decoder = new Decoder({ bus, db: {} as never, wallets: [WALLET], rpcUrls: { eth: "http://0.0.0.0:1", base: "http://0.0.0.0:1" } });
+    const decoder = new Decoder({ bus, db: {} as never, wallets: [{ address: WALLET, id: WALLET_ID }], rpcUrls: { eth: "http://0.0.0.0:1", base: "http://0.0.0.0:1" } });
     decoder.start();
 
     const voided: unknown[] = [];
@@ -211,7 +212,7 @@ describe("Decoder class", () => {
   it("ignores raw-tx events from untracked wallets", async () => {
     const { Decoder } = await import("./decoder.js");
     const bus = new EventBus();
-    const decoder = new Decoder({ bus, db: {} as never, wallets: [WALLET], rpcUrls: { eth: "http://0.0.0.0:1", base: "http://0.0.0.0:1" } });
+    const decoder = new Decoder({ bus, db: {} as never, wallets: [{ address: WALLET, id: WALLET_ID }], rpcUrls: { eth: "http://0.0.0.0:1", base: "http://0.0.0.0:1" } });
     decoder.start();
 
     const signals: unknown[] = [];
@@ -229,7 +230,7 @@ describe("Decoder class", () => {
   it("emits trade-signal for a confirmed tx with recognisable Transfer logs (Strategy B buy)", async () => {
     const { Decoder } = await import("./decoder.js");
     const bus = new EventBus();
-    const decoder = new Decoder({ bus, db: {} as never, wallets: [WALLET], rpcUrls: { eth: "http://0.0.0.0:1", base: "http://0.0.0.0:1" } });
+    const decoder = new Decoder({ bus, db: {} as never, wallets: [{ address: WALLET, id: WALLET_ID }], rpcUrls: { eth: "http://0.0.0.0:1", base: "http://0.0.0.0:1" } });
     decoder.start();
 
     const signals: TradeSignal[] = [];
@@ -267,12 +268,33 @@ describe("Decoder class", () => {
     expect(signals[0]!.tokenIn.address).toBe(WETH);
     expect(signals[0]!.tokenOut.address).toBe(MEME);
     expect(signals[0]!.venue).toBe("balance-delta");
+    expect(signals[0]!.walletId).toBe(WALLET_ID); // carries the DB UUID, never the raw address
+  });
+
+  it("skips a tracked address that has no resolved wallet id (no bad FK)", async () => {
+    const { Decoder } = await import("./decoder.js");
+    const bus = new EventBus();
+    // setWallets with an address-only identity leaves the id map without this address.
+    const decoder = new Decoder({ bus, db: {} as never, wallets: [], rpcUrls: { eth: "http://0.0.0.0:1", base: "http://0.0.0.0:1" } });
+    (decoder as unknown as { wallets: Set<string> }).wallets = new Set([WALLET]);
+    decoder.start();
+
+    const signals: unknown[] = [];
+    bus.on("trade-signal", (s) => signals.push(s));
+
+    bus.emit("raw-tx", {
+      chain: "eth", source: "confirmed", txHash: "0x444", from: WALLET, to: "0x1",
+      blockNumber: 4, observedAt: Date.now(), status: "success",
+    });
+
+    await tick();
+    expect(signals).toHaveLength(0);
   });
 
   it("decodes a token→ETH sell from a WETH Withdrawal log (no ERC-20 inbound)", async () => {
     const { Decoder } = await import("./decoder.js");
     const bus = new EventBus();
-    const decoder = new Decoder({ bus, db: {} as never, wallets: [WALLET], rpcUrls: { eth: "http://0.0.0.0:1", base: "http://0.0.0.0:1" } });
+    const decoder = new Decoder({ bus, db: {} as never, wallets: [{ address: WALLET, id: WALLET_ID }], rpcUrls: { eth: "http://0.0.0.0:1", base: "http://0.0.0.0:1" } });
     decoder.start();
 
     const signals: TradeSignal[] = [];

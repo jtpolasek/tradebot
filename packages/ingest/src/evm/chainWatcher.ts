@@ -15,6 +15,8 @@ const BACKFILL_CHUNK_BY_CHAIN: Record<ChainId, number> = {
   base: 10,
 };
 const FAILOVER_TIMEOUT_MS = 60_000;
+const WALLET_RELOAD_MS = 60_000;
+const MEMPOOL_RECONNECT_MS = 1_000;
 
 const VIEM_CHAINS = { eth: mainnet, base: base } as const;
 
@@ -88,6 +90,8 @@ export class ChainWatcher {
   private client: Client | null = null;
   private cleanupFns: Array<() => void> = [];
   private mempoolWs: WebSocket | null = null;
+  private mempoolReconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private walletReloadTimer: ReturnType<typeof setInterval> | null = null;
   private lastEventTs = 0;
   private usingFallback = false;
   private primaryDownSince: number | null = null;
@@ -107,12 +111,40 @@ export class ChainWatcher {
   async start(): Promise<void> {
     this.stopped = false;
     await this.loadWallets();
+    this.startWalletReload();
     void this.runLoop();
   }
 
   stop(): void {
     this.stopped = true;
+    if (this.walletReloadTimer) {
+      clearInterval(this.walletReloadTimer);
+      this.walletReloadTimer = null;
+    }
     this.teardown();
+  }
+
+  /** Poll the DB for wallet changes and reconnect so new wallets get subscribed (Phase 6 hot-reload). */
+  private startWalletReload(): void {
+    const timer = setInterval(() => void this.reloadWallets(), WALLET_RELOAD_MS);
+    timer.unref?.();
+    this.walletReloadTimer = timer;
+  }
+
+  private async reloadWallets(): Promise<void> {
+    if (this.stopped) return;
+    const before = this.wallets.join(",");
+    try {
+      await this.loadWallets();
+    } catch (err) {
+      this.logger.warn({ err }, "wallet reload failed");
+      return;
+    }
+    if (this.wallets.join(",") !== before) {
+      this.logger.info({ count: this.wallets.length }, "wallet set changed — reconnecting");
+      // Tearing down resolves the in-flight connect(), so runLoop reconnects and re-subscribes.
+      this.teardown();
+    }
   }
 
   private async loadWallets(): Promise<void> {
@@ -126,9 +158,15 @@ export class ChainWatcher {
       try { fn(); } catch { /* ignore */ }
     }
     this.cleanupFns = [];
+    if (this.mempoolReconnectTimer) {
+      clearTimeout(this.mempoolReconnectTimer);
+      this.mempoolReconnectTimer = null;
+    }
     if (this.mempoolWs) {
-      this.mempoolWs.close();
+      // Null first so the 'close' handler doesn't schedule an independent reconnect.
+      const ws = this.mempoolWs;
       this.mempoolWs = null;
+      ws.close();
     }
     this.client = null;
   }
@@ -140,11 +178,26 @@ export class ChainWatcher {
         await this.connect();
         attempt = 0;
       } catch (err) {
+        // Tear down the failed connection's watchers/sockets before retrying so they don't leak.
+        this.teardown();
         if (this.stopped) break;
+        this.onConnectionFailure();
         const delay = backoffMs(attempt++, 1_000, 30_000);
-        this.logger.error({ err, attempt, delay }, "connection error — reconnecting");
+        this.logger.error({ err, attempt, delay, usingFallback: this.usingFallback }, "connection error — reconnecting");
         await sleep(delay);
       }
+    }
+  }
+
+  /** On a failed attempt, flip to the QuickNode fallback; if the fallback also failed, retry primary. */
+  private onConnectionFailure(): void {
+    if (!this.fallbackWsUrl) return;
+    if (!this.usingFallback) {
+      this.usingFallback = true;
+      this.primaryDownSince = Date.now();
+    } else {
+      this.usingFallback = false;
+      this.primaryDownSince = null;
     }
   }
 
@@ -181,15 +234,15 @@ export class ChainWatcher {
   }
 
   private resolveWsUrl(): string {
-    if (
-      this.fallbackWsUrl &&
-      this.usingFallback &&
-      this.primaryDownSince !== null &&
-      Date.now() - this.primaryDownSince < FAILOVER_TIMEOUT_MS
-    ) {
+    if (this.fallbackWsUrl && this.usingFallback) {
+      // After the failover window expires, give the primary another chance.
+      if (this.primaryDownSince !== null && Date.now() - this.primaryDownSince >= FAILOVER_TIMEOUT_MS) {
+        this.usingFallback = false;
+        this.primaryDownSince = null;
+        return this.primaryWsUrl;
+      }
       return this.fallbackWsUrl;
     }
-    this.usingFallback = false;
     return this.primaryWsUrl;
   }
 
@@ -347,9 +400,15 @@ export class ChainWatcher {
     });
 
     ws.on("close", () => {
-      if (!this.stopped) {
-        this.logger.debug("mempool WS closed — will reopen on next connect");
-      }
+      // Reopen the mempool socket independently — the main confirmed/heads connection may stay
+      // healthy, in which case connect() never re-runs and the mempool feed would be lost.
+      if (this.stopped || this.mempoolWs !== ws) return;
+      this.mempoolWs = null;
+      this.logger.warn("mempool WS closed — reopening");
+      this.mempoolReconnectTimer = setTimeout(() => {
+        this.mempoolReconnectTimer = null;
+        if (!this.stopped) this.subscribeMempoolPending();
+      }, MEMPOOL_RECONNECT_MS);
     });
   }
 

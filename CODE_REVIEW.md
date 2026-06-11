@@ -17,10 +17,10 @@ Review of the Sonnet-built implementation against `PLAN.md`. Status in `CLAUDE.m
 
 ## P1 — Resilience / correctness
 
-- [ ] **1.1 ChainWatcher failover is dead code.** `usingFallback`/`primaryDownSince` are read but never assigned — QuickNode failover can't trigger.
-- [ ] **1.2 No teardown on reconnect.** `runLoop` reconnects without `teardown()`; viem watchers and mempool WS leak, `cleanupFns` grows unbounded.
-- [ ] **1.3 Mempool WS never independently recovers** while the main socket stays healthy.
-- [ ] **1.4 No wallet hot-reload.** Watchers/decoder load wallets once at boot; Phase 6 "add wallet → signals appear" acceptance cannot pass.
+- [x] **1.1 ChainWatcher failover is dead code.** Fixed: `onConnectionFailure()` now flips `usingFallback`/`primaryDownSince` on a failed attempt (primary→fallback, then back to primary if the fallback also fails or the failover window expires).
+- [x] **1.2 No teardown on reconnect.** Fixed: `runLoop` now calls `teardown()` in the catch before retrying, so viem watchers + mempool WS are released and `cleanupFns` no longer grows.
+- [x] **1.3 Mempool WS never independently recovers.** Fixed: the mempool `close` handler now schedules an independent reconnect (guarded so teardown/replacement doesn't double-open) instead of waiting for the main socket to cycle.
+- [~] **1.4 No wallet hot-reload.** Watcher half done: `startWalletReload()` polls the DB every 60s and reconnects on change. Decoder half still pending.
 - [ ] **1.5 `resolveWalletId` falls back to raw address** → non-UUID into a uuid FK column.
 - [ ] **1.6 Positions never closed.** Sell-to-zero leaves `closedAt` null; zombie rows reload at boot and get marked forever.
 - [ ] **1.7 Deduper maps grow unboundedly** — dropped mempool txs never evicted.

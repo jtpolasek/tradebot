@@ -187,6 +187,85 @@ describe("ChainWatcher backfill logic", () => {
   });
 });
 
+describe("ChainWatcher failover", () => {
+  type Internals = {
+    fallbackWsUrl: string | undefined;
+    usingFallback: boolean;
+    primaryDownSince: number | null;
+    onConnectionFailure(): void;
+    resolveWsUrl(): string;
+  };
+
+  function makeWatcher(fallback?: string) {
+    return new ChainWatcher({
+      chain: "eth",
+      primaryWsUrl: "wss://primary",
+      ...(fallback ? { fallbackWsUrl: fallback } : {}),
+      db: makeMockDb(),
+      bus: new EventBus(),
+      recorder: makeRecorder(),
+    }) as unknown as ChainWatcher & Internals;
+  }
+
+  it("switches to the fallback URL after the primary fails", () => {
+    const w = makeWatcher("wss://fallback");
+    expect(w.resolveWsUrl()).toBe("wss://primary");
+    w.onConnectionFailure();
+    expect(w.usingFallback).toBe(true);
+    expect(w.resolveWsUrl()).toBe("wss://fallback");
+  });
+
+  it("retries the primary after the fallback also fails", () => {
+    const w = makeWatcher("wss://fallback");
+    w.onConnectionFailure(); // primary down → fallback
+    w.onConnectionFailure(); // fallback down → primary
+    expect(w.usingFallback).toBe(false);
+    expect(w.resolveWsUrl()).toBe("wss://primary");
+  });
+
+  it("retries the primary once the failover window expires", () => {
+    const w = makeWatcher("wss://fallback");
+    w.onConnectionFailure();
+    w.primaryDownSince = Date.now() - 61_000; // past FAILOVER_TIMEOUT_MS
+    expect(w.resolveWsUrl()).toBe("wss://primary");
+    expect(w.usingFallback).toBe(false);
+  });
+
+  it("is a no-op without a configured fallback", () => {
+    const w = makeWatcher();
+    w.onConnectionFailure();
+    expect(w.usingFallback).toBe(false);
+    expect(w.resolveWsUrl()).toBe("wss://primary");
+  });
+});
+
+describe("ChainWatcher teardown", () => {
+  it("runs and clears all cleanup fns and drops the client", () => {
+    const watcher = new ChainWatcher({
+      chain: "eth",
+      primaryWsUrl: "wss://placeholder",
+      db: makeMockDb(),
+      bus: new EventBus(),
+      recorder: makeRecorder(),
+    });
+
+    const unwatch = vi.fn();
+    const internals = watcher as unknown as {
+      cleanupFns: Array<() => void>;
+      client: unknown;
+      teardown(): void;
+    };
+    internals.cleanupFns = [unwatch, unwatch];
+    internals.client = {};
+
+    internals.teardown();
+
+    expect(unwatch).toHaveBeenCalledTimes(2);
+    expect(internals.cleanupFns).toHaveLength(0);
+    expect(internals.client).toBeNull();
+  });
+});
+
 describe("ChainWatcher emit", () => {
   it("emits raw-tx events on the bus", async () => {
     const bus = new EventBus();

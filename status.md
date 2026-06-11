@@ -6,13 +6,14 @@
 
 ## Current Phase
 
-**Phase 5 — Brain: scoring & adaptation** — NOT STARTED.
+**Phase 6 — API + dashboard** — NOT STARTED.
 
 - Phase 0: COMPLETE (commit `2f760ed`)
 - Phase 1: COMPLETE (commit `0024d63`)
 - Phase 2: COMPLETE (commit `2302607`) — 79 total tests passing
 - Phase 3: COMPLETE (commit `d23ad0c`) — 91 total tests passing
 - Phase 4: COMPLETE (commit `f71c06a`) — 149 total tests passing
+- Phase 5: COMPLETE (commit `747a828`) — 193 non-Docker tests passing
 
 ---
 

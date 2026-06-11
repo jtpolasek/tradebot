@@ -4,6 +4,7 @@ dist/
 .env.*
 !.env.example
 recordings/
+.dev-logs/
 *.tsbuildinfo
 .turbo/
 .next/

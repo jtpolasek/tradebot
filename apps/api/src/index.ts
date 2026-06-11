@@ -23,6 +23,7 @@ import {
   getAdaptationLogs,
   getAllSettings,
   setSetting,
+  deleteSetting,
   latestMark,
 } from "@tradebot/store";
 
@@ -194,6 +195,12 @@ app.patch("/settings", async (req, reply) => {
   const body = PatchSettingBody.safeParse(req.body);
   if (!body.success) return reply.code(400).send({ error: body.error.message });
   await setSetting(db, body.data.key, body.data.value);
+  reply.send({ ok: true });
+});
+
+app.delete("/settings/:key", async (req, reply) => {
+  const { key } = req.params as { key: string };
+  await deleteSetting(db, key);
   reply.send({ ok: true });
 });
 

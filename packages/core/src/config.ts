@@ -1,7 +1,10 @@
 import { z } from "zod";
 import { config as loadDotenv } from "dotenv";
+import { resolve, dirname } from "path";
+import { fileURLToPath } from "url";
 
-loadDotenv();
+const __dirname = dirname(fileURLToPath(import.meta.url));
+loadDotenv({ path: resolve(__dirname, "../../../.env") });
 
 const schema = z.object({
   DATABASE_URL: z.string().url(),

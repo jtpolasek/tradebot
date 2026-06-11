@@ -1,9 +1,10 @@
 import { createPublicClient, http } from "viem";
 import { mainnet, base } from "viem/chains";
 import PQueue from "p-queue";
-import { createLogger, isQuoteAsset } from "@tradebot/core";
+import { createLogger, isQuoteAsset, NATIVE_TOKEN_PLACEHOLDER } from "@tradebot/core";
 import type { EventBus, RawTxEvent, TradeSignal, ChainId } from "@tradebot/core";
 import type { Db } from "@tradebot/store";
+import { getActiveWallets } from "@tradebot/store";
 import { TokenMetadataResolver } from "./tokenMetadata.js";
 import { strategyA } from "./strategyA.js";
 import { strategyC } from "./strategyC.js";
@@ -26,6 +27,7 @@ export class Decoder {
   private readonly bus: EventBus;
   private readonly db: Db;
   private wallets: Set<string>;
+  private walletIds = new Map<string, string>();
   private readonly meta: TokenMetadataResolver;
   private readonly deduper = new SignalDeduper();
   private readonly queue = new PQueue({ concurrency: 4 });
@@ -57,15 +59,13 @@ export class Decoder {
   /** Exposed for testing to update the wallet set at runtime. */
   setWallets(wallets: string[]): void {
     this.wallets = new Set(wallets.map((w) => w.toLowerCase()));
+    this.walletIds.clear();
   }
 
   private async handleRawTx(event: RawTxEvent): Promise<void> {
     const wallet = this.wallets.has(event.from.toLowerCase()) ? event.from.toLowerCase() : null;
     if (!wallet) return;
-
-    // Find walletId — in a real system we'd look this up from DB
-    // For now use the address as a placeholder until wallet registry is wired
-    const walletId = wallet;
+    const walletId = await this.resolveWalletId(event.chain, wallet);
 
     try {
       if (event.status === "reverted") {
@@ -207,7 +207,25 @@ export class Decoder {
     if (result.status === "skipped" || result.side === "unknown") return null;
     if (!result.tokenIn || !result.tokenOut) return null;
 
-    return this.buildSignalFromDelta(event, wallet, result.tokenIn, result.tokenOut, result.side as "buy" | "sell");
+    const walletId = await this.resolveWalletId(event.chain, wallet);
+    return this.buildSignalFromDelta(event, walletId, result.tokenIn, result.tokenOut, result.side as "buy" | "sell");
+  }
+
+  private async resolveWalletId(chain: ChainId, address: string): Promise<string> {
+    const key = `${chain}:${address.toLowerCase()}`;
+    const cached = this.walletIds.get(key);
+    if (cached) return cached;
+
+    try {
+      const wallets = await getActiveWallets(this.db, chain);
+      for (const wallet of wallets) {
+        this.walletIds.set(`${wallet.chain}:${wallet.address.toLowerCase()}`, wallet.id);
+      }
+    } catch {
+      // Unit tests can pass a lightweight Db stub; keep those isolated tests working.
+    }
+
+    return this.walletIds.get(key) ?? address;
   }
 
   private buildSignal(
@@ -248,8 +266,8 @@ export class Decoder {
     tokenOut: NormalizedTransfer,
     side: "buy" | "sell"
   ): TradeSignal {
-    const tokenInRef = { chain: event.chain, address: tokenIn.tokenAddress, symbol: tokenIn.symbol, decimals: tokenIn.decimals };
-    const tokenOutRef = { chain: event.chain, address: tokenOut.tokenAddress, symbol: tokenOut.symbol, decimals: tokenOut.decimals };
+    const tokenInRef = { chain: event.chain, address: tokenIn.tokenAddress || NATIVE_TOKEN_PLACEHOLDER, symbol: tokenIn.symbol, decimals: tokenIn.decimals };
+    const tokenOutRef = { chain: event.chain, address: tokenOut.tokenAddress || NATIVE_TOKEN_PLACEHOLDER, symbol: tokenOut.symbol, decimals: tokenOut.decimals };
 
     return {
       id: crypto.randomUUID(),

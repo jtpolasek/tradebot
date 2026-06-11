@@ -27,7 +27,8 @@ export const QUOTE_ASSETS: Record<ChainId, string[]> = {
 export const NATIVE_TOKEN_PLACEHOLDER = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
 
 export function isQuoteAsset(chain: ChainId, address: string): boolean {
-  return QUOTE_ASSETS[chain].includes(address.toLowerCase());
+  const addr = address.toLowerCase();
+  return addr === NATIVE_TOKEN_PLACEHOLDER || QUOTE_ASSETS[chain].includes(addr);
 }
 
 export function wethRef(chain: ChainId): TokenRef {

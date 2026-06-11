@@ -135,9 +135,55 @@ describe("ChainWatcher backfill logic", () => {
     (watcher as unknown as { client: typeof mockClient }).client = mockClient;
     (watcher as unknown as { wallets: string[] }).wallets = ["0xaaaa"];
 
-    // Range: 1 to 1200 → 3 chunks (1-500, 501-1000, 1001-1200)
+    // Range: 1 to 1200 -> 3 chunks (1-500, 501-1000, 1001-1200).
+    // Each chunk queries both transfer directions: from watched wallets and to watched wallets.
     await (watcher as unknown as { backfillGap(f: number, t: number): Promise<void> }).backfillGap(1, 1200);
-    expect(mockClient.getLogs).toHaveBeenCalledTimes(3);
+    expect(mockClient.getLogs).toHaveBeenCalledTimes(6);
+    expect(mockClient.getLogs).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ fromBlock: 1n, toBlock: 500n, args: { from: ["0xaaaa"] } })
+    );
+    expect(mockClient.getLogs).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ fromBlock: 1n, toBlock: 500n, args: { to: ["0xaaaa"] } })
+    );
+    expect(mockClient.getLogs).toHaveBeenNthCalledWith(
+      5,
+      expect.objectContaining({ fromBlock: 1001n, toBlock: 1200n, args: { from: ["0xaaaa"] } })
+    );
+    expect(mockClient.getLogs).toHaveBeenNthCalledWith(
+      6,
+      expect.objectContaining({ fromBlock: 1001n, toBlock: 1200n, args: { to: ["0xaaaa"] } })
+    );
+  });
+
+  it("uses 10-block chunks for Base backfill", async () => {
+    const bus = new EventBus();
+    const recorder = makeRecorder();
+    const watcher = new ChainWatcher({
+      chain: "base",
+      primaryWsUrl: "wss://placeholder",
+      db: makeMockDb(0),
+      bus,
+      recorder,
+    });
+
+    const mockClient = {
+      getLogs: vi.fn().mockResolvedValue([]),
+    };
+    (watcher as unknown as { client: typeof mockClient }).client = mockClient;
+    (watcher as unknown as { wallets: string[] }).wallets = ["0xaaaa"];
+
+    await (watcher as unknown as { backfillGap(f: number, t: number): Promise<void> }).backfillGap(1, 27);
+    expect(mockClient.getLogs).toHaveBeenCalledTimes(6);
+    expect(mockClient.getLogs).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ fromBlock: 1n, toBlock: 10n, args: { from: ["0xaaaa"] } })
+    );
+    expect(mockClient.getLogs).toHaveBeenNthCalledWith(
+      5,
+      expect.objectContaining({ fromBlock: 21n, toBlock: 27n, args: { from: ["0xaaaa"] } })
+    );
   });
 });
 

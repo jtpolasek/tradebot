@@ -18,6 +18,10 @@ export async function setSetting(db: Db, key: string, value: unknown): Promise<v
   });
 }
 
+export async function deleteSetting(db: Db, key: string): Promise<void> {
+  await db.delete(settings).where(eq(settings.key, key));
+}
+
 export async function getAllSettings(db: Db): Promise<Record<string, unknown>> {
   const rows = await db.select().from(settings);
   const out: Record<string, unknown> = {};

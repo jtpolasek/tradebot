@@ -6,11 +6,14 @@ import { getActiveWallets, upsertLastBlock, getLastBlock, type Db } from "@trade
 import { LruSet } from "../dedupe.js";
 import { backoffMs, sleep } from "../backoff.js";
 import type { Recorder } from "../recorder.js";
-import { TRANSFER_TOPIC, chunk, padAddressToTopic } from "./topics.js";
+import { TRANSFER_TOPIC, chunk } from "./topics.js";
 
 const CHUNK_SIZE = 50;
 const DEDUPE_SIZE = 50_000;
-const BACKFILL_CHUNK = 500;
+const BACKFILL_CHUNK_BY_CHAIN: Record<ChainId, number> = {
+  eth: 500,
+  base: 10,
+};
 const FAILOVER_TIMEOUT_MS = 60_000;
 
 const VIEM_CHAINS = { eth: mainnet, base: base } as const;
@@ -43,7 +46,8 @@ type Client = {
   getLogs(p: {
     fromBlock: bigint;
     toBlock: bigint;
-    topics: [string, null, null];
+    event: (typeof TRANSFER_ABI)[0];
+    args: { from?: readonly `0x${string}`[] } | { to?: readonly `0x${string}`[] };
   }): Promise<ViemLog[]>;
   getTransactionReceipt(p: { hash: `0x${string}` }): Promise<{
     from: string;
@@ -358,22 +362,22 @@ export class ChainWatcher {
     const addrs = this.wallets;
     if (addrs.length === 0) return;
 
-    const paddedAddrs = new Set(addrs.map((a) => padAddressToTopic(a).toLowerCase()));
-
-    for (let start = fromBlock; start <= toBlock; start += BACKFILL_CHUNK) {
-      const end = Math.min(start + BACKFILL_CHUNK - 1, toBlock);
+    const backfillChunk = BACKFILL_CHUNK_BY_CHAIN[this.chain];
+    for (let start = fromBlock; start <= toBlock; start += backfillChunk) {
+      const end = Math.min(start + backfillChunk - 1, toBlock);
       try {
-        const logs = await this.client!.getLogs({
-          fromBlock: BigInt(start),
-          toBlock: BigInt(end),
-          topics: [TRANSFER_TOPIC, null, null],
-        });
+        const typedAddrs = addrs as `0x${string}`[];
+        const [fromLogs, toLogs] = await Promise.all([
+          this.client!.getLogs({ fromBlock: BigInt(start), toBlock: BigInt(end), event: TRANSFER_ABI[0]!, args: { from: typedAddrs } }),
+          this.client!.getLogs({ fromBlock: BigInt(start), toBlock: BigInt(end), event: TRANSFER_ABI[0]!, args: { to: typedAddrs } }),
+        ]);
 
-        // Filter logs where topic[1] (from) or topic[2] (to) is one of our wallets
-        const relevant = logs.filter((l) => {
-          const t1 = l.topics[1]?.toLowerCase();
-          const t2 = l.topics[2]?.toLowerCase();
-          return (t1 && paddedAddrs.has(t1)) || (t2 && paddedAddrs.has(t2));
+        const seen = new Set<string>();
+        const relevant = [...fromLogs, ...toLogs].filter((l) => {
+          if (!l.transactionHash) return false;
+          if (seen.has(l.transactionHash)) return false;
+          seen.add(l.transactionHash);
+          return true;
         });
 
         await this.handleConfirmedLogs(relevant);

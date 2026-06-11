@@ -7,6 +7,19 @@ import { apiFetch, shortAddr, timeAgo } from "@/lib/api";
 type Wallet = { id: string; chain: string; address: string; label: string; active: boolean; addedAt: string };
 type AdaptationEntry = { id: string; ts: string; rule: string; oldValue: string; newValue: string; evidenceJson?: unknown };
 
+const SETTING_DESCRIPTIONS: Record<string, { description: string; example: string }> = {
+  BASE_TRADE_PCT:              { description: "Fraction of portfolio per copy trade.", example: "0.01 = 1% ($1,000 on a $100k portfolio)" },
+  MAX_TRADE_PCT:               { description: "Maximum fraction per trade, even for high-scoring wallets.", example: "0.03 = 3% cap" },
+  MIN_NOTIONAL_USD:            { description: "Ignore swaps smaller than this — filters dust and test txns.", example: "50" },
+  MIN_LIQUIDITY_USD:           { description: "Only copy trades in pools with at least this much liquidity.", example: "150000" },
+  SIZING_MODE:                 { description: "fixed = always use BASE_TRADE_PCT. proportional = scale with the leader's trade size.", example: "fixed" },
+  COPY_DELAY_PENALTY_BPS_ETH:  { description: "Slippage penalty (basis points) applied to ETH fills to simulate entry delay.", example: "10 = 0.1%" },
+  COPY_DELAY_PENALTY_BPS_BASE: { description: "Same penalty for Base chain fills.", example: "5 = 0.05%" },
+  GAS_USD_ETH:                 { description: "Estimated gas cost deducted per ETH trade.", example: "4" },
+  GAS_USD_BASE:                { description: "Estimated gas cost deducted per Base trade.", example: "0.03" },
+  LOG_LEVEL:                   { description: "Runner log verbosity.", example: "info | debug | warn | error" },
+};
+
 export default function SettingsPage() {
   const [wallets, setWallets] = useState<Wallet[]>([]);
   const [settings, setSettings] = useState<Record<string, unknown>>({});
@@ -65,6 +78,21 @@ export default function SettingsPage() {
       await loadAll();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to delete wallet");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function deleteSetting(key: string) {
+    if (!confirm(`Reset ${key} to .env default?`)) return;
+    setBusy(`del-setting-${key}`);
+    setError(""); setMessage("");
+    try {
+      await apiFetch(`/settings/${key}`, { method: "DELETE" });
+      setMessage(`${key} reset to default.`);
+      await loadAll();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to reset setting");
     } finally {
       setBusy("");
     }
@@ -155,12 +183,30 @@ export default function SettingsPage() {
         <form onSubmit={(e) => void saveSetting(e)} className="form-grid" style={{ marginBottom: 16 }}>
           <div className="field">
             <label>Key</label>
-            <input value={settingForm.key} onChange={(e) => setSettingForm({ ...settingForm, key: e.target.value })} placeholder="MIN_LIQUIDITY_USD" required />
+            <select value={settingForm.key} onChange={(e) => setSettingForm({ ...settingForm, key: e.target.value })} required>
+              <option value="">Select a setting…</option>
+              <option value="MIN_LIQUIDITY_USD">MIN_LIQUIDITY_USD</option>
+              <option value="MIN_NOTIONAL_USD">MIN_NOTIONAL_USD</option>
+              <option value="BASE_TRADE_PCT">BASE_TRADE_PCT</option>
+              <option value="MAX_TRADE_PCT">MAX_TRADE_PCT</option>
+              <option value="SIZING_MODE">SIZING_MODE</option>
+              <option value="COPY_DELAY_PENALTY_BPS_ETH">COPY_DELAY_PENALTY_BPS_ETH</option>
+              <option value="COPY_DELAY_PENALTY_BPS_BASE">COPY_DELAY_PENALTY_BPS_BASE</option>
+              <option value="GAS_USD_ETH">GAS_USD_ETH</option>
+              <option value="GAS_USD_BASE">GAS_USD_BASE</option>
+              <option value="LOG_LEVEL">LOG_LEVEL</option>
+            </select>
           </div>
           <div className="field">
-            <label>Value (JSON or string)</label>
-            <input value={settingForm.value} onChange={(e) => setSettingForm({ ...settingForm, value: e.target.value })} placeholder="300000" required />
+            <label>Value</label>
+            <input value={settingForm.value} onChange={(e) => setSettingForm({ ...settingForm, value: e.target.value })} placeholder={SETTING_DESCRIPTIONS[settingForm.key]?.example ?? "value"} required />
           </div>
+          {settingForm.key && SETTING_DESCRIPTIONS[settingForm.key] && (
+            <div style={{ gridColumn: "1 / -1", padding: "8px 12px", background: "var(--panel)", borderRadius: 6, fontSize: 13, color: "var(--subtle)" }}>
+              <strong style={{ color: "var(--text)" }}>{settingForm.key}</strong> — {SETTING_DESCRIPTIONS[settingForm.key].description}
+              <span style={{ marginLeft: 8, opacity: 0.6 }}>e.g. {SETTING_DESCRIPTIONS[settingForm.key].example}</span>
+            </div>
+          )}
           <div style={{ gridColumn: "1 / -1" }}>
             <button className="button" type="submit" disabled={busy === "setting"}>Save setting</button>
           </div>
@@ -170,13 +216,23 @@ export default function SettingsPage() {
           <div className="table-wrap">
             <table>
               <thead>
-                <tr><th>Key</th><th>Value</th></tr>
+                <tr><th>Key</th><th>Value</th><th></th></tr>
               </thead>
               <tbody>
                 {Object.entries(settings).map(([k, v]) => (
                   <tr key={k}>
                     <td className="mono">{k}</td>
                     <td>{JSON.stringify(v)}</td>
+                    <td>
+                      <button
+                        className="button danger"
+                        style={{ minHeight: 28, padding: "2px 8px", fontSize: 12 }}
+                        onClick={() => void deleteSetting(k)}
+                        disabled={busy === `del-setting-${k}`}
+                      >
+                        Reset
+                      </button>
+                    </td>
                   </tr>
                 ))}
               </tbody>

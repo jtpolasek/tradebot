@@ -6,7 +6,7 @@
 
 ## Current Phase
 
-**Phase 6 — API + dashboard** — NOT STARTED.
+**Phase 6 — API + dashboard** — COMPLETE (commit `8a8d50d`).
 
 - Phase 0: COMPLETE (commit `2f760ed`)
 - Phase 1: COMPLETE (commit `0024d63`)

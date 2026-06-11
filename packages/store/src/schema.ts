@@ -126,3 +126,9 @@ export const adaptationLog = pgTable("adaptation_log", {
   newValue: text("new_value").notNull(),
   evidenceJson: jsonb("evidence_json"),
 });
+
+export const settings = pgTable("settings", {
+  key: text("key").primaryKey(),
+  value: jsonb("value").notNull(),
+  updatedAt: timestamptz("updated_at").notNull().defaultNow(),
+});

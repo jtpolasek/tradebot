@@ -13,6 +13,7 @@
     "@tradebot/decoder": "workspace:*",
     "@tradebot/ingest": "workspace:*",
     "@tradebot/pricing": "workspace:*",
+    "@tradebot/brain": "workspace:*",
     "@tradebot/paper-engine": "workspace:*",
     "@tradebot/store": "workspace:*",
     "postgres": "^3.4.7",

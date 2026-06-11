@@ -4,6 +4,7 @@ import { ChainWatcher, Recorder, deserializeEvent } from "@tradebot/ingest";
 import { Decoder } from "@tradebot/decoder";
 import { startMarksJob } from "@tradebot/pricing";
 import { PaperEngine } from "@tradebot/paper-engine";
+import { BrainWeightProvider, startScorerJob } from "@tradebot/brain";
 import { createPublicClient, webSocket } from "viem";
 import { mainnet, base } from "viem/chains";
 import postgres from "postgres";
@@ -79,7 +80,10 @@ async function main() {
 
   const marksJob = startMarksJob(db, rpcClients);
 
-  const engine = new PaperEngine(db, bus, config, ethRpcClient);
+  const weightProvider = new BrainWeightProvider();
+  const scorerJob = startScorerJob(db, weightProvider);
+
+  const engine = new PaperEngine(db, bus, config, ethRpcClient, weightProvider);
   await engine.start();
 
   bus.on("raw-tx", (event) => {
@@ -127,6 +131,7 @@ async function main() {
     logger.info("Shutting down...");
     engine.stop();
     marksJob.stop();
+    scorerJob.stop();
     decoder.stop();
     for (const watcher of watchers) watcher.stop();
     await closeDb();

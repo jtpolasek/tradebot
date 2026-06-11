@@ -8,3 +8,6 @@ export * from "./repositories/signals.js";
 export * from "./repositories/paperFills.js";
 export * from "./repositories/positions.js";
 export * from "./repositories/portfolioSnapshots.js";
+export * from "./repositories/leaderStats.js";
+export * from "./repositories/adaptationLog.js";
+export * from "./repositories/settings.js";

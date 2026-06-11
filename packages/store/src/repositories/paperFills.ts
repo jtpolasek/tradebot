@@ -1,4 +1,4 @@
-import { eq } from "drizzle-orm";
+import { eq, and } from "drizzle-orm";
 import type { Db } from "../db.js";
 import { paperFills } from "../schema.js";
 import type { PaperFill, TokenRef, ChainId } from "@tradebot/core";
@@ -47,6 +47,46 @@ export async function getFill(db: Db, id: string): Promise<StoredFill | null> {
   const row = rows[0];
   if (!row) return null;
   return rowToFill(row);
+}
+
+export type CopiedFillRow = {
+  id: string;
+  side: "buy" | "sell";
+  tokenAddress: string;
+  walletId: string | null;
+  qty: number;
+  priceUsd: number;
+  notionalUsd: number;
+  decidedAt: Date;
+};
+
+export async function getCopiedFills(db: Db): Promise<CopiedFillRow[]> {
+  const { tradeSignals } = await import("../schema.js");
+  const rows = await db
+    .select({
+      id: paperFills.id,
+      side: paperFills.side,
+      tokenAddress: paperFills.tokenAddress,
+      walletId: tradeSignals.walletId,
+      qty: paperFills.qty,
+      priceUsd: paperFills.priceUsd,
+      notionalUsd: paperFills.notionalUsd,
+      decidedAt: paperFills.decidedAt,
+    })
+    .from(paperFills)
+    .innerJoin(tradeSignals, eq(paperFills.signalId, tradeSignals.id))
+    .where(and(eq(paperFills.decision, "copied"), eq(paperFills.voided, false)));
+
+  return rows.map((r) => ({
+    id: r.id,
+    side: r.side as "buy" | "sell",
+    tokenAddress: r.tokenAddress,
+    walletId: r.walletId,
+    qty: Number(r.qty),
+    priceUsd: Number(r.priceUsd),
+    notionalUsd: Number(r.notionalUsd),
+    decidedAt: r.decidedAt,
+  }));
 }
 
 function rowToFill(row: typeof paperFills.$inferSelect): StoredFill {

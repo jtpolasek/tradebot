@@ -1,4 +1,4 @@
-import { eq, and, desc } from "drizzle-orm";
+import { eq, and, desc, lte } from "drizzle-orm";
 import type { Db } from "../db.js";
 import { priceMarks } from "../schema.js";
 import type { ChainId } from "@tradebot/core";
@@ -28,6 +28,35 @@ export async function getOpenPositionTokens(db: Db): Promise<Array<{ chain: Chai
     .from(positions)
     .where(eq(positions.closedAt, null as unknown as Date));
   return rows.map((r) => ({ chain: r.chain as ChainId, tokenAddress: r.tokenAddress }));
+}
+
+export async function markAtOrBefore(
+  db: Db,
+  chain: ChainId,
+  tokenAddress: string,
+  ts: Date
+): Promise<PriceMarkRow | null> {
+  const rows = await db
+    .select()
+    .from(priceMarks)
+    .where(
+      and(
+        eq(priceMarks.chain, chain),
+        eq(priceMarks.tokenAddress, tokenAddress.toLowerCase()),
+        lte(priceMarks.ts, ts)
+      )
+    )
+    .orderBy(desc(priceMarks.ts))
+    .limit(1);
+  const row = rows[0];
+  if (!row) return null;
+  return {
+    chain: row.chain as ChainId,
+    tokenAddress: row.tokenAddress,
+    ts: row.ts,
+    priceUsd: Number(row.priceUsd),
+    source: row.source,
+  };
 }
 
 export async function latestMark(db: Db, chain: ChainId, tokenAddress: string): Promise<PriceMarkRow | null> {

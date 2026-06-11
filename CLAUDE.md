@@ -16,4 +16,7 @@ Paper-trading copy-trader (ETH + Base). **`PLAN.md` is the single source of trut
 ## Status
 
 - Phase 0: **complete** (2026-06-10). 20 tests passing, committed 2f760ed.
-- Phase 1: not started.
+- Phase 1: **complete** (2026-06-10). Committed 0024d63.
+- Phase 2: **complete** (2026-06-10). 79 tests passing, committed 2302607.
+- Phase 3: **complete** (2026-06-10). 91 tests passing, committed d23ad0c.
+- Phase 4: **complete** (2026-06-10). 149 tests passing, committed f71c06a.

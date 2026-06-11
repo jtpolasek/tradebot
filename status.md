@@ -6,107 +6,48 @@
 
 ## Current Phase
 
-**Phase 6 — API + dashboard** — COMPLETE (commit `8a8d50d`).
+All planned phases are **COMPLETE**. The system is fully built and running.
 
-- Phase 0: COMPLETE (commit `2f760ed`)
-- Phase 1: COMPLETE (commit `0024d63`)
-- Phase 2: COMPLETE (commit `2302607`) — 79 total tests passing
-- Phase 3: COMPLETE (commit `d23ad0c`) — 91 total tests passing
-- Phase 4: COMPLETE (commit `f71c06a`) — 149 total tests passing
-- Phase 5: COMPLETE (commit `747a828`) — 193 non-Docker tests passing
+| Phase | Status | Commit |
+|---|---|---|
+| Phase 0 — Scaffold | COMPLETE | `2f760ed` |
+| Phase 1 — EVM ingestion | COMPLETE | `0024d63` |
+| Phase 2 — Swap decoding + replay | COMPLETE | `2302607` |
+| Phase 3 — Pricing | COMPLETE | `d23ad0c` |
+| Phase 4 — Paper trading engine | COMPLETE | `f71c06a` |
+| Phase 5 — Brain: scoring + adaptation | COMPLETE | `747a828` |
+| Phase 6 — API + dashboard | COMPLETE | `8a8d50d` |
+| dev.ps1 startup script + API security | COMPLETE | `dabc3e1` |
+
+**Phase 7+ (Solana adapter, ML) — DO NOT BUILD unless user explicitly asks.**
 
 ---
 
-## What Was Done in Phase 4
+## How to Run
 
-All paper-engine source files written, tested, and committed:
+```powershell
+.\dev.ps1
+```
 
-| File | Status |
+Pre-conditions: Docker Desktop running, `.env` filled in (copy `.env.example`).
+
+The script: starts Postgres, waits for `pg_isready`, runs migrations, then launches runner + API + web concurrently via `turbo run dev`.
+
+| Service | URL |
 |---|---|
-| `packages/paper-engine/src/accounting.ts` | done — `applyTradeToState`, `applyTotalLossToState` |
-| `packages/paper-engine/src/accounting.test.ts` | done — 4 tests (avg-cost math, partial sell PnL, guard throws) |
-| `packages/paper-engine/src/ledger.ts` | done — `ledgerDeltaFromTrade`, `derivePortfolioTotals`, `derivePositions`, `verifyLedger` |
-| `packages/paper-engine/src/ledger.test.ts` | done — 10 tests |
-| `packages/paper-engine/src/sizing.ts` | done — `sizeCopyTrade`, `calculateCashCappedBuyUsd`, `estimateSourceNotionalUsd` |
-| `packages/paper-engine/src/sizing.test.ts` | done — 8 tests |
-| `packages/paper-engine/src/exits.ts` | done — `checkExitTrigger`, `calcExitQuantity`, `runExitCheck`, `resetExitWorkerState` |
-| `packages/paper-engine/src/exits.test.ts` | done — 11 tests |
-| `packages/paper-engine/src/engine.ts` | done — `PaperEngine` class: `decide`, `fill`, provisional fill handling, snapshot every 5 min |
-| `packages/paper-engine/src/engine.test.ts` | done — 3 integration tests (20 scripted signals, zero-weight skip, insufficient-balance skip) |
-| `packages/paper-engine/src/index.ts` | done |
-| `packages/paper-engine/package.json` | done |
-| `packages/paper-engine/tsconfig.json` | done |
-| `packages/paper-engine/vitest.config.ts` | done |
-| `packages/store/src/repositories/signals.ts` | done — `insertSignal`, `upsertSignal`, `getSignalById` |
-| `packages/store/src/repositories/paperFills.ts` | done — `insertFill`, `updateFill`, `voidFill`, `getFill` |
-| `packages/store/src/repositories/positions.ts` | done — `upsertPosition`, `getPosition`, `getOpenPositions`, `closePosition` |
-| `packages/store/src/repositories/portfolioSnapshots.ts` | done — `insertSnapshot`, `latestSnapshot` |
-| `scripts/verify-ledger.ts` | done — `pnpm verify:ledger` checks all fills |
-| `apps/runner/src/index.ts` | updated — `startMarksJob` + `PaperEngine` wired in with viem RPC clients |
-
-### Key technical notes carried forward from Phase 4
-
-- `PaperEngine` holds cash + positions in memory, writes every mutation through `p-queue` (concurrency 4) to DB.
-- `WeightProvider` interface defined in `engine.ts` with constant `1.0` stub — Phase 5 will replace the stub with real weights from `leader_stats`.
-- `decide(signal, liquidityUsd)` is public and synchronous — takes pre-fetched liquidityUsd. Call order: weight=0 → token-blocked → liquidity → sizing → cash/position guards.
-- Position keys are `${chain}:${tokenAddress.toLowerCase()}:${walletId}` — one position per (chain, token, leader).
-- `provisional` fills: stored with `provisional: true`; on `signal-confirmed` the price is updated; on `signal-voided` cash and qty are restored and the fill is voided in DB.
-- Fill price uses `getUsdPrice` only (0x quote is an optional enhancement not yet wired).
-- `startMarksJob` and `PaperEngine` are wired into `apps/runner/src/index.ts`; viem `createPublicClient` with WS transport is used for both.
+| Dashboard (Next.js) | http://localhost:3000 |
+| API (Fastify) | http://localhost:3001 |
+| Postgres | localhost:5433 |
 
 ---
 
-## Phase 5 — What Needs to Be Built
-
-Per PLAN.md §7 Phase 5, `packages/brain`:
-
-### Files to create
-
-| File | What it does |
-|---|---|
-| `packages/brain/src/scoring.ts` | Per-wallet FIFO round-trip reconstruction, compute `trades, win_rate, avg_return_pct, median_hold_minutes, realized_pnl_usd, max_drawdown_pct` |
-| `packages/brain/src/scoring.test.ts` | Unit tests: FIFO reconstruction, partial sells, open remainder at mark price |
-| `packages/brain/src/weights.ts` | `weight = clamp(2 * sigmoid(score), 0, 2)`; z-score across cohort; auto-mute at 7d score < −1 |
-| `packages/brain/src/weights.test.ts` | Hand-computed z-score + weight math, auto-mute trigger |
-| `packages/brain/src/adaptation.ts` | Liquidity-notch weekly job; per-leader category filter; writes `adaptation_log` |
-| `packages/brain/src/adaptation.test.ts` | Synthetic fills: liquidity notch trigger, per-leader tier mute, hard bounds |
-| `packages/brain/src/scorer.ts` | Hourly job: runs scoring + weight update, persists to `leader_stats`, refreshes `PaperEngine` weights |
-| `packages/brain/src/index.ts` | Exports |
-| `packages/brain/package.json` | Same pattern as pricing |
-| `packages/brain/tsconfig.json` | Extends `../../tsconfig.base.json` |
-| `packages/brain/vitest.config.ts` | Same pattern as pricing (loads root `.env`) |
-
-### Also required
-
-- `settings` table in DB (key/value jsonb) — env vars are defaults, settings table is the override for adaptive values
-- New Drizzle migration for `settings` table
-- Wire `packages/brain` hourly job into `apps/runner/src/index.ts`
-- Replace constant `WeightProvider` stub in runner with `BrainWeightProvider` that reads from `leader_stats`
-
-### Scoring formula
-
-Per PLAN.md §7 Phase 5:
-- Score per window (7d/30d/all): `0.35*z(pnl) + 0.25*z(win_rate) + 0.25*z(avg_return) − 0.15*z(drawdown)`
-- z-scores computed across tracked cohort (cohort size 1 → z = 0)
-- `trades < 5` in window → score null, weight default 0.5
-- `weight = clamp(2 * sigmoid(score), 0, 2)`
-- 7d score < −1 → weight 0, write `adaptation_log` row
-
-### Acceptance criteria
-
-- Unit tests for FIFO reconstruction (incl. partial sells and open remainder), z-score/weight math with hand-computed values, auto-mute trigger, liquidity-notch rule with synthetic fills
-- Seeded synthetic 30-day dataset → profitable leader weight > 1.2, losing leader → 0
-- `pnpm build && pnpm test` green
-- Commit: `feat: Phase 5 — brain scoring, weights, adaptive filters`
-
----
-
-## Everything That Exists (Phases 0–4)
+## What Exists (all phases)
 
 ### Root
 - `package.json`, `pnpm-workspace.yaml`, `turbo.json`, `tsconfig.base.json`
 - `docker-compose.yml` — db port 5433, db-test port 5434 (profile `test`)
 - `.env.example`, `.env` (gitignored)
+- `dev.ps1` — one-shot dev startup script
 - `scripts/verify-ledger.ts` — `pnpm verify:ledger`
 
 ### packages/core/src/
@@ -114,9 +55,16 @@ Per PLAN.md §7 Phase 5:
 
 ### packages/store/src/
 - `schema.ts`, `db.ts`, `migrate.ts`
-- `repositories/wallets.ts`, `repositories/chainState.ts`, `repositories/tokens.ts`, `repositories/priceMarks.ts`
-- `repositories/signals.ts`, `repositories/paperFills.ts`, `repositories/positions.ts`, `repositories/portfolioSnapshots.ts`
-- `index.ts`, `drizzle/0000_curly_ink.sql`, `drizzle.config.ts`
+- `repositories/wallets.ts` — `getAllWallets`, `getActiveWallets`, `insertWallet`, `setWalletActive`, `getWalletById`
+- `repositories/chainState.ts`, `repositories/tokens.ts`, `repositories/priceMarks.ts` — `latestMark`
+- `repositories/signals.ts` — `insertSignal`, `upsertSignal`, `getSignalById`, `getRecentSignals`
+- `repositories/paperFills.ts` — `insertFill`, `updateFill`, `voidFill`, `getFill`, `getRecentFills`
+- `repositories/positions.ts` — `upsertPosition`, `getPosition`, `getOpenPositions`, `closePosition`
+- `repositories/portfolioSnapshots.ts` — `insertSnapshot`, `latestSnapshot`, `getRecentSnapshots`
+- `repositories/leaderStats.ts` — `getAllLeaderStats`, `getLeaderStatsByWallet`
+- `repositories/adaptationLog.ts` — `insertAdaptationLog`, `getAdaptationLogs`
+- `repositories/settings.ts` — `getAllSettings`, `getSetting`, `setSetting`
+- `index.ts`, `drizzle/`, `drizzle.config.ts`
 
 ### packages/ingest/src/
 - `backoff.ts`, `dedupe.ts`, `recorder.ts`
@@ -130,23 +78,52 @@ Per PLAN.md §7 Phase 5:
 
 ### packages/pricing/src/
 - `price.ts`, `marks.ts`, `zerox.ts`, `uniswapQuote.ts`, `fees.ts`, `index.ts`
-- `price.test.ts` — 12 tests
 
 ### packages/paper-engine/src/
 - `accounting.ts`, `ledger.ts`, `sizing.ts`, `exits.ts`, `engine.ts`, `index.ts`
-- 5 test files — 40 tests total
+
+### packages/brain/src/
+- `scoring.ts` — FIFO round-trip reconstruction, per-wallet stats
+- `weights.ts` — z-score across cohort, `weight = clamp(2*sigmoid(score), 0, 2)`, auto-mute at 7d score < −1
+- `adaptation.ts` — weekly liquidity-notch + per-leader category filter, writes `adaptation_log`
+- `scorer.ts` — hourly job: scoring → weight update → persists to `leader_stats`
+- `index.ts`
 
 ### apps/runner/src/
-- `index.ts` — ChainWatchers + Decoder + replay harness + startMarksJob + PaperEngine
+- `index.ts` — ChainWatchers + Decoder + replay harness + startMarksJob + PaperEngine + brain scorer
 
-### All tests: 149 total — all passing
-- `@tradebot/core`: 14 tests
-- `@tradebot/store`: 5 tests (require Docker test DB on port 5434)
-- `@tradebot/ingest`: 28 tests
-- `@tradebot/decoder`: 49 tests
-- `@tradebot/pricing`: 12 tests
-- `@tradebot/paper-engine`: 40 tests
-- `@tradebot/runner`: 1 placeholder test
+### apps/api/src/
+- `index.ts` — Fastify 5 + `@fastify/websocket` server
+  - `GET/POST/DELETE /wallets`
+  - `GET /signals?since=&limit=`, `GET /fills?since=&limit=`
+  - `GET /portfolio` (snapshot + positions with marks + 288 snapshots)
+  - `GET /leaders` (all windows: 7d/30d/all)
+  - `GET /adaptations?limit=`, `GET/PATCH /settings`
+  - `WS /stream` — polls Postgres every 2s, broadcasts `trade-signal` + `paper-fill` events
+  - Auth: `X-Api-Key` header vs `API_KEY` env; CORS restricted to `CORS_ORIGIN` (default localhost:3000)
+
+### apps/web/src/
+- `lib/api.ts` — `apiFetch`, `wsUrl`, `formatUsd`, `formatPct`, `shortAddr`, `timeAgo`
+- `app/layout.tsx` — sticky nav (Portfolio / Leaders / Feed / Settings)
+- `app/globals.css` — dark design system ported from GMGN (`--bg: #020617`, panel/card/pill/button)
+- `app/portfolio/page.tsx` — equity curve (lightweight-charts), 4 metric panels, positions table
+- `app/leaders/page.tsx` — 7d/30d/all toggle, sortable stats table
+- `app/feed/page.tsx` — WebSocket live feed + 24h REST history, auto-reconnect
+- `app/settings/page.tsx` — wallet CRUD, settings editor, adaptation log
+
+### Test counts (195 total — all passing, non-Docker)
+| Package | Tests |
+|---|---|
+| `@tradebot/core` | 14 |
+| `@tradebot/store` | 5 (need Docker test DB on port 5434) |
+| `@tradebot/ingest` | 28 |
+| `@tradebot/decoder` | 49 |
+| `@tradebot/pricing` | 12 |
+| `@tradebot/paper-engine` | 40 |
+| `@tradebot/brain` | 44 |
+| `@tradebot/runner` | 1 |
+| `@tradebot/api` | 1 |
+| `@tradebot/web` | 1 |
 
 ---
 
@@ -158,6 +135,9 @@ DO NOT use viem's `PublicClient` type directly in package source. Use structural
 - `RpcClient = { readContract: (args: any) => Promise<any> }` (pricing/price, paper-engine/engine)
 This avoids TS2719 type-identity errors from pnpm dual-viem-path resolution.
 
+### Db type — always use getDb() from @tradebot/store
+Never create `drizzle(sql)` directly in apps. Use `getDb()` from `@tradebot/store`. Creating a new drizzle instance produces `PostgresJsDatabase<Record<string, never>>` which is incompatible with the store's typed `Db`. See TS2379.
+
 ### bigint discipline
 - Raw token amounts stay `bigint` from decode to storage
 - `amountHuman = Number(amountRaw) / 10 ** decimals` — for scoring only, never stored
@@ -166,12 +146,14 @@ This avoids TS2719 type-identity errors from pnpm dual-viem-path resolution.
 ### exactOptionalPropertyTypes = true
 Cannot assign `field: value | undefined` — use `...(value !== undefined ? { field: value } : {})`
 
-### Side classification
-- `classifySide` in `decoder.ts` uses `isQuoteAsset(chain, address)` — address-based
-- `analyzePairs` in `balanceDelta.ts` uses `STABLE_OR_NATIVE_ASSETS` symbol set — symbol-based
-
 ### Drizzle numeric columns return strings
-Parse at the repository boundary — return `number` (USD) or `bigint` (raw amounts) from repos, never raw strings.
+Parse at the repository boundary — return `number` (USD) or `bigint` (raw amounts) from repos.
+
+### pnpm 11.x build approvals
+Packages with install scripts must be listed under `allowBuilds` in `pnpm-workspace.yaml` (NOT `onlyBuiltDependencies`, NOT `pnpm.onlyBuiltDependencies` in package.json — those are deprecated/ignored in pnpm 11).
+
+### Next.js on Windows
+Do NOT use `output: "standalone"` in `next.config.ts` — causes `EPERM: operation not permitted, symlink` on Windows. Standalone output is only needed for Docker deploys.
 
 ### vitest.config.ts pattern (all packages)
 ```ts
@@ -190,26 +172,46 @@ export default defineConfig({ test: { include: ["src/**/*.test.ts"], testTimeout
 
 | Purpose | Path |
 |---|---|
-| PLAN.md (source of truth) | `C:\Users\Willie\Documents\tradebot\PLAN.md` |
+| PLAN.md (source of truth) | `PLAN.md` |
 | Old app reference (read-only) | `C:\Users\Willie\Documents\GMGN\src\lib\` |
 | Core types | `packages\core\src\types.ts` |
 | chains.ts (QUOTE_ASSETS etc) | `packages\core\src\chains.ts` |
 | config.ts (env vars) | `packages\core\src\config.ts` |
-| Pricing main | `packages\pricing\src\price.ts` |
 | Store schema | `packages\store\src\schema.ts` |
 | Paper engine main | `packages\paper-engine\src\engine.ts` |
+| Brain scorer job | `packages\brain\src\scorer.ts` |
 | Runner entry point | `apps\runner\src\index.ts` |
+| API server | `apps\api\src\index.ts` |
+| Web lib/api.ts | `apps\web\src\lib\api.ts` |
 | .env (real keys) | `.env` (gitignored) |
 
 ---
 
-## .env Values
+## .env Values (from .env.example)
 ```
-ALCHEMY_API_KEY=87EHHJqPm6-uVnjoKJ7GG
-BASE_ALCHEMY_API_KEY=87EHHJqPm6-uVnjoKJ7GG
 DATABASE_URL=postgres://tradebot:tradebot@localhost:5433/tradebot
 TEST_DATABASE_URL=postgres://tradebot:tradebot@localhost:5434/tradebot_test
-ZEROX_API_KEY=<from GMGN .env.local>
+ALCHEMY_API_KEY=
+BASE_ALCHEMY_API_KEY=
+QUICKNODE_ETH_WS=
+QUICKNODE_BASE_WS=
+ZEROX_API_KEY=
+API_KEY=                        # any random string; empty = warn-only mode
+API_PORT=3001
+NEXT_PUBLIC_API_URL=http://localhost:3001
+NEXT_PUBLIC_API_KEY=
+CORS_ORIGIN=http://localhost:3000
+PAPER_STARTING_CASH_USD=100000
+BASE_TRADE_PCT=0.01
+MAX_TRADE_PCT=0.03
+MIN_NOTIONAL_USD=50
+MIN_LIQUIDITY_USD=150000
+COPY_DELAY_PENALTY_BPS_ETH=10
+COPY_DELAY_PENALTY_BPS_BASE=5
+GAS_USD_ETH=4
+GAS_USD_BASE=0.03
+SIZING_MODE=fixed
+LOG_LEVEL=info
 ```
 
 ---
@@ -218,7 +220,7 @@ ZEROX_API_KEY=<from GMGN .env.local>
 1. `pnpm build && pnpm test` green before declaring any phase done
 2. No `any` without immediate zod validation (exceptions: MulticallClient, RpcClient — documented above)
 3. Raw token amounts stay `bigint`; addresses lowercase
-4. Tests never touch real DB (TEST_DATABASE_URL only, port 5434, name must end in `_test`)
+4. Tests never touch real DB (`TEST_DATABASE_URL` only, port 5434, name must end in `_test`)
 5. Never modify `C:\Users\Willie\Documents\GMGN`
 6. No dependencies not in PLAN.md
 7. Commit at every milestone

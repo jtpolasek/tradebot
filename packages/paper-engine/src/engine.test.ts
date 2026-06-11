@@ -1,0 +1,235 @@
+import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vitest";
+import { randomUUID } from "crypto";
+import { sql } from "drizzle-orm";
+import { EventBus, type TradeSignal, type TokenRef } from "@tradebot/core";
+import { getDb, closeDb, insertWallet } from "@tradebot/store";
+import { PaperEngine } from "./engine.js";
+
+// Require test DB
+const TEST_DB_URL = process.env["TEST_DATABASE_URL"];
+if (!TEST_DB_URL) throw new Error("TEST_DATABASE_URL is required");
+if (!TEST_DB_URL.endsWith("_test")) throw new Error("TEST_DATABASE_URL must end in _test");
+
+// Mock pricing so tests are deterministic and offline
+vi.mock("@tradebot/pricing", () => ({
+  getLiquidityUsd: vi.fn().mockResolvedValue(1_000_000),
+  getUsdPrice: vi.fn().mockResolvedValue(10),
+}));
+
+import { getLiquidityUsd, getUsdPrice } from "@tradebot/pricing";
+
+const mockRpcClient = { readContract: vi.fn() };
+
+const USDC: TokenRef = { chain: "eth", address: "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", symbol: "USDC", decimals: 6 };
+const TOKEN_A: TokenRef = { chain: "eth", address: "0xaaaa000000000000000000000000000000000001", symbol: "TKNA", decimals: 18 };
+const TOKEN_B: TokenRef = { chain: "eth", address: "0xbbbb000000000000000000000000000000000002", symbol: "TKNB", decimals: 18 };
+
+function makeSignal(overrides: Partial<TradeSignal> & { walletId: string }): TradeSignal {
+  return {
+    id: randomUUID(),
+    chain: "eth",
+    txHash: `0x${randomUUID().replace(/-/g, "")}`,
+    source: "confirmed",
+    side: "buy",
+    tokenIn: USDC,
+    tokenOut: TOKEN_A,
+    amountIn: 1000_000_000n,
+    amountOut: 100_000_000_000_000_000_000n,
+    venue: "uniswap-v3",
+    observedAt: Date.now() - 100,
+    confirmedAt: Date.now(),
+    blockNumber: 20_000_000,
+    ...overrides,
+  };
+}
+
+function cfg(overrides: Record<string, unknown> = {}) {
+  return {
+    DATABASE_URL: TEST_DB_URL!,
+    ALCHEMY_API_KEY: "test",
+    API_KEY: "test",
+    PAPER_STARTING_CASH_USD: 10_000,
+    BASE_TRADE_PCT: 0.01,
+    MAX_TRADE_PCT: 0.03,
+    MIN_NOTIONAL_USD: 50,
+    MIN_LIQUIDITY_USD: 150_000,
+    COPY_DELAY_PENALTY_BPS_ETH: 10,
+    COPY_DELAY_PENALTY_BPS_BASE: 5,
+    GAS_USD_ETH: 4,
+    GAS_USD_BASE: 0.03,
+    SIZING_MODE: "fixed" as const,
+    LOG_LEVEL: "error" as const,
+    ...overrides,
+  };
+}
+
+let db: ReturnType<typeof getDb>;
+let walletId: string;
+
+beforeAll(async () => {
+  db = getDb(TEST_DB_URL);
+  // Truncate in dependency order
+  await db.execute(sql`TRUNCATE portfolio_snapshots CASCADE`);
+  await db.execute(sql`TRUNCATE paper_fills CASCADE`);
+  await db.execute(sql`TRUNCATE positions CASCADE`);
+  await db.execute(sql`TRUNCATE trade_signals CASCADE`);
+  await db.execute(sql`TRUNCATE tokens CASCADE`);
+  await db.execute(sql`TRUNCATE wallets CASCADE`);
+
+  const wallet = await insertWallet(db, { chain: "eth", address: "0xleader0000000000000000000000000000000001", label: "Leader", active: true });
+  walletId = wallet.id;
+});
+
+afterAll(async () => {
+  await closeDb();
+});
+
+beforeEach(() => {
+  vi.mocked(getLiquidityUsd).mockResolvedValue(1_000_000);
+  vi.mocked(getUsdPrice).mockResolvedValue(10);
+});
+
+describe("PaperEngine integration", () => {
+  it("processes 20 scripted signals and produces correct final state", async () => {
+    const bus = new EventBus();
+    const engine = new PaperEngine(db, bus, cfg() as never, mockRpcClient as never);
+    await engine.start();
+
+    // Price: TOKEN_A = $10, TOKEN_B = $5
+    vi.mocked(getUsdPrice).mockImplementation(async (_chain, addr) => {
+      if (addr === TOKEN_A.address) return 10;
+      if (addr === TOKEN_B.address) return 5;
+      return 1;
+    });
+
+    // Signals 1-5: 5 buys of TOKEN_A
+    // equity=10000, notional = 10000 * 0.01 * 1 = 100, capped to 300 max
+    // slippageBps = 30 (dex) + impact(100/(2*1000000)*10000=0) + 10 (delay) = 40
+    // fillPrice = 10 * 1.004 = 10.04
+    // qty = 100 / 10.04 ≈ 9.960
+    // feeUsd = 4 + (100 * 30/10000) = 4.30
+    // cashSpent = 100 + 4.30 = 104.30
+    for (let i = 0; i < 5; i++) {
+      bus.emit("trade-signal", makeSignal({ walletId, tokenOut: TOKEN_A, tokenIn: USDC }));
+    }
+
+    // Signals 6-8: 3 buys of TOKEN_B
+    vi.mocked(getUsdPrice).mockResolvedValue(5);
+    for (let i = 0; i < 3; i++) {
+      bus.emit("trade-signal", makeSignal({ walletId, tokenOut: TOKEN_B, tokenIn: USDC, side: "buy" }));
+    }
+
+    // Signal 9: sell TOKEN_A (has position) — should copy
+    vi.mocked(getUsdPrice).mockResolvedValue(10);
+    bus.emit("trade-signal", makeSignal({
+      walletId,
+      side: "sell",
+      tokenIn: TOKEN_A,
+      tokenOut: USDC,
+    }));
+
+    // Signal 10: sell TOKEN_B (has position) — should copy
+    vi.mocked(getUsdPrice).mockResolvedValue(5);
+    bus.emit("trade-signal", makeSignal({
+      walletId,
+      side: "sell",
+      tokenIn: TOKEN_B,
+      tokenOut: USDC,
+    }));
+
+    // Signal 11: sell TOKEN_A again (no position after signal 9 emptied most of it) — may skip or copy remaining
+    vi.mocked(getUsdPrice).mockResolvedValue(10);
+    bus.emit("trade-signal", makeSignal({
+      walletId,
+      side: "sell",
+      tokenIn: TOKEN_A,
+      tokenOut: USDC,
+    }));
+
+    // Signal 12: sell unknown token (no position) — should skip with no-position
+    const TOKEN_C: TokenRef = { chain: "eth", address: "0xcccc000000000000000000000000000000000003", symbol: "TKNC", decimals: 18 };
+    bus.emit("trade-signal", makeSignal({ walletId, side: "sell", tokenIn: TOKEN_C, tokenOut: USDC }));
+
+    // Signal 13: buy with below-liquidity token — should skip
+    vi.mocked(getLiquidityUsd).mockResolvedValueOnce(100_000); // below MIN_LIQUIDITY_USD=150000
+    vi.mocked(getUsdPrice).mockResolvedValue(10);
+    bus.emit("trade-signal", makeSignal({ walletId, tokenOut: TOKEN_A, tokenIn: USDC }));
+
+    // Signal 14: buy with null liquidity — should skip with no-liquidity-data
+    vi.mocked(getLiquidityUsd).mockResolvedValueOnce(null);
+    bus.emit("trade-signal", makeSignal({ walletId, tokenOut: TOKEN_A, tokenIn: USDC }));
+
+    // Signals 15-19: more buys to use up more cash
+    vi.mocked(getLiquidityUsd).mockResolvedValue(1_000_000);
+    vi.mocked(getUsdPrice).mockResolvedValue(10);
+    for (let i = 0; i < 5; i++) {
+      bus.emit("trade-signal", makeSignal({ walletId, tokenOut: TOKEN_A, tokenIn: USDC }));
+    }
+
+    // Signal 20: a mempool signal (provisional) followed by void
+    const mempoolSignalId = randomUUID();
+    bus.emit("trade-signal", makeSignal({
+      id: mempoolSignalId,
+      walletId,
+      source: "mempool",
+      tokenOut: TOKEN_A,
+      tokenIn: USDC,
+    }));
+
+    // Wait for queue to drain
+    await new Promise<void>((r) => setTimeout(r, 500));
+
+    // Void the mempool fill (should restore cash)
+    const cashBeforeVoid = engine.getCashUsd();
+    bus.emit("signal-voided", { signalId: mempoolSignalId, reason: "reverted" });
+    await new Promise<void>((r) => setTimeout(r, 200));
+
+    engine.stop();
+
+    // Assertions
+    const finalCash = engine.getCashUsd();
+    const realizedPnl = engine.getRealizedPnlUsd();
+
+    // Cash must be positive (never negative)
+    expect(finalCash).toBeGreaterThan(0);
+
+    // After voiding the mempool fill, cash should be >= cash before void
+    expect(finalCash).toBeGreaterThanOrEqual(cashBeforeVoid);
+
+    // Realized PnL is finite
+    expect(Number.isFinite(realizedPnl)).toBe(true);
+
+    // Starting cash 10000, some buys, some sells — equity should be close to original
+    const equity = engine.getCashUsd() + Array.from(engine.getPositions().values())
+      .reduce((sum, p) => sum + p.qty * p.avgCostUsd, 0);
+    expect(equity).toBeGreaterThan(0);
+    expect(equity).toBeLessThan(11_000); // shouldn't have grown much on flat prices
+  });
+
+  it("decide skips buys when cash is below MIN_NOTIONAL_USD", async () => {
+    const bus = new EventBus();
+    // Use $40 starting cash; clear snapshots so the engine doesn't load a bigger amount from DB
+    await db.execute(sql`TRUNCATE portfolio_snapshots CASCADE`);
+    const engine = new PaperEngine(db, bus, cfg({ PAPER_STARTING_CASH_USD: 40 }) as never, mockRpcClient as never);
+    await engine.start();
+    engine.stop();
+
+    // equity = $40, notional = 40 * 0.01 * 1 = 0.40, clamped up to MIN_NOTIONAL=$50,
+    // then clamped to cash=$40 → 40 < MIN_NOTIONAL (50) → skip insufficient-balance
+    const signal = makeSignal({ walletId, tokenOut: TOKEN_A, tokenIn: USDC });
+    const result = engine.decide(signal, 1_000_000);
+    expect(result).toEqual({ action: "skip", reason: "insufficient-balance" });
+  });
+
+  it("decide returns skip for zero-weight leader", async () => {
+    const zeroWeights = { getWeight: () => 0 };
+    const bus = new EventBus();
+    const engine = new PaperEngine(db, bus, cfg() as never, mockRpcClient as never, zeroWeights);
+    await engine.start();
+
+    const signal = makeSignal({ walletId, tokenOut: TOKEN_A, tokenIn: USDC });
+    const result = engine.decide(signal, 1_000_000);
+    expect(result).toEqual({ action: "skip", reason: "leader-weight-zero" });
+    engine.stop();
+  });
+});

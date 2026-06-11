@@ -4,3 +4,7 @@ export * from "./repositories/wallets.js";
 export * from "./repositories/chainState.js";
 export * from "./repositories/tokens.js";
 export * from "./repositories/priceMarks.js";
+export * from "./repositories/signals.js";
+export * from "./repositories/paperFills.js";
+export * from "./repositories/positions.js";
+export * from "./repositories/portfolioSnapshots.js";

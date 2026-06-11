@@ -1,26 +1,27 @@
 {
-  "name": "@tradebot/runner",
+  "name": "@tradebot/paper-engine",
   "version": "0.0.1",
   "type": "module",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "dev": "tsx watch src/index.ts",
-    "start": "node dist/index.js",
-    "test": "vitest run"
+    "test": "vitest run",
+    "dev": "tsc -p tsconfig.json --watch"
   },
   "dependencies": {
     "@tradebot/core": "workspace:*",
-    "@tradebot/decoder": "workspace:*",
-    "@tradebot/ingest": "workspace:*",
     "@tradebot/pricing": "workspace:*",
-    "@tradebot/paper-engine": "workspace:*",
     "@tradebot/store": "workspace:*",
-    "postgres": "^3.4.7",
-    "viem": "^2.31.3"
+    "p-queue": "^8.1.1"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
-    "tsx": "^4.19.2",
+    "dotenv": "^16.5.0",
+    "drizzle-orm": "^0.44.7",
     "vitest": "^3.2.4"
   }
 }

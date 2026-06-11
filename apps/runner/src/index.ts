@@ -2,6 +2,10 @@ import { config, createLogger, EventBus } from "@tradebot/core";
 import { getDb, closeDb, getActiveWallets } from "@tradebot/store";
 import { ChainWatcher, Recorder, deserializeEvent } from "@tradebot/ingest";
 import { Decoder } from "@tradebot/decoder";
+import { startMarksJob } from "@tradebot/pricing";
+import { PaperEngine } from "@tradebot/paper-engine";
+import { createPublicClient, webSocket } from "viem";
+import { mainnet, base } from "viem/chains";
 import postgres from "postgres";
 import { readFileSync } from "fs";
 import { join } from "path";
@@ -68,6 +72,16 @@ async function main() {
   const decoder = new Decoder({ bus, db, wallets: walletAddresses });
   decoder.start();
 
+  // RPC clients for pricing (loose structural interfaces for viem compat)
+  const ethRpcClient = createPublicClient({ chain: mainnet, transport: webSocket(`wss://eth-mainnet.g.alchemy.com/v2/${config.ALCHEMY_API_KEY}`) });
+  const baseRpcClient = createPublicClient({ chain: base, transport: webSocket(`wss://base-mainnet.g.alchemy.com/v2/${config.BASE_ALCHEMY_API_KEY ?? config.ALCHEMY_API_KEY}`) });
+  const rpcClients = { eth: ethRpcClient, base: baseRpcClient };
+
+  const marksJob = startMarksJob(db, rpcClients);
+
+  const engine = new PaperEngine(db, bus, config, ethRpcClient);
+  await engine.start();
+
   bus.on("raw-tx", (event) => {
     logger.debug({ chain: event.chain, source: event.source, txHash: event.txHash }, "raw-tx");
   });
@@ -111,6 +125,8 @@ async function main() {
 
   async function shutdown() {
     logger.info("Shutting down...");
+    engine.stop();
+    marksJob.stop();
     decoder.stop();
     for (const watcher of watchers) watcher.stop();
     await closeDb();

@@ -9,7 +9,8 @@
     "dev": "turbo run dev",
     "db:up": "docker compose up -d db",
     "db:up:test": "docker compose --profile test up -d db-test",
-    "db:migrate": "node --import tsx/esm packages/store/src/migrate.ts"
+    "db:migrate": "node --import tsx/esm packages/store/src/migrate.ts",
+    "verify:ledger": "node --import tsx/esm scripts/verify-ledger.ts"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

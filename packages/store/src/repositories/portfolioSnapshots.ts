@@ -29,6 +29,19 @@ export async function latestSnapshot(db: Db): Promise<SnapshotRow | null> {
     .limit(1);
   const row = rows[0];
   if (!row) return null;
+  return rowToSnapshot(row);
+}
+
+export async function getRecentSnapshots(db: Db, limit: number): Promise<SnapshotRow[]> {
+  const rows = await db
+    .select()
+    .from(portfolioSnapshots)
+    .orderBy(desc(portfolioSnapshots.ts))
+    .limit(limit);
+  return rows.map(rowToSnapshot).reverse();
+}
+
+function rowToSnapshot(row: typeof portfolioSnapshots.$inferSelect): SnapshotRow {
   return {
     id: row.id,
     ts: row.ts,

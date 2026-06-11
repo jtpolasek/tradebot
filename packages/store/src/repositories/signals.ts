@@ -1,4 +1,4 @@
-import { eq, and, gte } from "drizzle-orm";
+import { eq, and, gte, desc } from "drizzle-orm";
 import type { Db } from "../db.js";
 import { tradeSignals } from "../schema.js";
 import type { TradeSignal, ChainId } from "@tradebot/core";
@@ -65,6 +65,16 @@ export async function getSignalsByWallet(
   const conditions = [eq(tradeSignals.walletId, walletId)];
   if (since !== null) conditions.push(gte(tradeSignals.observedAt, since));
   const rows = await db.select().from(tradeSignals).where(and(...conditions));
+  return rows.map(rowToSignal);
+}
+
+export async function getRecentSignals(db: Db, since: Date, limit: number): Promise<TradeSignal[]> {
+  const rows = await db
+    .select()
+    .from(tradeSignals)
+    .where(gte(tradeSignals.observedAt, since))
+    .orderBy(desc(tradeSignals.observedAt))
+    .limit(limit);
   return rows.map(rowToSignal);
 }
 

@@ -1,4 +1,4 @@
-import { eq, and } from "drizzle-orm";
+import { eq, and, gte, desc } from "drizzle-orm";
 import type { Db } from "../db.js";
 import { paperFills } from "../schema.js";
 import type { PaperFill, TokenRef, ChainId } from "@tradebot/core";
@@ -47,6 +47,16 @@ export async function getFill(db: Db, id: string): Promise<StoredFill | null> {
   const row = rows[0];
   if (!row) return null;
   return rowToFill(row);
+}
+
+export async function getRecentFills(db: Db, since: Date, limit: number): Promise<StoredFill[]> {
+  const rows = await db
+    .select()
+    .from(paperFills)
+    .where(gte(paperFills.decidedAt, since))
+    .orderBy(desc(paperFills.decidedAt))
+    .limit(limit);
+  return rows.map(rowToFill);
 }
 
 export type CopiedFillRow = {

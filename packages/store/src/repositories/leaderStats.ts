@@ -60,6 +60,11 @@ export async function getAllLeaderStats(db: Db, window: string): Promise<LeaderS
   return rows.map(rowToStats);
 }
 
+export async function getLeaderStatsByWallet(db: Db, walletId: string): Promise<LeaderStatsRow[]> {
+  const rows = await db.select().from(leaderStats).where(eq(leaderStats.walletId, walletId));
+  return rows.map(rowToStats);
+}
+
 function rowToStats(row: typeof leaderStats.$inferSelect): LeaderStatsRow {
   return {
     walletId: row.walletId,

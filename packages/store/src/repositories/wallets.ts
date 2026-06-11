@@ -37,6 +37,11 @@ export async function setWalletActive(db: Db, id: string, active: boolean): Prom
   await db.update(wallets).set({ active }).where(eq(wallets.id, id));
 }
 
+export async function getAllWallets(db: Db): Promise<TrackedWallet[]> {
+  const rows = await db.select().from(wallets);
+  return rows.map(rowToWallet);
+}
+
 function rowToWallet(row: typeof wallets.$inferSelect): TrackedWallet {
   return {
     id: row.id,

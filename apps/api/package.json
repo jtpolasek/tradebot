@@ -1,0 +1,25 @@
+{
+  "name": "@tradebot/api",
+  "version": "0.0.1",
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@tradebot/core": "workspace:*",
+    "@tradebot/store": "workspace:*",
+    "@fastify/websocket": "^11.0.0",
+    "dotenv": "^16.5.0",
+    "fastify": "^5.4.0",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.8.3",
+    "vitest": "^3.2.4"
+  }
+}

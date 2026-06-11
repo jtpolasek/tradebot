@@ -16,116 +16,97 @@
 
 ---
 
-## What Was Done in Phase 3
+## What Was Done in Phase 4
 
-All pricing source files written, tested, and committed:
+All paper-engine source files written, tested, and committed:
 
 | File | Status |
 |---|---|
-| `packages/pricing/src/price.ts` | done — `getUsdPrice`, `getLiquidityUsd`, `sqrtPriceX96ToPrice`, `clearCaches` |
-| `packages/pricing/src/price.test.ts` | done — 12 tests (sqrtPriceX96 math, mocked RPC, both token-order cases) |
-| `packages/pricing/src/marks.ts` | done — `startMarksJob` (60s interval) |
-| `packages/pricing/src/zerox.ts` | done — ported 0x quote client |
-| `packages/pricing/src/uniswapQuote.ts` | done — ported Uniswap quote client |
-| `packages/pricing/src/fees.ts` | done — ported fee valuation helper |
-| `packages/pricing/src/index.ts` | done |
-| `packages/pricing/package.json` | done |
-| `packages/pricing/tsconfig.json` | done |
-| `packages/pricing/vitest.config.ts` | done |
-| `packages/store/src/repositories/priceMarks.ts` | done — `insertPriceMark`, `latestMark`, `getOpenPositionTokens` |
+| `packages/paper-engine/src/accounting.ts` | done — `applyTradeToState`, `applyTotalLossToState` |
+| `packages/paper-engine/src/accounting.test.ts` | done — 4 tests (avg-cost math, partial sell PnL, guard throws) |
+| `packages/paper-engine/src/ledger.ts` | done — `ledgerDeltaFromTrade`, `derivePortfolioTotals`, `derivePositions`, `verifyLedger` |
+| `packages/paper-engine/src/ledger.test.ts` | done — 10 tests |
+| `packages/paper-engine/src/sizing.ts` | done — `sizeCopyTrade`, `calculateCashCappedBuyUsd`, `estimateSourceNotionalUsd` |
+| `packages/paper-engine/src/sizing.test.ts` | done — 8 tests |
+| `packages/paper-engine/src/exits.ts` | done — `checkExitTrigger`, `calcExitQuantity`, `runExitCheck`, `resetExitWorkerState` |
+| `packages/paper-engine/src/exits.test.ts` | done — 11 tests |
+| `packages/paper-engine/src/engine.ts` | done — `PaperEngine` class: `decide`, `fill`, provisional fill handling, snapshot every 5 min |
+| `packages/paper-engine/src/engine.test.ts` | done — 3 integration tests (20 scripted signals, zero-weight skip, insufficient-balance skip) |
+| `packages/paper-engine/src/index.ts` | done |
+| `packages/paper-engine/package.json` | done |
+| `packages/paper-engine/tsconfig.json` | done |
+| `packages/paper-engine/vitest.config.ts` | done |
+| `packages/store/src/repositories/signals.ts` | done — `insertSignal`, `upsertSignal`, `getSignalById` |
+| `packages/store/src/repositories/paperFills.ts` | done — `insertFill`, `updateFill`, `voidFill`, `getFill` |
+| `packages/store/src/repositories/positions.ts` | done — `upsertPosition`, `getPosition`, `getOpenPositions`, `closePosition` |
+| `packages/store/src/repositories/portfolioSnapshots.ts` | done — `insertSnapshot`, `latestSnapshot` |
+| `scripts/verify-ledger.ts` | done — `pnpm verify:ledger` checks all fills |
+| `apps/runner/src/index.ts` | updated — `startMarksJob` + `PaperEngine` wired in with viem RPC clients |
 
-### Key technical notes carried forward from Phase 3
+### Key technical notes carried forward from Phase 4
 
-- `RpcClient` in pricing uses `{ readContract: (args: any) => Promise<any> }` — same loose structural interface pattern as `MulticallClient` in decoder. Do NOT change to viem `PublicClient`.
-- `getUsdPrice` tries quote assets in QUOTE_ASSETS order. For eth: USDC first (stablecoin→1.0), then USDT, DAI, WETH (→Chainlink). Non-quote tokens are priced via V3 pool vs first matching quote asset.
-- `sqrtPriceX96ToPrice(sqrtPriceX96, dec0, dec1)` returns price of token0 in token1 (human units). When the target token is token1, caller must invert: `1 / price`.
-- `liqCache` and `llamaCache` are module-level Maps. `clearCaches()` is exported for test use — call it in `beforeEach`.
-- `startMarksJob` is NOT yet wired into `apps/runner/src/index.ts` — that wiring happens in Phase 4.
+- `PaperEngine` holds cash + positions in memory, writes every mutation through `p-queue` (concurrency 4) to DB.
+- `WeightProvider` interface defined in `engine.ts` with constant `1.0` stub — Phase 5 will replace the stub with real weights from `leader_stats`.
+- `decide(signal, liquidityUsd)` is public and synchronous — takes pre-fetched liquidityUsd. Call order: weight=0 → token-blocked → liquidity → sizing → cash/position guards.
+- Position keys are `${chain}:${tokenAddress.toLowerCase()}:${walletId}` — one position per (chain, token, leader).
+- `provisional` fills: stored with `provisional: true`; on `signal-confirmed` the price is updated; on `signal-voided` cash and qty are restored and the fill is voided in DB.
+- Fill price uses `getUsdPrice` only (0x quote is an optional enhancement not yet wired).
+- `startMarksJob` and `PaperEngine` are wired into `apps/runner/src/index.ts`; viem `createPublicClient` with WS transport is used for both.
 
 ---
 
-## Phase 4 — What Needs to Be Built
+## Phase 5 — What Needs to Be Built
 
-Per PLAN.md §7 Phase 4, `packages/paper-engine`:
+Per PLAN.md §7 Phase 5, `packages/brain`:
 
 ### Files to create
 
 | File | What it does |
 |---|---|
-| `packages/paper-engine/src/accounting.ts` | Port from `C:\Users\Willie\Documents\GMGN\src\lib\accounting.ts` — `applyTradeToState`, `applyTotalLossToState` (avg-cost position math, realized PnL) |
-| `packages/paper-engine/src/accounting.test.ts` | Port the colocated test — keep all expected values unchanged |
-| `packages/paper-engine/src/ledger.ts` | Port from `C:\Users\Willie\Documents\GMGN\src\lib\ledger.ts` — `ledgerDeltaFromTrade`, `derivePortfolioTotals`, `derivePositions`, `verifyLedger` |
-| `packages/paper-engine/src/ledger.test.ts` | Port the colocated test |
-| `packages/paper-engine/src/sizing.ts` | Port from `C:\Users\Willie\Documents\GMGN\src\lib\copy.ts` — `sizeCopyTrade`, `calculateCashCappedBuyUsd`, `estimateSourceNotionalUsd` |
-| `packages/paper-engine/src/sizing.test.ts` | Port the colocated test |
-| `packages/paper-engine/src/exits.ts` | Port from `C:\Users\Willie\Documents\GMGN\src\lib\exitWorker.ts` — pure functions `checkExitTrigger`, `calcExitQuantity` only; rewrite the worker loop against new repos |
-| `packages/paper-engine/src/exits.test.ts` | Port the colocated test |
-| `packages/paper-engine/src/engine.ts` | Main class: `decide(signal)` → copy/skip, `fill(signal, notionalUsd)` → `PaperFill`, ledger mutations, provisional fill handling |
-| `packages/paper-engine/src/engine.test.ts` | Integration test: 20 scripted signals through bus → engine → store; assert final cash/positions/PnL to the cent |
-| `packages/paper-engine/src/index.ts` | Exports |
-| `packages/paper-engine/package.json` | Same pattern as pricing |
-| `packages/paper-engine/tsconfig.json` | Extends `../../tsconfig.base.json` |
-| `packages/paper-engine/vitest.config.ts` | Same pattern as pricing (loads root `.env`) |
+| `packages/brain/src/scoring.ts` | Per-wallet FIFO round-trip reconstruction, compute `trades, win_rate, avg_return_pct, median_hold_minutes, realized_pnl_usd, max_drawdown_pct` |
+| `packages/brain/src/scoring.test.ts` | Unit tests: FIFO reconstruction, partial sells, open remainder at mark price |
+| `packages/brain/src/weights.ts` | `weight = clamp(2 * sigmoid(score), 0, 2)`; z-score across cohort; auto-mute at 7d score < −1 |
+| `packages/brain/src/weights.test.ts` | Hand-computed z-score + weight math, auto-mute trigger |
+| `packages/brain/src/adaptation.ts` | Liquidity-notch weekly job; per-leader category filter; writes `adaptation_log` |
+| `packages/brain/src/adaptation.test.ts` | Synthetic fills: liquidity notch trigger, per-leader tier mute, hard bounds |
+| `packages/brain/src/scorer.ts` | Hourly job: runs scoring + weight update, persists to `leader_stats`, refreshes `PaperEngine` weights |
+| `packages/brain/src/index.ts` | Exports |
+| `packages/brain/package.json` | Same pattern as pricing |
+| `packages/brain/tsconfig.json` | Extends `../../tsconfig.base.json` |
+| `packages/brain/vitest.config.ts` | Same pattern as pricing (loads root `.env`) |
 
 ### Also required
 
-- Add missing store repositories (see below)
-- Wire `startMarksJob` and `PaperEngine` into `apps/runner/src/index.ts`
-- Add `pnpm verify:ledger` script
+- `settings` table in DB (key/value jsonb) — env vars are defaults, settings table is the override for adaptive values
+- New Drizzle migration for `settings` table
+- Wire `packages/brain` hourly job into `apps/runner/src/index.ts`
+- Replace constant `WeightProvider` stub in runner with `BrainWeightProvider` that reads from `leader_stats`
 
-### Mirror decision logic (`decide`)
+### Scoring formula
 
-Order matters — first matching condition wins:
-
-1. Leader weight from brain (stub `WeightProvider` interface returning constant `1.0` until Phase 5). Weight = 0 → skip `leader-weight-zero`.
-2. Token blocked (`tokens.is_blocked`) → skip `token-blocklist`.
-3. `getLiquidityUsd < MIN_LIQUIDITY_USD` → skip `below-min-liquidity`. Null liquidity → skip `no-liquidity-data`.
-4. Sizing:
-   - `notional = equity * BASE_TRADE_PCT * leaderWeight`, clamped to `[MIN_NOTIONAL_USD, equity * MAX_TRADE_PCT]`
-   - Buy: if cash < notional, clamp to cash; if cash < MIN_NOTIONAL → skip `insufficient-balance`
-   - Sell: only if we hold a position in that token from this leader. Sell same fraction leader sold. No position → skip `no-position`. Never short.
-   - `SIZING_MODE=proportional`: scale by leader's trade notional vs their median recent notional (clamped 0.25×–4×)
-
-### Fill simulation logic (`fill`)
-
-- Base price: `getZeroxPrice` if ZEROX_API_KEY present, else `getUsdPrice`
-- `slippageBps = dexFeeBps(venue) + impactBps + delayPenaltyBps(chain)`
-  - `impactBps = 10_000 * notional / (2 * liquidityUsd)`, capped at 500
-  - `dexFeeBps`: v2/aerodrome=30, v3=30 (or pool fee tier if known), unknown=30
-  - `delayPenaltyBps`: from config `COPY_DELAY_PENALTY_BPS_ETH` / `COPY_DELAY_PENALTY_BPS_BASE`
-- Buys fill at `price * (1 + slippageBps/10_000)`, sells at `price * (1 - slippageBps/10_000)`
-- `feeUsd = GAS_USD_<CHAIN> + dex fee component`
-- Mempool fills: `provisional: true`. On `signal-confirmed`: recompute price, update row. On `signal-voided`: restore cash/position, void fill.
-
-### Store repositories needed for Phase 4
-
-These don't exist yet — create them in `packages/store/src/repositories/`:
-
-| File | Functions needed |
-|---|---|
-| `paperFills.ts` | `insertFill`, `updateFill`, `voidFill`, `getFill` |
-| `positions.ts` | `upsertPosition`, `getPosition`, `getOpenPositions`, `closePosition` |
-| `portfolioSnapshots.ts` | `insertSnapshot`, `latestSnapshot` |
-| `signals.ts` | `insertSignal`, `upsertSignal` (for mempool→confirmed update) |
-
-Export all from `packages/store/src/index.ts`.
+Per PLAN.md §7 Phase 5:
+- Score per window (7d/30d/all): `0.35*z(pnl) + 0.25*z(win_rate) + 0.25*z(avg_return) − 0.15*z(drawdown)`
+- z-scores computed across tracked cohort (cohort size 1 → z = 0)
+- `trades < 5` in window → score null, weight default 0.5
+- `weight = clamp(2 * sigmoid(score), 0, 2)`
+- 7d score < −1 → weight 0, write `adaptation_log` row
 
 ### Acceptance criteria
 
-- Integration test: 20 scripted signals (buys, sells incl. fractional, a revert-void, unknown token, insufficient-cash clamp) through bus → engine → store; assert final cash, positions, realized PnL to the cent
-- Live or replay run ≥ 24h: equity curve renders from snapshots, no crash, never negative cash
-- `verifyLedger` against DB at end — zero mismatches
+- Unit tests for FIFO reconstruction (incl. partial sells and open remainder), z-score/weight math with hand-computed values, auto-mute trigger, liquidity-notch rule with synthetic fills
+- Seeded synthetic 30-day dataset → profitable leader weight > 1.2, losing leader → 0
 - `pnpm build && pnpm test` green
-- Commit: `feat: Phase 4 — paper engine, ported accounting/ledger/sizing/exits`
+- Commit: `feat: Phase 5 — brain scoring, weights, adaptive filters`
 
 ---
 
-## Everything That Exists (Phases 0–3)
+## Everything That Exists (Phases 0–4)
 
 ### Root
 - `package.json`, `pnpm-workspace.yaml`, `turbo.json`, `tsconfig.base.json`
 - `docker-compose.yml` — db port 5433, db-test port 5434 (profile `test`)
 - `.env.example`, `.env` (gitignored)
+- `scripts/verify-ledger.ts` — `pnpm verify:ledger`
 
 ### packages/core/src/
 - `types.ts`, `bus.ts`, `config.ts`, `chains.ts`, `money.ts`, `logger.ts`, `index.ts`
@@ -133,6 +114,7 @@ Export all from `packages/store/src/index.ts`.
 ### packages/store/src/
 - `schema.ts`, `db.ts`, `migrate.ts`
 - `repositories/wallets.ts`, `repositories/chainState.ts`, `repositories/tokens.ts`, `repositories/priceMarks.ts`
+- `repositories/signals.ts`, `repositories/paperFills.ts`, `repositories/positions.ts`, `repositories/portfolioSnapshots.ts`
 - `index.ts`, `drizzle/0000_curly_ink.sql`, `drizzle.config.ts`
 
 ### packages/ingest/src/
@@ -149,16 +131,20 @@ Export all from `packages/store/src/index.ts`.
 - `price.ts`, `marks.ts`, `zerox.ts`, `uniswapQuote.ts`, `fees.ts`, `index.ts`
 - `price.test.ts` — 12 tests
 
-### apps/runner/src/
-- `index.ts` — ChainWatchers + Decoder + replay harness (`--replay <file> [--speed N]`)
-- NOTE: `startMarksJob` and `PaperEngine` are NOT yet wired in — do that in Phase 4
+### packages/paper-engine/src/
+- `accounting.ts`, `ledger.ts`, `sizing.ts`, `exits.ts`, `engine.ts`, `index.ts`
+- 5 test files — 40 tests total
 
-### All tests: 91 total — all passing
+### apps/runner/src/
+- `index.ts` — ChainWatchers + Decoder + replay harness + startMarksJob + PaperEngine
+
+### All tests: 149 total — all passing
 - `@tradebot/core`: 14 tests
 - `@tradebot/store`: 5 tests (require Docker test DB on port 5434)
 - `@tradebot/ingest`: 28 tests
 - `@tradebot/decoder`: 49 tests
 - `@tradebot/pricing`: 12 tests
+- `@tradebot/paper-engine`: 40 tests
 - `@tradebot/runner`: 1 placeholder test
 
 ---
@@ -168,7 +154,7 @@ Export all from `packages/store/src/index.ts`.
 ### RpcClient / MulticallClient loose interfaces
 DO NOT use viem's `PublicClient` type directly in package source. Use structural interfaces:
 - `MulticallClient = { multicall: (args: any) => Promise<any[]> }` (decoder/tokenMetadata)
-- `RpcClient = { readContract: (args: any) => Promise<any> }` (pricing/price)
+- `RpcClient = { readContract: (args: any) => Promise<any> }` (pricing/price, paper-engine/engine)
 This avoids TS2719 type-identity errors from pnpm dual-viem-path resolution.
 
 ### bigint discipline
@@ -205,15 +191,12 @@ export default defineConfig({ test: { include: ["src/**/*.test.ts"], testTimeout
 |---|---|
 | PLAN.md (source of truth) | `C:\Users\Willie\Documents\tradebot\PLAN.md` |
 | Old app reference (read-only) | `C:\Users\Willie\Documents\GMGN\src\lib\` |
-| accounting.ts (port target) | `C:\Users\Willie\Documents\GMGN\src\lib\accounting.ts` |
-| ledger.ts (port target) | `C:\Users\Willie\Documents\GMGN\src\lib\ledger.ts` |
-| copy.ts / sizing (port target) | `C:\Users\Willie\Documents\GMGN\src\lib\copy.ts` |
-| exitWorker.ts (port target) | `C:\Users\Willie\Documents\GMGN\src\lib\exitWorker.ts` |
 | Core types | `packages\core\src\types.ts` |
 | chains.ts (QUOTE_ASSETS etc) | `packages\core\src\chains.ts` |
 | config.ts (env vars) | `packages\core\src\config.ts` |
 | Pricing main | `packages\pricing\src\price.ts` |
 | Store schema | `packages\store\src\schema.ts` |
+| Paper engine main | `packages\paper-engine\src\engine.ts` |
 | Runner entry point | `apps\runner\src\index.ts` |
 | .env (real keys) | `.env` (gitignored) |
 

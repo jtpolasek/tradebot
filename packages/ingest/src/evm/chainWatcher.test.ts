@@ -42,6 +42,7 @@ function makeMockClient(opts: {
     getLogs: vi.fn().mockResolvedValue([]),
     getTransactionReceipt: vi.fn().mockResolvedValue(null),
     getTransaction: vi.fn().mockResolvedValue(null),
+    getBlock: vi.fn().mockResolvedValue({ timestamp: 0n }),
   };
   return { client, unwatches };
 }

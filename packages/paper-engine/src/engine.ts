@@ -349,6 +349,34 @@ export class PaperEngine {
     const token: TokenRef = signal.side === "buy" ? signal.tokenOut : signal.tokenIn;
     const quoteToken: TokenRef = signal.side === "buy" ? signal.tokenIn : signal.tokenOut;
 
+    // Staleness veto: a backfilled trade stamps observedAt at processing time, so latency math
+    // can't catch it. The block timestamp reveals the true age — skip copying long-dead trades
+    // at the current price (correctness gate, distinct from the risk filters in decide()).
+    if (isStaleSignal(signal, Date.now(), this.cfg.MAX_SIGNAL_AGE_SEC * 1000)) {
+      const decidedAt = Date.now();
+      const fill: PaperFill = {
+        id: randomUUID(),
+        signalId: signal.id,
+        decidedAt,
+        decision: "skipped",
+        skipReason: "stale-signal",
+        side: signal.side,
+        token,
+        quoteToken,
+        qty: 0,
+        priceUsd: 0,
+        notionalUsd: 0,
+        feeUsd: 0,
+        slippageBps: 0,
+        latencyMs: decidedAt - signal.observedAt,
+        provisional: false,
+      };
+      await insertFill(this.db, fill);
+      this.bus.emit("paper-fill", fill);
+      this.rememberLeaderHolding(signal);
+      return;
+    }
+
     const [tokenRow, quoteTokenRow] = await Promise.all([
       getToken(this.db, token.chain, token.address),
       getToken(this.db, quoteToken.chain, quoteToken.address),
@@ -986,6 +1014,20 @@ export class PaperEngine {
   getRealizedPnlUsd(): number {
     return this.portfolio.realizedPnlUsd;
   }
+}
+
+/**
+ * A confirmed signal is stale when its block timestamp is older than maxAgeMs. Mempool and
+ * test signals without a block timestamp are never stale (they're live by construction).
+ */
+export function isStaleSignal(
+  signal: Pick<TradeSignal, "blockTimestamp">,
+  nowMs: number,
+  maxAgeMs: number
+): boolean {
+  const ts = signal.blockTimestamp;
+  if (ts === undefined || ts === null) return false;
+  return nowMs - ts > maxAgeMs;
 }
 
 function posKey(chain: ChainId, tokenAddress: string, walletId: string | null): string {

@@ -76,7 +76,10 @@ type Client = {
     nonce: number;
     value: bigint;
   }>;
+  getBlock(p: { blockNumber: bigint }): Promise<{ timestamp: bigint }>;
 };
+
+const BLOCK_TS_CACHE_MAX = 2_000;
 
 export interface ChainWatcherOptions {
   chain: ChainId;
@@ -98,6 +101,8 @@ export class ChainWatcher {
 
   private wallets: string[] = [];
   private readonly dedupe = new LruSet<string>(DEDUPE_SIZE);
+  // Block number → block timestamp (epoch ms). Many txs share a block during backfill bursts.
+  private readonly blockTsCache = new Map<number, number>();
 
   private stopped = false;
   private client: Client | null = null;
@@ -308,14 +313,17 @@ export class ChainWatcher {
       try {
         const receipt = await this.client!.getTransactionReceipt({ hash: txHash });
         const tx = await this.client!.getTransaction({ hash: txHash });
+        const blockNumber = receipt.blockNumber !== null ? Number(receipt.blockNumber) : null;
+        const blockTimestamp = blockNumber !== null ? await this.blockTimestampMs(blockNumber) : undefined;
         const event: RawTxEvent = {
           chain: this.chain,
           source: "confirmed",
           txHash,
           from: receipt.from.toLowerCase(),
           to: receipt.to?.toLowerCase() ?? null,
-          blockNumber: receipt.blockNumber !== null ? Number(receipt.blockNumber) : null,
+          blockNumber,
           observedAt: Date.now(),
+          ...(blockTimestamp !== undefined ? { blockTimestamp } : {}),
           ...(tx.input ? { input: tx.input } : {}),
           logs: receipt.logs.map((l) => ({
             address: l.address.toLowerCase(),
@@ -499,6 +507,25 @@ export class ChainWatcher {
   }
 
   // ── Helpers ─────────────────────────────────────────────────────────────────
+
+  /** Fetch a block's timestamp (epoch ms), cached by block number. Returns undefined on failure. */
+  private async blockTimestampMs(blockNumber: number): Promise<number | undefined> {
+    const cached = this.blockTsCache.get(blockNumber);
+    if (cached !== undefined) return cached;
+    try {
+      const block = await this.client!.getBlock({ blockNumber: BigInt(blockNumber) });
+      const ms = Number(block.timestamp) * 1000;
+      if (this.blockTsCache.size >= BLOCK_TS_CACHE_MAX) {
+        const oldest = this.blockTsCache.keys().next().value;
+        if (oldest !== undefined) this.blockTsCache.delete(oldest);
+      }
+      this.blockTsCache.set(blockNumber, ms);
+      return ms;
+    } catch (err) {
+      this.logger.debug({ err, blockNumber }, "failed to fetch block timestamp");
+      return undefined;
+    }
+  }
 
   emitAndRecord(event: RawTxEvent): void {
     this.lastEventTs = Date.now();

@@ -20,6 +20,7 @@ const schema = z.object({
   MAX_TRADE_PCT: z.coerce.number().positive().default(0.03),
   MIN_NOTIONAL_USD: z.coerce.number().positive().default(50),
   MIN_LIQUIDITY_USD: z.coerce.number().positive().default(150_000),
+  MAX_SIGNAL_AGE_SEC: z.coerce.number().positive().default(180),
   COPY_DELAY_PENALTY_BPS_ETH: z.coerce.number().nonnegative().default(10),
   COPY_DELAY_PENALTY_BPS_BASE: z.coerce.number().nonnegative().default(5),
   GAS_USD_ETH: z.coerce.number().nonnegative().default(4),

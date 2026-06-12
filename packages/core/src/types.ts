@@ -17,6 +17,8 @@ export interface RawTxEvent {
   to: string | null;
   blockNumber: number | null;
   observedAt: number;
+  /** Block timestamp in epoch ms (UTC), confirmed events only. Used to detect stale (backfilled) trades. */
+  blockTimestamp?: number;
   input?: `0x${string}`;
   logs?: { address: string; topics: string[]; data: string }[];
   status?: "success" | "reverted";
@@ -39,6 +41,12 @@ export interface TradeSignal {
   observedAt: number;
   confirmedAt: number | null;
   blockNumber: number | null;
+  /**
+   * Block timestamp in epoch ms (UTC) for confirmed signals. Transient (not persisted) —
+   * the engine uses it to veto stale, backfilled trades whose observedAt was stamped at
+   * processing time rather than when the trade actually happened.
+   */
+  blockTimestamp?: number | null;
 }
 
 export interface TokenRef {

@@ -312,6 +312,7 @@ export class Decoder {
       observedAt: event.observedAt,
       confirmedAt: event.source === "confirmed" ? Date.now() : null,
       blockNumber: event.blockNumber,
+      blockTimestamp: event.blockTimestamp ?? null,
     });
 
     return side === "both" ? [makeSignal("sell"), makeSignal("buy")] : [makeSignal(side)];

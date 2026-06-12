@@ -67,6 +67,7 @@ function cfg(overrides: Record<string, unknown> = {}) {
     MAX_TRADE_PCT: 0.03,
     MIN_NOTIONAL_USD: 50,
     MIN_LIQUIDITY_USD: 150_000,
+    MAX_SIGNAL_AGE_SEC: 180,
     COPY_DELAY_PENALTY_BPS_ETH: 10,
     COPY_DELAY_PENALTY_BPS_BASE: 5,
     GAS_USD_ETH: 4,
@@ -443,6 +444,34 @@ describe("PaperEngine integration", () => {
     const fills = await getRecentFills(db, new Date(Date.now() - 60_000), 5);
     expect(fills[0]?.decision).toBe("skipped");
     expect(fills[0]?.skipReason).toBe("token-blocklist");
+  });
+
+  it("vetoes a stale (backfilled) signal with skip reason stale-signal", async () => {
+    const bus = new EventBus();
+    await db.execute(sql`TRUNCATE paper_fills CASCADE`);
+    await db.execute(sql`TRUNCATE trade_signals CASCADE`);
+    await upsertToken(db, {
+      chain: TOKEN_A.chain,
+      address: TOKEN_A.address,
+      symbol: TOKEN_A.symbol,
+      name: TOKEN_A.symbol,
+      decimals: TOKEN_A.decimals,
+      isBlocked: false,
+    });
+
+    const engine = new PaperEngine(db, bus, cfg() as never, mockRpcClient as never);
+    await engine.start();
+    // Block confirmed four hours ago — well past the 180s cap.
+    bus.emit(
+      "trade-signal",
+      makeSignal({ walletId, tokenOut: TOKEN_A, tokenIn: USDC, blockTimestamp: Date.now() - 4 * 60 * 60_000 })
+    );
+    await new Promise<void>((r) => setTimeout(r, 200));
+    engine.stop();
+
+    const fills = await getRecentFills(db, new Date(Date.now() - 60_000), 5);
+    expect(fills[0]?.decision).toBe("skipped");
+    expect(fills[0]?.skipReason).toBe("stale-signal");
   });
 
   it("stores fills against the persisted signal id when duplicate tx signals arrive", async () => {

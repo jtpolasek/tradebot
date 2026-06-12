@@ -37,7 +37,7 @@ Review of the Sonnet-built implementation against `PLAN.md`. Status in `CLAUDE.m
 - [x] **2.8 Per-leader tier mutes** fixed: brain provider stores computed muted liquidity tiers and engine skips matching leader/tier signals.
 - [x] **2.9 Adaptive liquidity notch inert** fixed: scorer adaptation now uses latest price marks for current price and live per-chain pricing liquidity lookups when runner RPC clients are available; copied-fill rows include chain for mark/liquidity resolution.
 - [x] **2.10 0x `getQuotePrice`** fixed: paper engine now attempts usable 0x price quotes for buy/sell fills when `ZEROX_API_KEY` is configured, derives effective USD fill prices from quote amounts, applies quoted dex fees, and falls back to spot/slippage pricing when 0x is unavailable. Regression test added.
-- [ ] **2.11 `verifyLedger` script vacuous** — builds all-zero deltas; can't detect mismatches.
+- [x] **2.11 `verifyLedger` script vacuous** fixed: script now replays real non-voided copied fills through the accounting engine, compares derived open positions and latest snapshot totals against the DB, and exits non-zero on mismatches.
 - [ ] **2.12 Aerodrome pricing on Base** absent; only Uni V3 factory probed; `aerodrome` venue never assigned.
 - [ ] **2.13 trades < 5 → weight 0.5** — scorer defaults to 1.0.
 - [ ] **2.14 bigint discipline** — `Number(rawAmount)` in `scorer.ts`, decoder Strategy B, pricing diff.

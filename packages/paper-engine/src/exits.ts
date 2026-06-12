@@ -34,7 +34,7 @@ export type ExitCheckDeps = {
     sourceWalletId: string | null;
   }>>;
   getLatestPrice: (chain: string, tokenAddress: string) => Promise<number | null>;
-  executeSell: (pos: { id: string; chain: string; tokenAddress: string; qty: number; avgCostUsd: number; sourceWalletId: string | null }, trigger: ExitTrigger) => Promise<void>;
+  executeSell: (pos: { id: string; chain: string; tokenAddress: string; qty: number; avgCostUsd: number; sourceWalletId: string | null }, trigger: ExitTrigger, currentPriceUsd: number) => Promise<void>;
 };
 
 const pendingExits = new Set<string>();
@@ -66,7 +66,7 @@ export async function runExitCheck(rules: ExitRules, deps: ExitCheckDeps): Promi
       pendingExits.add(pos.tokenAddress);
       try {
         const exitQty = calcExitQuantity(pos.qty, rules.exitSizePct);
-        await deps.executeSell({ ...pos, qty: exitQty }, trigger);
+        await deps.executeSell({ ...pos, qty: exitQty }, trigger, currentPriceUsd);
       } finally {
         pendingExits.delete(pos.tokenAddress);
       }

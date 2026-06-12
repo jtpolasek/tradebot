@@ -1,16 +1,33 @@
-import { decodeEventLog } from "viem";
+import { decodeEventLog, parseAbi } from "viem";
 import type { RawTxEvent, TradeSignal, ChainId } from "@tradebot/core";
-import { VENUE_ABIS, VENUE_TOPIC_MAP, TRANSFER_TOPIC } from "./venues.js";
+import { KNOWN_FACTORIES, VENUE_ABIS, VENUE_TOPIC_MAP, TRANSFER_TOPIC } from "./venues.js";
 import type { TokenMetadataResolver } from "./tokenMetadata.js";
 
 type Log = NonNullable<RawTxEvent["logs"]>[number];
+type ReadContractClient = {
+  readContract: (args: {
+    address: `0x${string}`;
+    abi: readonly unknown[];
+    functionName: string;
+    args?: readonly unknown[];
+  }) => Promise<unknown>;
+};
+
+export type StrategyAClients = Partial<Record<ChainId, ReadContractClient>>;
+
+const V2_FACTORY_ABI = parseAbi(["function getPair(address tokenA, address tokenB) view returns (address pair)"]);
+const V3_FACTORY_ABI = parseAbi(["function getPool(address tokenA, address tokenB, uint24 fee) view returns (address pool)"]);
+const V3_POOL_ABI = parseAbi(["function fee() view returns (uint24)"]);
+const NULL_ADDR = "0x0000000000000000000000000000000000000000";
+const poolVerificationCache = new Map<string, boolean>();
 
 /** Returns null if Strategy A can't decode (fall through to B). */
 export async function strategyA(
   event: RawTxEvent,
   walletAddress: string,
   meta: TokenMetadataResolver,
-  _signalId: string
+  _signalId: string,
+  clients: StrategyAClients = {}
 ): Promise<Pick<TradeSignal, "tokenIn" | "tokenOut" | "amountIn" | "amountOut" | "venue"> | null> {
   if (!event.logs || event.logs.length === 0) return null;
 
@@ -42,10 +59,10 @@ export async function strategyA(
 
   try {
     if (venueKey === "UNISWAP_V2_SWAP") {
-      return await decodeV2Swap(swapLog, event, walletAddress, meta);
+      return await decodeV2Swap(swapLog, event, walletAddress, meta, clients);
     }
     if (venueKey === "UNISWAP_V3_SWAP") {
-      return await decodeV3Swap(swapLog, event, walletAddress, meta);
+      return await decodeV3Swap(swapLog, event, walletAddress, meta, clients);
     }
     if (venueKey === "UNISWAP_V4_SWAP") {
       return await decodeV4Swap(swapLog, event, walletAddress, meta);
@@ -61,7 +78,8 @@ async function decodeV2Swap(
   swapLog: Log,
   event: RawTxEvent,
   walletAddress: string,
-  meta: TokenMetadataResolver
+  meta: TokenMetadataResolver,
+  clients: StrategyAClients
 ): Promise<Pick<TradeSignal, "tokenIn" | "tokenOut" | "amountIn" | "amountOut" | "venue"> | null> {
   const decoded = decodeEventLog({
     abi: [VENUE_ABIS.UNISWAP_V2_SWAP],
@@ -95,6 +113,11 @@ async function decodeV2Swap(
   );
   if (!tokenInAddr || !tokenOutAddr) return null;
 
+  const token0Addr = token0IsIn ? tokenInAddr : tokenOutAddr;
+  const token1Addr = token0IsIn ? tokenOutAddr : tokenInAddr;
+  const verified = await verifyV2Pool(event.chain, poolAddress, token0Addr, token1Addr, clients);
+  if (!verified) return null;
+
   const [metaIn, metaOut] = await Promise.all([
     meta.resolve(event.chain, tokenInAddr),
     meta.resolve(event.chain, tokenOutAddr),
@@ -113,7 +136,8 @@ async function decodeV3Swap(
   swapLog: Log,
   event: RawTxEvent,
   walletAddress: string,
-  meta: TokenMetadataResolver
+  meta: TokenMetadataResolver,
+  clients: StrategyAClients
 ): Promise<Pick<TradeSignal, "tokenIn" | "tokenOut" | "amountIn" | "amountOut" | "venue"> | null> {
   const decoded = decodeEventLog({
     abi: [VENUE_ABIS.UNISWAP_V3_SWAP],
@@ -138,6 +162,11 @@ async function decodeV3Swap(
     token0IsIn
   );
   if (!tokenInAddr || !tokenOutAddr) return null;
+
+  const token0Addr = token0IsIn ? tokenInAddr : tokenOutAddr;
+  const token1Addr = token0IsIn ? tokenOutAddr : tokenInAddr;
+  const verified = await verifyV3Pool(event.chain, poolAddress, token0Addr, token1Addr, clients);
+  if (!verified) return null;
 
   const [metaIn, metaOut] = await Promise.all([
     meta.resolve(event.chain, tokenInAddr),
@@ -247,4 +276,67 @@ function detectV3Venue(poolAddress: string, chain: ChainId): string {
   void poolAddress; void chain;
   // Could check against known Aerodrome CL pools for Base — for now default to uniswap-v3
   return "uniswap-v3";
+}
+
+async function verifyV2Pool(
+  chain: ChainId,
+  poolAddress: string,
+  token0: string,
+  token1: string,
+  clients: StrategyAClients
+): Promise<boolean> {
+  const factory = KNOWN_FACTORIES[chain].v2;
+  const client = clients[chain];
+  if (!factory || !client) return true;
+
+  const cacheKey = `${chain}:v2:${poolAddress}`;
+  const cached = poolVerificationCache.get(cacheKey);
+  if (cached !== undefined) return cached;
+
+  const pair = await client.readContract({
+    address: factory as `0x${string}`,
+    abi: V2_FACTORY_ABI,
+    functionName: "getPair",
+    args: [token0 as `0x${string}`, token1 as `0x${string}`],
+  });
+  const verified = normalizeAddress(pair) === poolAddress && normalizeAddress(pair) !== NULL_ADDR;
+  poolVerificationCache.set(cacheKey, verified);
+  return verified;
+}
+
+async function verifyV3Pool(
+  chain: ChainId,
+  poolAddress: string,
+  token0: string,
+  token1: string,
+  clients: StrategyAClients
+): Promise<boolean> {
+  const factory = KNOWN_FACTORIES[chain].v3;
+  const client = clients[chain];
+  if (!factory || !client) return true;
+
+  const cacheKey = `${chain}:v3:${poolAddress}`;
+  const cached = poolVerificationCache.get(cacheKey);
+  if (cached !== undefined) return cached;
+
+  const fee = await client.readContract({
+    address: poolAddress as `0x${string}`,
+    abi: V3_POOL_ABI,
+    functionName: "fee",
+  });
+  if (typeof fee !== "number") return false;
+
+  const pool = await client.readContract({
+    address: factory as `0x${string}`,
+    abi: V3_FACTORY_ABI,
+    functionName: "getPool",
+    args: [token0 as `0x${string}`, token1 as `0x${string}`, fee],
+  });
+  const verified = normalizeAddress(pool) === poolAddress && normalizeAddress(pool) !== NULL_ADDR;
+  poolVerificationCache.set(cacheKey, verified);
+  return verified;
+}
+
+function normalizeAddress(value: unknown): string {
+  return typeof value === "string" ? value.toLowerCase() : "";
 }

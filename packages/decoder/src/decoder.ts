@@ -17,6 +17,7 @@ import { analyzePairs } from "./balanceDelta.js";
 import { SignalDeduper } from "./deduper.js";
 import { TRANSFER_TOPIC, WETH_WITHDRAWAL_TOPIC } from "./venues.js";
 import type { NormalizedTransfer } from "./types.js";
+import type { StrategyAClients } from "./strategyA.js";
 
 const logger = createLogger("decoder");
 
@@ -34,6 +35,7 @@ export class Decoder {
   private wallets: Set<string>;
   private walletIds = new Map<string, string>();
   private readonly meta: TokenMetadataResolver;
+  private readonly rpcClients: StrategyAClients;
   private readonly deduper = new SignalDeduper();
   private readonly queue = new PQueue({ concurrency: 4 });
   private walletReloadTimer: ReturnType<typeof setInterval> | null = null;
@@ -49,6 +51,7 @@ export class Decoder {
 
     const ethClient = createPublicClient({ chain: mainnet, transport: http(ethUrl) });
     const baseClient = createPublicClient({ chain: base, transport: http(baseUrl) });
+    this.rpcClients = { eth: ethClient, base: baseClient };
     this.meta = new TokenMetadataResolver(this.db, { eth: ethClient, base: baseClient });
   }
 
@@ -109,8 +112,8 @@ export class Decoder {
 
     try {
       if (event.status === "reverted") {
-        const voided = this.deduper.resolveReverted(event);
-        if (voided) {
+        const voidedSignals = this.deduper.resolveRevertedAll(event);
+        for (const voided of voidedSignals) {
           this.bus.emit("signal-voided", { signalId: voided.id, reason: "reverted" });
         }
         return;
@@ -124,9 +127,11 @@ export class Decoder {
       if (event.source === "confirmed") {
         // Check for replaced tx (same from+nonce, different hash)
         if (event.nonce !== undefined) {
-          const replaced = this.deduper.resolveReplaced(event.chain, event.from, event.nonce);
-          if (replaced && replaced.txHash !== event.txHash) {
-            this.bus.emit("signal-voided", { signalId: replaced.id, reason: "replaced" });
+          const replacedSignals = this.deduper.resolveReplacedAll(event.chain, event.from, event.nonce);
+          for (const replaced of replacedSignals) {
+            if (replaced.txHash !== event.txHash) {
+              this.bus.emit("signal-voided", { signalId: replaced.id, reason: "replaced" });
+            }
           }
         }
         await this.handleConfirmed(event, wallet, walletId);
@@ -140,30 +145,34 @@ export class Decoder {
     const result = await strategyC(event, wallet, this.meta);
     if (!result) return;
 
-    const signal = this.buildSignal(event, wallet, walletId, result);
-    if (!signal) return;
+    const signals = this.buildSignals(event, wallet, walletId, result);
+    if (signals.length === 0) return;
 
-    this.deduper.trackMempoolWithNonce(signal, event.from, event.nonce ?? 0);
-    this.bus.emit("trade-signal", signal);
+    for (const signal of signals) {
+      this.deduper.trackMempoolWithNonce(signal, event.from, event.nonce ?? 0);
+      this.bus.emit("trade-signal", signal);
 
-    this.queue.add(() => this.persistSignal(signal));
+      this.queue.add(() => this.persistSignal(signal));
+    }
   }
 
   private async handleConfirmed(event: RawTxEvent, wallet: string, walletId: string): Promise<void> {
     // Try Strategy A first
-    const aResult = await strategyA(event, wallet, this.meta, crypto.randomUUID());
+    const aResult = await strategyA(event, wallet, this.meta, crypto.randomUUID(), this.rpcClients);
     if (aResult) {
-      const signal = this.buildSignal(event, wallet, walletId, aResult);
-      if (signal) {
-        await this.resolveAndEmitConfirmed(event, signal);
+      const signals = this.buildSignals(event, wallet, walletId, aResult);
+      if (signals.length > 0) {
+        for (const signal of signals) {
+          await this.resolveAndEmitConfirmed(event, signal);
+        }
         return;
       }
     }
 
     // Fall through to Strategy B (balance delta)
-    const bResult = await this.runStrategyB(event, wallet, walletId);
-    if (bResult) {
-      await this.resolveAndEmitConfirmed(event, bResult);
+    const bSignals = await this.runStrategyB(event, wallet, walletId);
+    for (const signal of bSignals) {
+      await this.resolveAndEmitConfirmed(event, signal);
     }
   }
 
@@ -189,8 +198,8 @@ export class Decoder {
     event: RawTxEvent,
     wallet: string,
     walletId: string
-  ): Promise<TradeSignal | null> {
-    if (!event.logs) return null;
+  ): Promise<TradeSignal[]> {
+    if (!event.logs) return [];
 
     const padded = (addr: string) => addr.replace("0x", "0x000000000000000000000000").toLowerCase();
     const paddedWallet = padded(wallet);
@@ -261,35 +270,32 @@ export class Decoder {
       }
     }
 
-    if (outbound.length === 0 || inbound.length === 0) return null;
+    if (outbound.length === 0 || inbound.length === 0) return [];
 
     const result = analyzePairs(outbound, inbound);
-    if (result.status === "skipped" || result.side === "unknown") return null;
-    if (!result.tokenIn || !result.tokenOut) return null;
+    if (result.status === "skipped") return [];
+    if (!result.tokenIn || !result.tokenOut) return [];
 
-    return this.buildSignalFromDelta(event, walletId, result.tokenIn, result.tokenOut, result.side as "buy" | "sell");
+    return this.buildSignalsFromDelta(event, walletId, result.tokenIn, result.tokenOut);
   }
 
-  private buildSignal(
+  private buildSignals(
     event: RawTxEvent,
     _wallet: string,
     walletId: string,
     parts: Pick<TradeSignal, "tokenIn" | "tokenOut" | "amountIn" | "amountOut" | "venue">
-  ): TradeSignal | null {
+  ): TradeSignal[] {
     const { tokenIn, tokenOut, amountIn, amountOut, venue } = parts;
     const side = classifySide(event.chain, tokenIn.address, tokenOut.address);
-    if (!side) return null; // stable rotation — skip
+    if (!side) return []; // stable rotation — skip
 
-    // If both non-quote: emit two signals — for now emit the buy
-    const effectiveSide = side === "both" ? "buy" : side;
-
-    return {
+    const makeSignal = (signalSide: "buy" | "sell"): TradeSignal => ({
       id: crypto.randomUUID(),
       chain: event.chain,
       walletId,
       txHash: event.txHash,
       source: event.source,
-      side: effectiveSide,
+      side: signalSide,
       tokenIn,
       tokenOut,
       amountIn,
@@ -298,35 +304,27 @@ export class Decoder {
       observedAt: event.observedAt,
       confirmedAt: event.source === "confirmed" ? Date.now() : null,
       blockNumber: event.blockNumber,
-    };
+    });
+
+    return side === "both" ? [makeSignal("sell"), makeSignal("buy")] : [makeSignal(side)];
   }
 
-  private buildSignalFromDelta(
+  private buildSignalsFromDelta(
     event: RawTxEvent,
     walletId: string,
     tokenIn: NormalizedTransfer,
-    tokenOut: NormalizedTransfer,
-    side: "buy" | "sell"
-  ): TradeSignal {
+    tokenOut: NormalizedTransfer
+  ): TradeSignal[] {
     const tokenInRef = { chain: event.chain, address: tokenIn.tokenAddress || NATIVE_TOKEN_PLACEHOLDER, symbol: tokenIn.symbol, decimals: tokenIn.decimals };
     const tokenOutRef = { chain: event.chain, address: tokenOut.tokenAddress || NATIVE_TOKEN_PLACEHOLDER, symbol: tokenOut.symbol, decimals: tokenOut.decimals };
 
-    return {
-      id: crypto.randomUUID(),
-      chain: event.chain,
-      walletId,
-      txHash: event.txHash,
-      source: event.source,
-      side,
+    return this.buildSignals(event, "", walletId, {
       tokenIn: tokenInRef,
       tokenOut: tokenOutRef,
       amountIn: tokenIn.amountRaw,
       amountOut: tokenOut.amountRaw,
       venue: "balance-delta",
-      observedAt: event.observedAt,
-      confirmedAt: event.source === "confirmed" ? Date.now() : null,
-      blockNumber: event.blockNumber,
-    };
+    });
   }
 
   private async persistSignal(_signal: TradeSignal): Promise<void> {

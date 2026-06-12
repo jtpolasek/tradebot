@@ -1,9 +1,9 @@
 import { config, createLogger, EventBus } from "@tradebot/core";
-import { getDb, closeDb, getActiveWallets } from "@tradebot/store";
+import { getDb, closeDb, getActiveWallets, getAllSettings, getOpenPositions, latestMark } from "@tradebot/store";
 import { ChainWatcher, Recorder, deserializeEvent } from "@tradebot/ingest";
 import { Decoder } from "@tradebot/decoder";
 import { startMarksJob } from "@tradebot/pricing";
-import { PaperEngine } from "@tradebot/paper-engine";
+import { PaperEngine, runExitCheck } from "@tradebot/paper-engine";
 import { BrainWeightProvider, startScorerJob } from "@tradebot/brain";
 import { createPublicClient, webSocket } from "viem";
 import { mainnet, base } from "viem/chains";
@@ -84,6 +84,7 @@ async function main() {
 
   const engine = new PaperEngine(db, bus, config, rpcClients, weightProvider);
   await engine.start();
+  const exitJob = startExitJob(db, engine);
 
   bus.on("raw-tx", (event) => {
     logger.debug({ chain: event.chain, source: event.source, txHash: event.txHash }, "raw-tx");
@@ -129,6 +130,7 @@ async function main() {
   async function shutdown() {
     logger.info("Shutting down...");
     engine.stop();
+    exitJob.stop();
     marksJob.stop();
     scorerJob.stop();
     decoder.stop();
@@ -145,3 +147,59 @@ main().catch((err: unknown) => {
   console.error(err);
   process.exit(1);
 });
+
+function startExitJob(db: ReturnType<typeof getDb>, engine: PaperEngine): { stop: () => void } {
+  const run = () => {
+    void (async () => {
+      const settings = await getAllSettings(db);
+      await runExitCheck({
+        enabled: booleanSetting(settings, ["EXIT_ENABLED", "exit_enabled"], false),
+        takeProfitPct: nullableNumberSetting(settings, ["TAKE_PROFIT_PCT", "take_profit_pct"]),
+        stopLossPct: nullableNumberSetting(settings, ["STOP_LOSS_PCT", "stop_loss_pct"]),
+        exitSizePct: numberSetting(settings, ["EXIT_SIZE_PCT", "exit_size_pct"], 100),
+      }, {
+        getOpenPositions: () => getOpenPositions(db),
+        getLatestPrice: async (chain, tokenAddress) => {
+          if (chain !== "eth" && chain !== "base") return null;
+          const mark = await latestMark(db, chain, tokenAddress);
+          return mark?.priceUsd ?? null;
+        },
+        executeSell: (pos, trigger, currentPriceUsd) => engine.executeExitSell(pos, trigger, currentPriceUsd),
+      });
+    })().catch((err: unknown) => logger.error({ err }, "exit check failed"));
+  };
+
+  run();
+  const timer = setInterval(run, 60_000);
+  return { stop: () => clearInterval(timer) };
+}
+
+function numberSetting(settings: Record<string, unknown>, keys: string[], fallback: number): number {
+  const value = nullableNumberSetting(settings, keys);
+  return value !== null && value > 0 ? value : fallback;
+}
+
+function nullableNumberSetting(settings: Record<string, unknown>, keys: string[]): number | null {
+  for (const key of keys) {
+    const value = settings[key];
+    if (typeof value === "number" && Number.isFinite(value)) return value;
+    if (typeof value === "string") {
+      const parsed = Number(value);
+      if (Number.isFinite(parsed)) return parsed;
+    }
+  }
+  return null;
+}
+
+function booleanSetting(settings: Record<string, unknown>, keys: string[], fallback: boolean): boolean {
+  for (const key of keys) {
+    const value = settings[key];
+    if (typeof value === "boolean") return value;
+    if (typeof value === "string") {
+      const normalized = value.trim().toLowerCase();
+      if (["true", "1", "yes", "on"].includes(normalized)) return true;
+      if (["false", "0", "no", "off"].includes(normalized)) return false;
+    }
+  }
+  return fallback;
+}

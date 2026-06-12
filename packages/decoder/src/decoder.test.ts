@@ -114,6 +114,27 @@ describe("SignalDeduper", () => {
     expect(deduper.resolveConfirmed(event, makeSignal({ source: "confirmed" }))).toEqual({ action: "new" });
   });
 
+  it("tracks and resolves multiple pending signals for one transaction", () => {
+    const sell = makeSignal({ id: "signal-sell", side: "sell", tokenIn: { chain: "eth", address: MEME1, symbol: "M1", decimals: 18 }, tokenOut: { chain: "eth", address: MEME2, symbol: "M2", decimals: 18 } });
+    const buy = makeSignal({ id: "signal-buy", side: "buy", tokenIn: { chain: "eth", address: MEME1, symbol: "M1", decimals: 18 }, tokenOut: { chain: "eth", address: MEME2, symbol: "M2", decimals: 18 } });
+    deduper.trackMempoolWithNonce(sell, "0xaaa", 42);
+    deduper.trackMempoolWithNonce(buy, "0xaaa", 42);
+
+    expect(deduper.pendingCount).toBe(2);
+
+    const confirmedBuy = makeSignal({ source: "confirmed", side: "buy", tokenIn: buy.tokenIn, tokenOut: buy.tokenOut });
+    const buyResult = deduper.resolveConfirmed(makeEvent(), confirmedBuy);
+    expect(buyResult.action).toBe("update");
+    expect((buyResult as { action: "update"; original: TradeSignal }).original.id).toBe("signal-buy");
+    expect(deduper.pendingCount).toBe(1);
+
+    const confirmedSell = makeSignal({ source: "confirmed", side: "sell", tokenIn: sell.tokenIn, tokenOut: sell.tokenOut });
+    const sellResult = deduper.resolveConfirmed(makeEvent(), confirmedSell);
+    expect(sellResult.action).toBe("update");
+    expect((sellResult as { action: "update"; original: TradeSignal }).original.id).toBe("signal-sell");
+    expect(deduper.pendingCount).toBe(0);
+  });
+
   it("resolveReverted returns the pending signal and removes it", () => {
     const mempool = makeSignal();
     deduper.trackMempool(mempool);
@@ -288,6 +309,49 @@ describe("Decoder class", () => {
     expect(signals[0]!.tokenOut.address).toBe(MEME);
     expect(signals[0]!.venue).toBe("balance-delta");
     expect(signals[0]!.walletId).toBe(WALLET_ID); // carries the DB UUID, never the raw address
+  });
+
+  it("emits sell and buy signals when both Strategy B tokens are non-quote assets", async () => {
+    const { Decoder } = await import("./decoder.js");
+    const bus = new EventBus();
+    const decoder = new Decoder({ bus, db: {} as never, wallets: [{ address: WALLET, id: WALLET_ID }], rpcUrls: { eth: "http://0.0.0.0:1", base: "http://0.0.0.0:1" } });
+    decoder.start();
+
+    const signals: TradeSignal[] = [];
+    bus.on("trade-signal", (s) => signals.push(s));
+
+    const ROUTER = "0xcccccccccccccccccccccccccccccccccccccccc";
+    const padded = (addr: string) => `0x000000000000000000000000${addr.slice(2)}`;
+    const TRANSFER = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+
+    const logs = [
+      {
+        address: MEME1,
+        topics: [TRANSFER, padded(WALLET), padded(ROUTER)],
+        data: "0x0000000000000000000000000000000000000000000000056bc75e2d63100000",
+      },
+      {
+        address: MEME2,
+        topics: [TRANSFER, padded(ROUTER), padded(WALLET)],
+        data: "0x00000000000000000000000000000000000000000000000ad78ebc5ac6200000",
+      },
+    ];
+
+    bus.emit("raw-tx", {
+      chain: "eth", source: "confirmed", txHash: "0x334", from: WALLET, to: ROUTER,
+      blockNumber: 3, observedAt: Date.now(), status: "success", logs,
+    });
+    await tick();
+
+    expect(signals).toHaveLength(2);
+    expect(signals.map((signal) => signal.side).sort()).toEqual(["buy", "sell"]);
+    expect(new Set(signals.map((signal) => signal.id)).size).toBe(2);
+    for (const signal of signals) {
+      expect(signal.tokenIn.address).toBe(MEME1);
+      expect(signal.tokenOut.address).toBe(MEME2);
+      expect(signal.venue).toBe("balance-delta");
+      expect(signal.walletId).toBe(WALLET_ID);
+    }
   });
 
   it("skips a tracked address that has no resolved wallet id (no bad FK)", async () => {

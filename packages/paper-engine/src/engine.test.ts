@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vites
 import { randomUUID } from "crypto";
 import { sql } from "drizzle-orm";
 import { EventBus, type TradeSignal, type TokenRef } from "@tradebot/core";
-import { getDb, closeDb, insertWallet, getOpenPositions } from "@tradebot/store";
+import { getDb, closeDb, insertWallet, getOpenPositions, getRecentFills, setSetting, upsertToken } from "@tradebot/store";
 import { PaperEngine } from "./engine.js";
 
 // Require test DB
@@ -87,6 +87,7 @@ afterAll(async () => {
 beforeEach(() => {
   vi.mocked(getLiquidityUsd).mockResolvedValue(1_000_000);
   vi.mocked(getUsdPrice).mockResolvedValue(10);
+  return db.execute(sql`TRUNCATE settings CASCADE`);
 });
 
 describe("PaperEngine integration", () => {
@@ -236,7 +237,14 @@ describe("PaperEngine integration", () => {
     bus.emit("trade-signal", makeSignal({ walletId, side: "buy", tokenIn: USDC, tokenOut: TOKEN_Z }));
     await new Promise<void>((r) => setTimeout(r, 200));
     for (let i = 0; i < 4; i++) {
-      bus.emit("trade-signal", makeSignal({ walletId, side: "sell", tokenIn: TOKEN_Z, tokenOut: USDC }));
+      bus.emit("trade-signal", makeSignal({
+        walletId,
+        side: "sell",
+        tokenIn: TOKEN_Z,
+        tokenOut: USDC,
+        amountIn: 100_000_000_000_000_000_000n,
+        amountOut: 1_000_000_000n,
+      }));
       await new Promise<void>((r) => setTimeout(r, 150));
     }
 
@@ -249,6 +257,47 @@ describe("PaperEngine integration", () => {
     expect(openRows.some((p) => p.tokenAddress === TOKEN_Z.address.toLowerCase())).toBe(false);
   });
 
+  it("copies the same fraction of the leader's estimated holding on sells", async () => {
+    const bus = new EventBus();
+    await db.execute(sql`TRUNCATE paper_fills CASCADE`);
+    await db.execute(sql`TRUNCATE positions CASCADE`);
+    await db.execute(sql`TRUNCATE portfolio_snapshots CASCADE`);
+    await db.execute(sql`TRUNCATE trade_signals CASCADE`);
+
+    const engine = new PaperEngine(db, bus, cfg() as never, mockRpcClient as never);
+    await engine.start();
+
+    vi.mocked(getUsdPrice).mockResolvedValue(10);
+
+    bus.emit("trade-signal", makeSignal({
+      walletId,
+      side: "buy",
+      tokenIn: USDC,
+      tokenOut: TOKEN_A,
+      amountIn: 1_000_000_000n,
+      amountOut: 100_000_000_000_000_000_000n,
+    }));
+    await new Promise<void>((r) => setTimeout(r, 200));
+
+    const key = `eth:${TOKEN_A.address.toLowerCase()}:${walletId}`;
+    const qtyAfterBuy = engine.getPositions().get(key)?.qty ?? 0;
+    expect(qtyAfterBuy).toBeGreaterThan(0);
+
+    bus.emit("trade-signal", makeSignal({
+      walletId,
+      side: "sell",
+      tokenIn: TOKEN_A,
+      tokenOut: USDC,
+      amountIn: 25_000_000_000_000_000_000n,
+      amountOut: 250_000_000n,
+    }));
+    await new Promise<void>((r) => setTimeout(r, 200));
+    engine.stop();
+
+    const remainingQty = engine.getPositions().get(key)?.qty ?? 0;
+    expect(remainingQty).toBeCloseTo(qtyAfterBuy * 0.75, 8);
+  });
+
   it("decide returns skip for zero-weight leader", async () => {
     const zeroWeights = { getWeight: () => 0 };
     const bus = new EventBus();
@@ -259,5 +308,102 @@ describe("PaperEngine integration", () => {
     const result = engine.decide(signal, 1_000_000);
     expect(result).toEqual({ action: "skip", reason: "leader-weight-zero" });
     engine.stop();
+  });
+
+  it("skips a signal when the traded token is blocklisted", async () => {
+    const bus = new EventBus();
+    await db.execute(sql`TRUNCATE paper_fills CASCADE`);
+    await db.execute(sql`TRUNCATE trade_signals CASCADE`);
+    await upsertToken(db, {
+      chain: TOKEN_A.chain,
+      address: TOKEN_A.address,
+      symbol: TOKEN_A.symbol,
+      name: TOKEN_A.symbol,
+      decimals: TOKEN_A.decimals,
+      isBlocked: true,
+    });
+
+    const engine = new PaperEngine(db, bus, cfg() as never, mockRpcClient as never);
+    await engine.start();
+    bus.emit("trade-signal", makeSignal({ walletId, tokenOut: TOKEN_A, tokenIn: USDC }));
+    await new Promise<void>((r) => setTimeout(r, 200));
+    engine.stop();
+
+    const fills = await getRecentFills(db, new Date(Date.now() - 60_000), 5);
+    expect(fills[0]?.decision).toBe("skipped");
+    expect(fills[0]?.skipReason).toBe("token-blocklist");
+  });
+
+  it("uses settings overrides for minimum liquidity", async () => {
+    const bus = new EventBus();
+    await db.execute(sql`TRUNCATE positions CASCADE`);
+    await db.execute(sql`TRUNCATE portfolio_snapshots CASCADE`);
+    await setSetting(db, "min_liquidity_usd", 900_000);
+    const engine = new PaperEngine(db, bus, cfg({ MIN_LIQUIDITY_USD: 150_000 }) as never, mockRpcClient as never);
+    await engine.start();
+    engine.stop();
+
+    const signal = makeSignal({ walletId, tokenOut: TOKEN_A, tokenIn: USDC });
+    expect(engine.decide(signal, 500_000)).toEqual({ action: "skip", reason: "below-min-liquidity" });
+    expect(engine.decide(signal, 1_000_000)).toEqual({ action: "copy", notionalUsd: 100 });
+  });
+
+  it("honors proportional sizing mode using recent leader trade notional", async () => {
+    const bus = new EventBus();
+    await db.execute(sql`TRUNCATE paper_fills CASCADE`);
+    await db.execute(sql`TRUNCATE positions CASCADE`);
+    await db.execute(sql`TRUNCATE portfolio_snapshots CASCADE`);
+    await db.execute(sql`TRUNCATE trade_signals CASCADE`);
+    const engine = new PaperEngine(db, bus, cfg({ SIZING_MODE: "proportional" }) as never, mockRpcClient as never);
+    await upsertToken(db, {
+      chain: TOKEN_A.chain,
+      address: TOKEN_A.address,
+      symbol: TOKEN_A.symbol,
+      name: TOKEN_A.symbol,
+      decimals: TOKEN_A.decimals,
+      isBlocked: false,
+    });
+    await engine.start();
+
+    const seed = makeSignal({
+      walletId,
+      tokenIn: USDC,
+      tokenOut: TOKEN_A,
+      amountIn: 400_000_000n, // $400 source notional
+    });
+    bus.emit("trade-signal", seed);
+    await new Promise<void>((r) => setTimeout(r, 200));
+
+    const small = makeSignal({
+      walletId,
+      tokenIn: USDC,
+      tokenOut: TOKEN_A,
+      amountIn: 100_000_000n, // 0.25x the recent median, then clamped up to MIN_NOTIONAL
+    });
+    expect(engine.decide(small, 1_000_000)).toEqual({ action: "copy", notionalUsd: 50 });
+
+    const large = makeSignal({
+      walletId,
+      tokenIn: USDC,
+      tokenOut: TOKEN_A,
+      amountIn: 1_600_000_000n, // 4x the recent median, then capped by MAX_TRADE_PCT
+    });
+    expect(engine.decide(large, 1_000_000)).toEqual({ action: "copy", notionalUsd: 300 });
+
+    engine.stop();
+  });
+
+  it("skips leaders muted for the signal liquidity tier", async () => {
+    const mutedWeights = {
+      getWeight: () => 1,
+      getMutedLiquidityTiers: () => new Set(["longtail"] as const),
+    };
+    const bus = new EventBus();
+    const engine = new PaperEngine(db, bus, cfg({ MIN_LIQUIDITY_USD: 1 }) as never, mockRpcClient as never, mutedWeights);
+    await engine.start();
+    engine.stop();
+
+    const signal = makeSignal({ walletId, tokenOut: TOKEN_A, tokenIn: USDC });
+    expect(engine.decide(signal, 100_000)).toEqual({ action: "skip", reason: "leader-tier-muted" });
   });
 });

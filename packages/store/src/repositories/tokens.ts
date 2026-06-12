@@ -31,8 +31,17 @@ export async function upsertToken(db: Db, token: TokenRow): Promise<void> {
       symbol: token.symbol,
       name: token.name,
       decimals: token.decimals,
+      isBlocked: token.isBlocked,
     })
-    .onConflictDoNothing();
+    .onConflictDoUpdate({
+      target: [tokens.chain, tokens.address],
+      set: {
+        symbol: token.symbol,
+        name: token.name,
+        decimals: token.decimals,
+        isBlocked: token.isBlocked,
+      },
+    });
 }
 
 function rowToToken(row: typeof tokens.$inferSelect): TokenRow {

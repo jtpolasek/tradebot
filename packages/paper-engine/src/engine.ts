@@ -15,16 +15,21 @@ import {
   getOpenPositions,
   latestSnapshot,
   insertSnapshot,
+  getToken,
+  getAllSettings,
 } from "@tradebot/store";
 import { getUsdPrice, getLiquidityUsd } from "@tradebot/pricing";
 import { applyTradeToState } from "./accounting.js";
 import type { AccountingPortfolio, AccountingPosition } from "./accounting.js";
+import { estimateSourceNotionalUsd } from "./sizing.js";
+import type { SizingCandidate } from "./sizing.js";
 import { createLogger } from "@tradebot/core";
 
 const logger = createLogger("paper-engine");
 
 export interface WeightProvider {
   getWeight(walletId: string): number;
+  getMutedLiquidityTiers?(walletId: string): ReadonlySet<LiquidityTier>;
 }
 
 const constantWeights: WeightProvider = {
@@ -50,10 +55,18 @@ type ProvisionalEntry = {
   tokenAddress: string;
   sourceWalletId: string;
   qty: number;
+  leaderHoldingKey: string;
+  prevLeaderHolding: number | undefined;
   // Pre-trade snapshot, used to reverse the fill exactly on void/replace.
   prevPortfolio: AccountingPortfolio;
   prevPosition: InMemoryPosition | null;
 };
+
+export type LiquidityTier = "major" | "mid" | "longtail";
+
+type RuntimeConfig = Pick<Config, "BASE_TRADE_PCT" | "MAX_TRADE_PCT" | "MIN_NOTIONAL_USD" | "MIN_LIQUIDITY_USD" | "SIZING_MODE">;
+
+const RECENT_NOTIONAL_WINDOW = 20;
 
 export class PaperEngine {
   private cashUsd: number;
@@ -62,6 +75,10 @@ export class PaperEngine {
   private portfolio: AccountingPortfolio;
   private queue: PQueue;
   private snapshotTimer: ReturnType<typeof setInterval> | null = null;
+  private settingsTimer: ReturnType<typeof setInterval> | null = null;
+  private runtimeConfig: RuntimeConfig;
+  private readonly recentSourceNotionals = new Map<string, number[]>();
+  private readonly leaderHoldings = new Map<string, number>();
 
   private readonly rpcClients: Record<ChainId, RpcClient>;
 
@@ -80,10 +97,18 @@ export class PaperEngine {
     this.cashUsd = cfg.PAPER_STARTING_CASH_USD;
     this.portfolio = { cashUsd: this.cashUsd, realizedPnlUsd: 0, feesPaidUsd: 0 };
     this.queue = new PQueue({ concurrency: 4 });
+    this.runtimeConfig = {
+      BASE_TRADE_PCT: cfg.BASE_TRADE_PCT,
+      MAX_TRADE_PCT: cfg.MAX_TRADE_PCT,
+      MIN_NOTIONAL_USD: cfg.MIN_NOTIONAL_USD,
+      MIN_LIQUIDITY_USD: cfg.MIN_LIQUIDITY_USD,
+      SIZING_MODE: cfg.SIZING_MODE,
+    };
   }
 
   async start(): Promise<void> {
     await this.loadState();
+    await this.refreshRuntimeSettings();
 
     this.bus.on("trade-signal", (signal) => {
       this.enqueue("handleSignal", () => this.handleSignal(signal), { txHash: signal.txHash });
@@ -102,6 +127,10 @@ export class PaperEngine {
       () => this.enqueue("takeSnapshot", () => this.takeSnapshot()),
       5 * 60_000
     );
+    this.settingsTimer = setInterval(
+      () => this.enqueue("refreshRuntimeSettings", () => this.refreshRuntimeSettings()),
+      60_000
+    );
 
     logger.info({ cashUsd: this.cashUsd }, "PaperEngine started");
   }
@@ -110,6 +139,10 @@ export class PaperEngine {
     if (this.snapshotTimer) {
       clearInterval(this.snapshotTimer);
       this.snapshotTimer = null;
+    }
+    if (this.settingsTimer) {
+      clearInterval(this.settingsTimer);
+      this.settingsTimer = null;
     }
   }
 
@@ -160,21 +193,37 @@ export class PaperEngine {
     return this.cashUsd + posValue;
   }
 
+  private async refreshRuntimeSettings(): Promise<void> {
+    const settings = await getAllSettings(this.db);
+    this.runtimeConfig = {
+      BASE_TRADE_PCT: numberSetting(settings, ["BASE_TRADE_PCT", "base_trade_pct"], this.cfg.BASE_TRADE_PCT),
+      MAX_TRADE_PCT: numberSetting(settings, ["MAX_TRADE_PCT", "max_trade_pct"], this.cfg.MAX_TRADE_PCT),
+      MIN_NOTIONAL_USD: numberSetting(settings, ["MIN_NOTIONAL_USD", "min_notional_usd"], this.cfg.MIN_NOTIONAL_USD),
+      MIN_LIQUIDITY_USD: numberSetting(settings, ["MIN_LIQUIDITY_USD", "min_liquidity_usd"], this.cfg.MIN_LIQUIDITY_USD),
+      SIZING_MODE: sizingModeSetting(settings, ["SIZING_MODE", "sizing_mode"], this.cfg.SIZING_MODE),
+    };
+  }
+
   decide(signal: TradeSignal, liquidityUsd: number | null): { action: "copy"; notionalUsd: number } | { action: "skip"; reason: string } {
     const weight = this.weights.getWeight(signal.walletId);
     if (weight === 0) return { action: "skip", reason: "leader-weight-zero" };
 
     if (liquidityUsd === null) return { action: "skip", reason: "no-liquidity-data" };
-    if (liquidityUsd < this.cfg.MIN_LIQUIDITY_USD) return { action: "skip", reason: "below-min-liquidity" };
+    const mutedTiers = this.weights.getMutedLiquidityTiers?.(signal.walletId);
+    if (mutedTiers?.has(classifyLiquidityTier(liquidityUsd))) return { action: "skip", reason: "leader-tier-muted" };
+    if (liquidityUsd < this.runtimeConfig.MIN_LIQUIDITY_USD) return { action: "skip", reason: "below-min-liquidity" };
 
     const eq = this.equity();
-    let notional = eq * this.cfg.BASE_TRADE_PCT * weight;
-    notional = Math.min(notional, eq * this.cfg.MAX_TRADE_PCT);
-    notional = Math.max(notional, this.cfg.MIN_NOTIONAL_USD);
+    let notional = eq * this.runtimeConfig.BASE_TRADE_PCT * weight;
+    if (this.runtimeConfig.SIZING_MODE === "proportional") {
+      notional *= this.proportionalScale(signal);
+    }
+    notional = Math.min(notional, eq * this.runtimeConfig.MAX_TRADE_PCT);
+    notional = Math.max(notional, this.runtimeConfig.MIN_NOTIONAL_USD);
 
     if (signal.side === "buy") {
       notional = Math.min(notional, this.cashUsd);
-      if (notional < this.cfg.MIN_NOTIONAL_USD) {
+      if (notional < this.runtimeConfig.MIN_NOTIONAL_USD) {
         return { action: "skip", reason: "insufficient-balance" };
       }
       return { action: "copy", notionalUsd: notional };
@@ -186,12 +235,60 @@ export class PaperEngine {
     const pos = this.positions.get(key);
     if (!pos || pos.qty <= 0) return { action: "skip", reason: "no-position" };
 
-    // Sell the same fraction the leader sold (estimate: notional / pos value)
-    const posValue = pos.qty * pos.avgCostUsd;
-    const fraction = Math.min(1, notional / Math.max(posValue, 1e-10));
+    const fraction = this.estimateLeaderSellFraction(signal);
     const sellQty = fraction * pos.qty;
 
     return { action: "copy", notionalUsd: sellQty * pos.avgCostUsd };
+  }
+
+  private proportionalScale(signal: TradeSignal): number {
+    const sourceNotionalUsd = estimateSignalSourceNotionalUsd(signal);
+    const recent = this.recentSourceNotionals.get(signal.walletId) ?? [];
+    const median = medianNumber(recent);
+    if (sourceNotionalUsd === null || median === null || median <= 0) return 1;
+    return clamp(sourceNotionalUsd / median, 0.25, 4);
+  }
+
+  private rememberSourceNotional(signal: TradeSignal): void {
+    const sourceNotionalUsd = estimateSignalSourceNotionalUsd(signal);
+    if (sourceNotionalUsd === null || sourceNotionalUsd <= 0) return;
+    const recent = this.recentSourceNotionals.get(signal.walletId) ?? [];
+    recent.push(sourceNotionalUsd);
+    while (recent.length > RECENT_NOTIONAL_WINDOW) recent.shift();
+    this.recentSourceNotionals.set(signal.walletId, recent);
+  }
+
+  private estimateLeaderSellFraction(signal: TradeSignal): number {
+    if (signal.side !== "sell") return 1;
+    const soldQty = rawToHumanNumber(signal.amountIn, signal.tokenIn.decimals);
+    if (!Number.isFinite(soldQty) || soldQty <= 0) return 1;
+
+    const heldQty = this.leaderHoldings.get(leaderHoldingKey(signal.chain, signal.tokenIn.address, signal.walletId));
+    if (heldQty === undefined || heldQty <= 0) return 1;
+
+    return clamp(soldQty / heldQty, 0, 1);
+  }
+
+  private rememberLeaderHolding(signal: TradeSignal): void {
+    const token = signal.side === "buy" ? signal.tokenOut : signal.tokenIn;
+    const rawAmount = signal.side === "buy" ? signal.amountOut : signal.amountIn;
+    const qty = rawToHumanNumber(rawAmount, token.decimals);
+    if (!Number.isFinite(qty) || qty <= 0) return;
+
+    const key = leaderHoldingKey(signal.chain, token.address, signal.walletId);
+    const current = this.leaderHoldings.get(key);
+    if (signal.side === "buy") {
+      this.leaderHoldings.set(key, (current ?? 0) + qty);
+      return;
+    }
+
+    if (current === undefined || current <= 0) return;
+    const next = Math.max(0, current - qty);
+    if (next <= 1e-10) {
+      this.leaderHoldings.delete(key);
+    } else {
+      this.leaderHoldings.set(key, next);
+    }
   }
 
   private async handleSignal(signal: TradeSignal): Promise<void> {
@@ -199,6 +296,35 @@ export class PaperEngine {
 
     const token: TokenRef = signal.side === "buy" ? signal.tokenOut : signal.tokenIn;
     const quoteToken: TokenRef = signal.side === "buy" ? signal.tokenIn : signal.tokenOut;
+
+    const [tokenRow, quoteTokenRow] = await Promise.all([
+      getToken(this.db, token.chain, token.address),
+      getToken(this.db, quoteToken.chain, quoteToken.address),
+    ]);
+    if (tokenRow?.isBlocked || quoteTokenRow?.isBlocked) {
+      const decidedAt = Date.now();
+      const fill: PaperFill = {
+        id: randomUUID(),
+        signalId: signal.id,
+        decidedAt,
+        decision: "skipped",
+        skipReason: "token-blocklist",
+        side: signal.side,
+        token,
+        quoteToken,
+        qty: 0,
+        priceUsd: 0,
+        notionalUsd: 0,
+        feeUsd: 0,
+        slippageBps: 0,
+        latencyMs: decidedAt - signal.observedAt,
+        provisional: false,
+      };
+      await insertFill(this.db, fill);
+      this.bus.emit("paper-fill", fill);
+      this.rememberLeaderHolding(signal);
+      return;
+    }
 
     // Get liquidity (needed for decide)
     let liquidityUsd: number | null = null;
@@ -232,6 +358,7 @@ export class PaperEngine {
       };
       await insertFill(this.db, fill);
       this.bus.emit("paper-fill", fill);
+      this.rememberLeaderHolding(signal);
       return;
     }
 
@@ -263,6 +390,7 @@ export class PaperEngine {
       };
       await insertFill(this.db, skipFill);
       this.bus.emit("paper-fill", skipFill);
+      this.rememberLeaderHolding(signal);
       return;
     }
 
@@ -286,6 +414,8 @@ export class PaperEngine {
     const prevPortfolio: AccountingPortfolio = { ...this.portfolio };
     const prePos = this.positions.get(snapKey);
     const prevPosition: InMemoryPosition | null = prePos ? { ...prePos } : null;
+    const signalLeaderHoldingKey = leaderHoldingKey(signal.chain, token.address, signal.walletId);
+    const prevLeaderHolding = this.leaderHoldings.get(signalLeaderHoldingKey);
 
     if (signal.side === "buy") {
       fillPrice = priceUsd * (1 + slippageBps / 10_000);
@@ -312,6 +442,7 @@ export class PaperEngine {
         };
         await insertFill(this.db, skipFill);
         this.bus.emit("paper-fill", skipFill);
+        this.rememberLeaderHolding(signal);
         return;
       }
 
@@ -377,6 +508,7 @@ export class PaperEngine {
         };
         await insertFill(this.db, skipFill);
         this.bus.emit("paper-fill", skipFill);
+        this.rememberLeaderHolding(signal);
         return;
       }
 
@@ -468,6 +600,8 @@ export class PaperEngine {
         tokenAddress: token.address,
         sourceWalletId: signal.walletId,
         qty,
+        leaderHoldingKey: signalLeaderHoldingKey,
+        prevLeaderHolding,
         prevPortfolio,
         prevPosition,
       });
@@ -475,7 +609,143 @@ export class PaperEngine {
 
     await this.takeSnapshot();
     this.bus.emit("paper-fill", fill);
+    this.rememberLeaderHolding(signal);
+    this.rememberSourceNotional(signal);
     logger.info({ fillId, side: signal.side, notionalUsd, priceUsd: fillPrice, provisional }, "paper fill");
+  }
+
+  async executeExitSell(
+    pos: { chain: string; tokenAddress: string; qty: number; avgCostUsd: number; sourceWalletId: string | null },
+    trigger: "tp" | "sl" | null,
+    currentPriceUsd: number
+  ): Promise<void> {
+    if (pos.sourceWalletId === null) {
+      logger.warn({ chain: pos.chain, tokenAddress: pos.tokenAddress, trigger }, "skipping exit for position without source wallet");
+      return;
+    }
+    if ((pos.chain !== "eth" && pos.chain !== "base") || pos.qty <= 0 || currentPriceUsd <= 0) return;
+
+    const chain = pos.chain;
+    const token: TokenRef = { chain, address: pos.tokenAddress.toLowerCase(), symbol: "", decimals: 18 };
+    const quoteToken = quoteTokenFor(chain);
+    const now = Date.now();
+    const qty = Math.min(pos.qty, this.positions.get(posKey(chain, pos.tokenAddress, pos.sourceWalletId))?.qty ?? pos.qty);
+    if (qty <= 0) return;
+
+    const signal: TradeSignal = {
+      id: randomUUID(),
+      chain,
+      txHash: `exit:${trigger ?? "rule"}:${randomUUID()}`,
+      source: "confirmed",
+      side: "sell",
+      tokenIn: token,
+      tokenOut: quoteToken,
+      amountIn: toRawAmount(qty, token.decimals),
+      amountOut: toRawAmount(qty * currentPriceUsd, quoteToken.decimals),
+      venue: `exit-${trigger ?? "rule"}`,
+      observedAt: now,
+      confirmedAt: now,
+      blockNumber: null,
+      walletId: pos.sourceWalletId,
+    };
+    await insertSignal(this.db, signal);
+
+    const key = posKey(chain, pos.tokenAddress, pos.sourceWalletId);
+    const existing = this.positions.get(key) ?? {
+      qty: pos.qty,
+      avgCostUsd: pos.avgCostUsd,
+      realizedPnlUsd: 0,
+    };
+
+    const gasUsd = chain === "eth" ? this.cfg.GAS_USD_ETH : this.cfg.GAS_USD_BASE;
+    const delayPenaltyBps = chain === "eth"
+      ? this.cfg.COPY_DELAY_PENALTY_BPS_ETH
+      : this.cfg.COPY_DELAY_PENALTY_BPS_BASE;
+    let liquidityUsd: number | null = null;
+    try {
+      liquidityUsd = await getLiquidityUsd(chain, token.address, this.rpcClients[chain]);
+    } catch {
+      liquidityUsd = null;
+    }
+    const grossNotionalUsd = qty * currentPriceUsd;
+    const impactBps = liquidityUsd !== null
+      ? Math.min(500, Math.round(10_000 * grossNotionalUsd / (2 * Math.max(liquidityUsd, 1))))
+      : 0;
+    const dexFeeBps = 30;
+    const slippageBps = dexFeeBps + impactBps + delayPenaltyBps;
+    const fillPrice = currentPriceUsd * (1 - slippageBps / 10_000);
+    const notionalUsd = qty * fillPrice;
+    const feeUsd = gasUsd + (notionalUsd * dexFeeBps) / 10_000;
+    const sellProceeds = Math.max(0, notionalUsd - feeUsd);
+
+    const next = applyTradeToState({
+      portfolio: this.portfolio,
+      position: {
+        quantity: existing.qty,
+        averageEntryUsd: existing.avgCostUsd,
+        costBasisUsd: existing.qty * existing.avgCostUsd,
+        realizedPnlUsd: existing.realizedPnlUsd,
+        feesPaidUsd: 0,
+      },
+      trade: {
+        side: "sell",
+        quantity: qty,
+        notionalUsd,
+        gasUsd,
+        slippageUsd: 0,
+        dexFeeUsd: (notionalUsd * dexFeeBps) / 10_000,
+        totalCostUsd: feeUsd,
+        sellProceedsUsd: sellProceeds,
+      },
+    });
+
+    this.portfolio = next.portfolio;
+    this.cashUsd = next.portfolio.cashUsd;
+
+    if (next.position.quantity < 1e-10) {
+      this.positions.delete(key);
+      await closePositionByKey(this.db, {
+        chain,
+        tokenAddress: token.address,
+        sourceWalletId: pos.sourceWalletId,
+        realizedPnlUsd: next.position.realizedPnlUsd,
+      });
+    } else {
+      this.positions.set(key, {
+        qty: next.position.quantity,
+        avgCostUsd: next.position.averageEntryUsd,
+        realizedPnlUsd: next.position.realizedPnlUsd,
+      });
+      await upsertPosition(this.db, {
+        chain,
+        tokenAddress: token.address,
+        qty: next.position.quantity,
+        avgCostUsd: next.position.averageEntryUsd,
+        realizedPnlUsd: next.position.realizedPnlUsd,
+        sourceWalletId: pos.sourceWalletId,
+      });
+    }
+
+    const fill: PaperFill = {
+      id: randomUUID(),
+      signalId: signal.id,
+      decidedAt: now,
+      decision: "copied",
+      side: "sell",
+      token,
+      quoteToken,
+      qty,
+      priceUsd: fillPrice,
+      notionalUsd,
+      feeUsd,
+      slippageBps,
+      latencyMs: 0,
+      provisional: false,
+    };
+    await insertFill(this.db, fill);
+    await this.takeSnapshot();
+    this.bus.emit("paper-fill", fill);
+    logger.info({ fillId: fill.id, trigger, notionalUsd, priceUsd: fillPrice }, "exit paper fill");
   }
 
   private async handleConfirmed(signalId: string, confirmed: TradeSignal): Promise<void> {
@@ -542,6 +812,12 @@ export class PaperEngine {
       });
     }
 
+    if (prov.prevLeaderHolding === undefined) {
+      this.leaderHoldings.delete(prov.leaderHoldingKey);
+    } else {
+      this.leaderHoldings.set(prov.leaderHoldingKey, prov.prevLeaderHolding);
+    }
+
     await voidFill(this.db, prov.fillId);
     this.provisionals.delete(signalId);
     logger.info({ signalId, reason }, "provisional fill voided");
@@ -578,4 +854,78 @@ export class PaperEngine {
 
 function posKey(chain: ChainId, tokenAddress: string, walletId: string | null): string {
   return `${chain}:${tokenAddress.toLowerCase()}:${walletId ?? ""}`;
+}
+
+function leaderHoldingKey(chain: ChainId, tokenAddress: string, walletId: string): string {
+  return `${chain}:${tokenAddress.toLowerCase()}:${walletId}`;
+}
+
+function numberSetting(settings: Record<string, unknown>, keys: string[], fallback: number): number {
+  for (const key of keys) {
+    const value = settings[key];
+    if (typeof value === "number" && Number.isFinite(value) && value > 0) return value;
+    if (typeof value === "string") {
+      const parsed = Number(value);
+      if (Number.isFinite(parsed) && parsed > 0) return parsed;
+    }
+  }
+  return fallback;
+}
+
+function sizingModeSetting(settings: Record<string, unknown>, keys: string[], fallback: Config["SIZING_MODE"]): Config["SIZING_MODE"] {
+  for (const key of keys) {
+    const value = settings[key];
+    if (value === "fixed" || value === "proportional") return value;
+  }
+  return fallback;
+}
+
+function estimateSignalSourceNotionalUsd(signal: TradeSignal): number | null {
+  const candidate: SizingCandidate = {
+    side: signal.side,
+    tokenInSymbol: signal.tokenIn.symbol,
+    tokenInAddress: signal.tokenIn.address,
+    tokenInAmountHuman: rawToHumanNumber(signal.amountIn, signal.tokenIn.decimals),
+    tokenOutSymbol: signal.tokenOut.symbol,
+    tokenOutAddress: signal.tokenOut.address,
+    tokenOutAmountHuman: rawToHumanNumber(signal.amountOut, signal.tokenOut.decimals),
+  };
+  const notional = estimateSourceNotionalUsd(candidate, 0);
+  return Number.isFinite(notional) && notional > 0 ? notional : null;
+}
+
+function rawToHumanNumber(amount: bigint, decimals: number): number {
+  return Number(amount) / 10 ** decimals;
+}
+
+function medianNumber(values: number[]): number | null {
+  const sorted = values.filter((value) => Number.isFinite(value) && value > 0).sort((a, b) => a - b);
+  if (sorted.length === 0) return null;
+  const mid = Math.floor(sorted.length / 2);
+  if (sorted.length % 2 === 1) return sorted[mid] ?? null;
+  const left = sorted[mid - 1];
+  const right = sorted[mid];
+  return left !== undefined && right !== undefined ? (left + right) / 2 : null;
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
+
+function classifyLiquidityTier(liquidityUsd: number | null): LiquidityTier {
+  if (liquidityUsd === null) return "longtail";
+  if (liquidityUsd >= 5_000_000) return "major";
+  if (liquidityUsd >= 500_000) return "mid";
+  return "longtail";
+}
+
+function quoteTokenFor(chain: ChainId): TokenRef {
+  return chain === "eth"
+    ? { chain, address: "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", symbol: "USDC", decimals: 6 }
+    : { chain, address: "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913", symbol: "USDC", decimals: 6 };
+}
+
+function toRawAmount(amount: number, decimals: number): bigint {
+  if (!Number.isFinite(amount) || amount <= 0) return 0n;
+  return BigInt(Math.max(0, Math.floor(amount * 10 ** decimals)));
 }

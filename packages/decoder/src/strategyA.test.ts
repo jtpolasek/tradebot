@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { createRequire } from "module";
 import type { RawTxEvent } from "@tradebot/core";
 import { strategyA } from "./strategyA.js";
+import type { StrategyAClients } from "./strategyA.js";
 import type { TokenMetadataResolver } from "./tokenMetadata.js";
 
 const require = createRequire(import.meta.url);
@@ -49,6 +50,36 @@ function makeEvent(fixture: { result: Record<string, unknown> }, chain: "eth" | 
   };
 }
 
+function makeStrategyAClient(poolAddress: string, verified = true): StrategyAClients {
+  const normalizedPool = poolAddress.toLowerCase();
+  return {
+    eth: {
+      readContract: vi.fn().mockImplementation(({ functionName }: { functionName: string }) => {
+        if (functionName === "fee") return Promise.resolve(3000);
+        if (functionName === "getPair" || functionName === "getPool") {
+          return Promise.resolve(verified ? normalizedPool : "0x0000000000000000000000000000000000000000");
+        }
+        return Promise.reject(new Error(`unexpected readContract: ${functionName}`));
+      }),
+    },
+    base: {
+      readContract: vi.fn().mockImplementation(({ functionName }: { functionName: string }) => {
+        if (functionName === "fee") return Promise.resolve(3000);
+        if (functionName === "getPair" || functionName === "getPool") {
+          return Promise.resolve(verified ? normalizedPool : "0x0000000000000000000000000000000000000000");
+        }
+        return Promise.reject(new Error(`unexpected readContract: ${functionName}`));
+      }),
+    },
+  };
+}
+
+function firstSwapLogAddress(event: RawTxEvent): string {
+  const swapLog = event.logs?.find((log) => log.topics[0]?.startsWith("0xd78ad95f") || log.topics[0]?.startsWith("0xc42079f9"));
+  if (!swapLog) throw new Error("fixture missing swap log");
+  return swapLog.address;
+}
+
 describe("strategyA", () => {
   let meta: TokenMetadataResolver;
 
@@ -68,6 +99,33 @@ describe("strategyA", () => {
     expect(result!.amountOut).toBeGreaterThan(0n);
   });
 
+  it("verifies a Uniswap V2 swap against the chain factory", async () => {
+    const event = makeEvent(v2Fixture, "eth");
+    const poolAddress = firstSwapLogAddress(event);
+    const clients = makeStrategyAClient(poolAddress);
+
+    const result = await strategyA(event, event.from, meta, "test-id", clients);
+
+    expect(result).not.toBeNull();
+    expect(clients.eth!.readContract).toHaveBeenCalledWith(expect.objectContaining({ functionName: "getPair" }));
+  });
+
+  it("returns null when V2 factory verification rejects the emitting pool", async () => {
+    const event = makeEvent(v2Fixture, "eth");
+    const rejectedPool = "0x1111111111111111111111111111111111111111";
+    const originalPool = firstSwapLogAddress(event).toLowerCase();
+    if (!event.logs) throw new Error("fixture missing logs");
+    event.logs = event.logs.map((log) =>
+      log.address.toLowerCase() === originalPool ? { ...log, address: rejectedPool } : log
+    );
+    const clients = makeStrategyAClient(rejectedPool, false);
+
+    const result = await strategyA(event, event.from, meta, "test-id", clients);
+
+    expect(result).toBeNull();
+    expect(meta.resolve).not.toHaveBeenCalled();
+  });
+
   it("decodes a Uniswap V3 swap — venue, tokenIn, tokenOut, amounts", async () => {
     const event = makeEvent(v3Fixture, "eth");
     const result = await strategyA(event, event.from, meta, "test-id");
@@ -78,6 +136,18 @@ describe("strategyA", () => {
     expect(result!.tokenOut.address).toBe("0x5998fb77b43a30b735ad0f1e6917cf3a30642c16");
     expect(result!.amountIn).toBeGreaterThan(0n);
     expect(result!.amountOut).toBeGreaterThan(0n);
+  });
+
+  it("verifies a Uniswap V3 swap against pool fee and factory getPool", async () => {
+    const event = makeEvent(v3Fixture, "eth");
+    const poolAddress = firstSwapLogAddress(event);
+    const clients = makeStrategyAClient(poolAddress);
+
+    const result = await strategyA(event, event.from, meta, "test-id", clients);
+
+    expect(result).not.toBeNull();
+    expect(clients.eth!.readContract).toHaveBeenCalledWith(expect.objectContaining({ functionName: "fee" }));
+    expect(clients.eth!.readContract).toHaveBeenCalledWith(expect.objectContaining({ functionName: "getPool" }));
   });
 
   it("returns null for a Uniswap V4 swap where the wallet has no direct Transfer logs", async () => {

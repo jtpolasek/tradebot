@@ -3,4 +3,4 @@ export * from "./ledger.js";
 export * from "./sizing.js";
 export * from "./exits.js";
 export { PaperEngine } from "./engine.js";
-export type { WeightProvider } from "./engine.js";
+export type { LiquidityTier, WeightProvider } from "./engine.js";

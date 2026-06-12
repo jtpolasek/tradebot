@@ -196,7 +196,9 @@ describe("ChainWatcher failover", () => {
     resolveWsUrl(): string;
   };
 
-  function makeWatcher(fallback?: string) {
+  function makeWatcher(): Internals;
+  function makeWatcher(fallback: string): Internals;
+  function makeWatcher(fallback?: string): Internals {
     return new ChainWatcher({
       chain: "eth",
       primaryWsUrl: "wss://primary",
@@ -204,7 +206,7 @@ describe("ChainWatcher failover", () => {
       db: makeMockDb(),
       bus: new EventBus(),
       recorder: makeRecorder(),
-    }) as unknown as ChainWatcher & Internals;
+    }) as unknown as Internals;
   }
 
   it("switches to the fallback URL after the primary fails", () => {

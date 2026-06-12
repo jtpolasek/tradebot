@@ -5,7 +5,6 @@ import {
   getActiveWallets,
   getSignalsByWallet,
   getToken,
-  markAtOrBefore,
   latestMark,
   upsertLeaderStats,
   getAllLeaderStats,
@@ -14,10 +13,10 @@ import {
   getCopiedFills,
   insertAdaptationLog,
 } from "@tradebot/store";
-import type { WeightProvider } from "@tradebot/paper-engine";
+import type { LiquidityTier, WeightProvider } from "@tradebot/paper-engine";
 import { fifoRoundTrips, computeScoringResult } from "./scoring.js";
 import { computeZScore, computeScore, scoreToWeight, shouldAutoMute } from "./weights.js";
-import { runLiquidityNotch, computePerLeaderMutes, classifyLiquidityTier } from "./adaptation.js";
+import { runLiquidityNotch, computePerLeaderMutes } from "./adaptation.js";
 import type { TradeRow, ScoreWindow } from "./scoring.js";
 
 const logger = createLogger("brain");
@@ -37,6 +36,7 @@ const WETH_ADDRESSES = new Set([
 
 export class BrainWeightProvider implements WeightProvider {
   private weights = new Map<string, number>();
+  private mutedTiers = new Map<string, Set<LiquidityTier>>();
 
   getWeight(walletId: string): number {
     return this.weights.get(walletId) ?? 1.0;
@@ -44,6 +44,16 @@ export class BrainWeightProvider implements WeightProvider {
 
   refresh(weights: Map<string, number>): void {
     this.weights = new Map(weights);
+  }
+
+  getMutedLiquidityTiers(walletId: string): ReadonlySet<LiquidityTier> {
+    return this.mutedTiers.get(walletId) ?? new Set<LiquidityTier>();
+  }
+
+  refreshMutedTiers(mutedTiers: Map<string, Set<LiquidityTier>>): void {
+    this.mutedTiers = new Map(
+      Array.from(mutedTiers.entries(), ([walletId, tiers]) => [walletId, new Set(tiers)])
+    );
   }
 }
 
@@ -196,12 +206,13 @@ export async function runScorerJob(db: Db, weightProvider: BrainWeightProvider):
   weightProvider.refresh(weightMap);
 
   // Run weekly adaptation (always runs as part of scorer — adaptation guards itself with fill count)
-  await runAdaptationJob(db);
+  const mutedTiers = await runAdaptationJob(db);
+  weightProvider.refreshMutedTiers(mutedTiers);
 
   logger.info({ wallets: wallets.length }, "Scorer job complete");
 }
 
-async function runAdaptationJob(db: Db): Promise<void> {
+async function runAdaptationJob(db: Db): Promise<Map<string, Set<LiquidityTier>>> {
   try {
     const fills = await getCopiedFills(db);
     const minLiqRaw = await getSetting(db, "min_liquidity_usd");
@@ -236,8 +247,10 @@ async function runAdaptationJob(db: Db): Promise<void> {
     if (mutes.size > 0) {
       logger.info({ muteCount: mutes.size }, "per-leader tier mutes computed");
     }
+    return mutes;
   } catch (err) {
     logger.error({ err }, "adaptation job failed");
+    return new Map();
   }
 }
 

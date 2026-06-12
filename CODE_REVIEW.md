@@ -27,14 +27,14 @@ Review of the Sonnet-built implementation against `PLAN.md`. Status in `CLAUDE.m
 
 ## P2 — Dropped plan requirements
 
-- [ ] **2.1 Strategy A pool verification** (factory `getPool`/`getPair`) not implemented; `KNOWN_FACTORIES` unused.
-- [ ] **2.2 Both-non-quote → two signals** — decoder emits buy only ("for now").
-- [ ] **2.3 `token-blocklist` skip** never reads `tokens.is_blocked`.
-- [ ] **2.4 `SIZING_MODE=proportional`** ignored; ported `sizing.ts` is dead.
-- [ ] **2.5 Sell-fraction semantics** differ from plan (fraction of our position, not leader's holding).
-- [ ] **2.6 Exit worker** (`runExitCheck`) ported+tested but never wired into the runner.
-- [ ] **2.7 Settings overrides** not read by engine (adaptation writes `min_liquidity_usd`; engine reads env only).
-- [ ] **2.8 Per-leader tier mutes** computed, logged, never enforced.
+- [x] **2.1 Strategy A pool verification** fixed: Strategy A now verifies V2 pools through factory `getPair` and V3 pools through pool `fee()` + factory `getPool`, caching results and falling through to Strategy B on failed/rejected verification.
+- [x] **2.2 Both-non-quote → two signals** fixed: decoder now expands non-quote→non-quote swaps into paired sell+buy signals, and the mempool deduper can track/confirm/void multiple signals for one tx hash.
+- [x] **2.3 `token-blocklist` skip** fixed: engine checks `tokens.is_blocked` for traded and quote tokens before pricing/sizing and records skipped fills with `token-blocklist`.
+- [x] **2.4 `SIZING_MODE=proportional`** fixed: engine now reads `SIZING_MODE` from config/settings and scales base copy size by source notional versus the leader's recent median notional, clamped 0.25x-4x before existing min/max rules.
+- [x] **2.5 Sell-fraction semantics** fixed: engine now tracks each leader's estimated per-token holding from observed signals and sizes copied sells by the fraction the leader sold; unknown leader holding still exits 100% per plan. Regression test added.
+- [x] **2.6 Exit worker** fixed: runner now starts a settings-driven exit job and executes TP/SL sells through `PaperEngine.executeExitSell`.
+- [x] **2.7 Settings overrides** fixed: engine refreshes runtime sizing/liquidity settings from DB and honors adaptive `min_liquidity_usd`.
+- [x] **2.8 Per-leader tier mutes** fixed: brain provider stores computed muted liquidity tiers and engine skips matching leader/tier signals.
 - [ ] **2.9 Adaptive liquidity notch inert** — scorer feeds `liquidityUsd: null` and `currentPriceUsd = entryPriceUsd`.
 - [ ] **2.10 0x `getQuotePrice`** as primary fill-price source — ported, unused by engine.
 - [ ] **2.11 `verifyLedger` script vacuous** — builds all-zero deltas; can't detect mismatches.

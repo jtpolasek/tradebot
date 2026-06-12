@@ -185,12 +185,34 @@ const llamaCache = new Map<string, LlamaEntry>();
 type LiqEntry = { liquidityUsd: number; fetchedAt: number };
 const liqCache = new Map<string, LiqEntry>();
 
+// Pool discovery: static pool facts (address, tokens, decimals) are immutable, but the
+// "deepest" pool choice can drift, so 10-minute TTL. Negative results are cached too —
+// otherwise tokens with no V3 pool re-probe every factory/fee-tier on each lookup.
+type CachedPool = {
+  address: string;
+  token0: string;
+  token1: string;
+  decimals0: number;
+  decimals1: number;
+  poolAbi: typeof UNI_V3_POOL_ABI | typeof AERODROME_CL_POOL_ABI;
+};
+type PoolEntry = { pool: CachedPool | null; fetchedAt: number };
+const poolCache = new Map<string, PoolEntry>();
+
+// Chainlink ETH/USD: 30s TTL — shared across every token priced against WETH in a tick
+type ChainlinkEntry = { price: number; fetchedAt: number };
+const chainlinkCache = new Map<ChainId, ChainlinkEntry>();
+
 const LLAMA_TTL_MS = 30_000;
 const LIQ_TTL_MS = 5 * 60_000;
+const POOL_TTL_MS = 10 * 60_000;
+const CHAINLINK_TTL_MS = 30_000;
 
 export function clearCaches() {
   llamaCache.clear();
   liqCache.clear();
+  poolCache.clear();
+  chainlinkCache.clear();
 }
 
 // ─── sqrtPriceX96 math ───────────────────────────────────────────────────────
@@ -216,6 +238,8 @@ export function sqrtPriceX96ToPrice(
 // ─── Chainlink ───────────────────────────────────────────────────────────────
 
 async function getChainlinkEthUsd(chain: ChainId, client: RpcClient): Promise<number | null> {
+  const cached = chainlinkCache.get(chain);
+  if (cached && Date.now() - cached.fetchedAt < CHAINLINK_TTL_MS) return cached.price;
   try {
     const feed = CHAINLINK_ETH_USD[chain] as `0x${string}`;
     const result = await client.readContract({
@@ -225,7 +249,9 @@ async function getChainlinkEthUsd(chain: ChainId, client: RpcClient): Promise<nu
     }) as [bigint, bigint, bigint, bigint, bigint];
     const answer = result[1]; // int256 with 8 decimals
     if (answer <= 0n) return null;
-    return fromBaseUnits(answer, 8);
+    const price = fromBaseUnits(answer, 8);
+    chainlinkCache.set(chain, { price, fetchedAt: Date.now() });
+    return price;
   } catch (err) {
     logger.warn({ err, chain }, "Chainlink ETH/USD read failed");
     return null;
@@ -233,16 +259,6 @@ async function getChainlinkEthUsd(chain: ChainId, client: RpcClient): Promise<nu
 }
 
 // ─── Uniswap V3 pool discovery ───────────────────────────────────────────────
-
-type PoolInfo = {
-  address: string;
-  token0: string;
-  token1: string;
-  sqrtPriceX96: bigint;
-  liquidity: bigint;
-  decimals0: number;
-  decimals1: number;
-};
 
 type V3VenueConfig = {
   factory: `0x${string}`;
@@ -278,11 +294,15 @@ async function findDeepestV3Pool(
   tokenA: string,
   tokenB: string,
   client: RpcClient
-): Promise<PoolInfo | null> {
+): Promise<CachedPool | null> {
+  const cacheKey = `${chain}:${tokenA.toLowerCase()}:${tokenB.toLowerCase()}`;
+  const cached = poolCache.get(cacheKey);
+  if (cached && Date.now() - cached.fetchedAt < POOL_TTL_MS) return cached.pool;
+
   const addrA = tokenA as `0x${string}`;
   const addrB = tokenB as `0x${string}`;
 
-  let best: (PoolInfo & { liquidityVal: bigint }) | null = null;
+  let best: (CachedPool & { liquidityVal: bigint }) | null = null;
 
   for (const venue of v3VenueConfigs(chain)) {
     for (const spacing of venue.spacings) {
@@ -321,10 +341,9 @@ async function findDeepestV3Pool(
             address: poolAddr.toLowerCase(),
             token0: t0,
             token1: t1,
-            sqrtPriceX96,
-            liquidity: liquidityResult,
             decimals0: dec0,
             decimals1: dec1,
+            poolAbi: venue.poolAbi,
             liquidityVal: liquidityResult,
           };
         }
@@ -334,9 +353,9 @@ async function findDeepestV3Pool(
     }
   }
 
-  if (!best) return null;
-  const { liquidityVal: _dropped, ...info } = best;
-  return info;
+  const pool = best ? (({ liquidityVal: _dropped, ...info }) => info)(best) : null;
+  poolCache.set(cacheKey, { pool, fetchedAt: Date.now() });
+  return pool;
 }
 
 // ─── V3 spot price ───────────────────────────────────────────────────────────
@@ -351,6 +370,21 @@ async function getV3SpotPrice(
   const pool = await findDeepestV3Pool(chain, token, quoteToken, client);
   if (!pool) return null;
 
+  // Spot price must be fresh even when the pool itself came from cache
+  let sqrtPriceX96: bigint;
+  try {
+    const slot0 = await client.readContract({
+      address: pool.address as `0x${string}`,
+      abi: pool.poolAbi,
+      functionName: "slot0",
+    }) as unknown[];
+    sqrtPriceX96 = slot0[0] as bigint;
+  } catch (err) {
+    logger.warn({ err, chain, pool: pool.address }, "slot0 read failed");
+    return null;
+  }
+  if (sqrtPriceX96 === 0n) return null;
+
   const tokenLc = token.toLowerCase();
   // Determine which direction: is our token token0 or token1?
   const tokenIsToken0 = pool.token0 === tokenLc;
@@ -358,10 +392,10 @@ async function getV3SpotPrice(
   let priceInQuote: number;
   if (tokenIsToken0) {
     // price of token0 in token1 (=quote)
-    priceInQuote = sqrtPriceX96ToPrice(pool.sqrtPriceX96, pool.decimals0, pool.decimals1);
+    priceInQuote = sqrtPriceX96ToPrice(sqrtPriceX96, pool.decimals0, pool.decimals1);
   } else {
     // price of token0 (=quote) in token1 (=our token)
-    const priceQuoteInToken = sqrtPriceX96ToPrice(pool.sqrtPriceX96, pool.decimals0, pool.decimals1);
+    const priceQuoteInToken = sqrtPriceX96ToPrice(sqrtPriceX96, pool.decimals0, pool.decimals1);
     if (priceQuoteInToken <= 0) return null;
     priceInQuote = 1 / priceQuoteInToken;
   }

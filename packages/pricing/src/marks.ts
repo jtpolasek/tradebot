@@ -25,21 +25,22 @@ export function startMarksJob(
       if (tokens.length === 0) return;
 
       const ts = new Date();
-      await Promise.allSettled(
-        tokens.map(async ({ chain, tokenAddress }) => {
-          try {
-            const price = await getUsdPrice(chain, tokenAddress, clients[chain]);
-            if (price === null) {
-              logger.warn({ chain, tokenAddress }, "No price for marks job — skipping");
-              return;
-            }
-            await insertPriceMark(db, { chain, tokenAddress, ts, priceUsd: price, source: "pricing" });
-            logger.debug({ chain, tokenAddress, price }, "mark persisted");
-          } catch (err) {
-            logger.warn({ err, chain, tokenAddress }, "marks job failed for token");
+      // Sequential on purpose: pricing a token can fan out to dozens of eth_calls, and
+      // firing every token at once blows Alchemy's compute-units-per-second cap.
+      for (const { chain, tokenAddress } of tokens) {
+        if (stopped) return;
+        try {
+          const price = await getUsdPrice(chain, tokenAddress, clients[chain]);
+          if (price === null) {
+            logger.warn({ chain, tokenAddress }, "No price for marks job — skipping");
+            continue;
           }
-        })
-      );
+          await insertPriceMark(db, { chain, tokenAddress, ts, priceUsd: price, source: "pricing" });
+          logger.debug({ chain, tokenAddress, price }, "mark persisted");
+        } catch (err) {
+          logger.warn({ err, chain, tokenAddress }, "marks job failed for token");
+        }
+      }
     } catch (err) {
       logger.error({ err }, "marks job tick failed");
     }

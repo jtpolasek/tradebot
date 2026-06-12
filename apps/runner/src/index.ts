@@ -73,8 +73,10 @@ async function main() {
   decoder.start();
 
   // RPC clients for pricing (loose structural interfaces for viem compat)
-  const ethRpcClient = createPublicClient({ chain: mainnet, transport: webSocket(`wss://eth-mainnet.g.alchemy.com/v2/${config.ALCHEMY_API_KEY}`) });
-  const baseRpcClient = createPublicClient({ chain: base, transport: webSocket(`wss://base-mainnet.g.alchemy.com/v2/${config.BASE_ALCHEMY_API_KEY ?? config.ALCHEMY_API_KEY}`) });
+  // batch.multicall folds concurrent readContract calls into one eth_call — keeps
+  // pool-discovery fan-out under Alchemy's compute-units-per-second cap
+  const ethRpcClient = createPublicClient({ chain: mainnet, batch: { multicall: true }, transport: webSocket(`wss://eth-mainnet.g.alchemy.com/v2/${config.ALCHEMY_API_KEY}`) });
+  const baseRpcClient = createPublicClient({ chain: base, batch: { multicall: true }, transport: webSocket(`wss://base-mainnet.g.alchemy.com/v2/${config.BASE_ALCHEMY_API_KEY ?? config.ALCHEMY_API_KEY}`) });
   const rpcClients = { eth: ethRpcClient, base: baseRpcClient };
 
   const marksJob = startMarksJob(db, rpcClients);

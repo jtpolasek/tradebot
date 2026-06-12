@@ -56,6 +56,8 @@ export interface TradeSignal {
   confidence?: number | null;
   /** Human-readable explanation, primarily for candidates surfaced in the review queue. */
   reason?: string | null;
+  /** Review workflow status for candidate signals. Decoded signals leave this null/undefined. */
+  reviewStatus?: "pending" | "copy-requested" | "copying" | "copied" | "copy-failed" | "dismissed" | null;
 }
 
 export interface TokenRef {

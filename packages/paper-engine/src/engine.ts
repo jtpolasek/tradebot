@@ -744,6 +744,23 @@ export class PaperEngine {
     logger.info({ fillId, side: signal.side, notionalUsd, priceUsd: fillPrice, provisional }, "paper fill");
   }
 
+  /**
+   * Execute a human-reviewed candidate at the current decision time. The persisted signal remains a
+   * candidate for scoring purposes; this transient copy uses the normal paper-fill path with decode
+   * and staleness vetoes bypassed because the reviewer explicitly approved it now.
+   */
+  async executeManualCandidateCopy(signal: TradeSignal): Promise<void> {
+    await this.handleSignal({
+      ...signal,
+      source: "confirmed",
+      observedAt: Date.now(),
+      confirmedAt: Date.now(),
+      blockTimestamp: null,
+      decodeStatus: "decoded",
+      reviewStatus: signal.reviewStatus ?? "copying",
+    });
+  }
+
   private async quoteFillPriceWithZerox(input: {
     side: "buy" | "sell";
     token: TokenRef;

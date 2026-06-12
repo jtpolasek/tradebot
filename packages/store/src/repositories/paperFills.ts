@@ -71,6 +71,22 @@ export async function getRecentFills(db: Db, since: Date, limit: number): Promis
   return rows.map((row) => rowToFill(row.fill, row.chain as ChainId));
 }
 
+export async function getLatestFillForSignal(db: Db, signalId: string): Promise<StoredFill | null> {
+  const rows = await db
+    .select({
+      fill: paperFills,
+      chain: tradeSignals.chain,
+    })
+    .from(paperFills)
+    .innerJoin(tradeSignals, eq(paperFills.signalId, tradeSignals.id))
+    .where(eq(paperFills.signalId, signalId))
+    .orderBy(desc(paperFills.decidedAt))
+    .limit(1);
+  const row = rows[0];
+  if (!row) return null;
+  return rowToFill(row.fill, row.chain as ChainId);
+}
+
 export type CopiedFillRow = {
   id: string;
   chain: ChainId;

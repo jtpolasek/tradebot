@@ -53,6 +53,7 @@ export const tradeSignals = pgTable("trade_signals", {
   decodeStatus: text("decode_status").notNull().default("decoded"),
   confidence: numeric("confidence"),
   reason: text("reason"),
+  reviewStatus: text("review_status"),
 }, (t) => [unique().on(t.chain, t.txHash, t.tokenIn, t.tokenOut, t.side)]);
 
 export const paperFills = pgTable("paper_fills", {

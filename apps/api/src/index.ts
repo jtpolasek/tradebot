@@ -9,6 +9,9 @@ import {
   setWalletActive,
   getWalletById,
   getRecentSignals,
+  getCandidateSignals,
+  getSignalById,
+  setCandidateReviewStatus,
   getRecentFills,
   getOpenPositions,
   latestSnapshot,
@@ -92,6 +95,41 @@ app.get("/signals", async (req, reply) => {
   const since = q.data.since ? new Date(q.data.since) : new Date(Date.now() - 24 * 60 * 60 * 1000);
   const signals = await getRecentSignals(db, since, q.data.limit);
   reply.send({ signals: signals.map(serializeSignal) });
+});
+
+// ── Candidate Review ─────────────────────────────────────────────────────────
+
+app.get("/candidates", async (req, reply) => {
+  const q = z.object({ limit: z.coerce.number().int().min(1).max(500).default(100) }).safeParse(req.query);
+  if (!q.success) return reply.code(400).send({ error: q.error.message });
+  const signals = await getCandidateSignals(db, q.data.limit);
+  reply.send({ candidates: signals.map(serializeSignal) });
+});
+
+app.post("/candidates/:id/copy", async (req, reply) => {
+  const { id } = req.params as { id: string };
+  const signal = await getSignalById(db, id);
+  if (!signal || signal.decodeStatus !== "candidate") {
+    return reply.code(404).send({ error: "Candidate not found" });
+  }
+  if (signal.reviewStatus === "dismissed" || signal.reviewStatus === "copied" || signal.reviewStatus === "copying") {
+    return reply.code(409).send({ error: `Candidate is already ${signal.reviewStatus}` });
+  }
+  const updated = await setCandidateReviewStatus(db, id, "copy-requested");
+  reply.send({ candidate: updated ? serializeSignal(updated) : null });
+});
+
+app.post("/candidates/:id/dismiss", async (req, reply) => {
+  const { id } = req.params as { id: string };
+  const signal = await getSignalById(db, id);
+  if (!signal || signal.decodeStatus !== "candidate") {
+    return reply.code(404).send({ error: "Candidate not found" });
+  }
+  if (signal.reviewStatus === "copied" || signal.reviewStatus === "copying" || signal.reviewStatus === "copy-requested") {
+    return reply.code(409).send({ error: `Candidate is already ${signal.reviewStatus}` });
+  }
+  const updated = await setCandidateReviewStatus(db, id, "dismissed");
+  reply.send({ candidate: updated ? serializeSignal(updated) : null });
 });
 
 // ── Fills ─────────────────────────────────────────────────────────────────────

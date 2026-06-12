@@ -1,7 +1,10 @@
-import { eq, and, gte, desc } from "drizzle-orm";
+import { eq, and, gte, desc, or, isNull, inArray } from "drizzle-orm";
 import type { Db } from "../db.js";
 import { tradeSignals } from "../schema.js";
 import type { TradeSignal, ChainId } from "@tradebot/core";
+
+export type CandidateReviewStatus = NonNullable<TradeSignal["reviewStatus"]>;
+const openCandidateStatuses: CandidateReviewStatus[] = ["pending", "copy-requested", "copying", "copy-failed"];
 
 export async function insertSignal(db: Db, signal: TradeSignal): Promise<string> {
   const rows = await db.insert(tradeSignals).values({
@@ -22,6 +25,7 @@ export async function insertSignal(db: Db, signal: TradeSignal): Promise<string>
     decodeStatus: signal.decodeStatus,
     confidence: signal.confidence != null ? String(signal.confidence) : undefined,
     reason: signal.reason ?? undefined,
+    reviewStatus: signal.reviewStatus ?? (signal.decodeStatus === "candidate" ? "pending" : undefined),
   }).onConflictDoNothing().returning({ id: tradeSignals.id });
 
   const inserted = rows[0];
@@ -65,6 +69,7 @@ export async function upsertSignal(db: Db, signal: TradeSignal): Promise<void> {
     decodeStatus: signal.decodeStatus,
     confidence: signal.confidence != null ? String(signal.confidence) : undefined,
     reason: signal.reason ?? undefined,
+    reviewStatus: signal.reviewStatus ?? (signal.decodeStatus === "candidate" ? "pending" : undefined),
   }).onConflictDoUpdate({
     target: [tradeSignals.chain, tradeSignals.txHash, tradeSignals.tokenIn, tradeSignals.tokenOut, tradeSignals.side],
     set: {
@@ -76,6 +81,7 @@ export async function upsertSignal(db: Db, signal: TradeSignal): Promise<void> {
       decodeStatus: signal.decodeStatus,
       confidence: signal.confidence != null ? String(signal.confidence) : undefined,
       reason: signal.reason ?? undefined,
+      reviewStatus: signal.reviewStatus ?? (signal.decodeStatus === "candidate" ? "pending" : undefined),
     },
   });
 }
@@ -110,6 +116,46 @@ export async function getRecentSignals(db: Db, since: Date, limit: number): Prom
   return rows.map(rowToSignal);
 }
 
+export async function getCandidateSignals(db: Db, limit: number): Promise<TradeSignal[]> {
+  const rows = await db
+    .select()
+    .from(tradeSignals)
+    .where(and(
+      eq(tradeSignals.decodeStatus, "candidate"),
+      or(isNull(tradeSignals.reviewStatus), inArray(tradeSignals.reviewStatus, openCandidateStatuses)),
+    ))
+    .orderBy(desc(tradeSignals.observedAt))
+    .limit(limit);
+  return rows.map(rowToSignal);
+}
+
+export async function getCopyRequestedCandidates(db: Db, limit: number): Promise<TradeSignal[]> {
+  const rows = await db
+    .select()
+    .from(tradeSignals)
+    .where(and(
+      eq(tradeSignals.decodeStatus, "candidate"),
+      eq(tradeSignals.reviewStatus, "copy-requested"),
+    ))
+    .orderBy(tradeSignals.observedAt)
+    .limit(limit);
+  return rows.map(rowToSignal);
+}
+
+export async function setCandidateReviewStatus(
+  db: Db,
+  id: string,
+  status: CandidateReviewStatus
+): Promise<TradeSignal | null> {
+  const rows = await db
+    .update(tradeSignals)
+    .set({ reviewStatus: status })
+    .where(and(eq(tradeSignals.id, id), eq(tradeSignals.decodeStatus, "candidate")))
+    .returning();
+  const row = rows[0];
+  return row ? rowToSignal(row) : null;
+}
+
 function rowToSignal(row: typeof tradeSignals.$inferSelect): TradeSignal {
   return {
     id: row.id,
@@ -129,5 +175,20 @@ function rowToSignal(row: typeof tradeSignals.$inferSelect): TradeSignal {
     decodeStatus: row.decodeStatus === "candidate" ? "candidate" : "decoded",
     confidence: row.confidence != null ? Number(row.confidence) : null,
     reason: row.reason ?? null,
+    reviewStatus: parseReviewStatus(row.reviewStatus),
   };
+}
+
+function parseReviewStatus(value: string | null): Exclude<TradeSignal["reviewStatus"], undefined> {
+  if (
+    value === "pending" ||
+    value === "copy-requested" ||
+    value === "copying" ||
+    value === "copied" ||
+    value === "copy-failed" ||
+    value === "dismissed"
+  ) {
+    return value;
+  }
+  return null;
 }

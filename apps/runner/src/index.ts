@@ -1,5 +1,15 @@
 import { config, createLogger, EventBus } from "@tradebot/core";
-import { getDb, closeDb, getActiveWallets, getAllSettings, getOpenPositions, latestMark } from "@tradebot/store";
+import {
+  getDb,
+  closeDb,
+  getActiveWallets,
+  getAllSettings,
+  getOpenPositions,
+  latestMark,
+  getCopyRequestedCandidates,
+  setCandidateReviewStatus,
+  getLatestFillForSignal,
+} from "@tradebot/store";
 import { ChainWatcher, Recorder, deserializeEvent } from "@tradebot/ingest";
 import { Decoder } from "@tradebot/decoder";
 import { startMarksJob } from "@tradebot/pricing";
@@ -87,6 +97,7 @@ async function main() {
   const engine = new PaperEngine(db, bus, config, rpcClients, weightProvider);
   await engine.start();
   const exitJob = startExitJob(db, engine);
+  const candidateCopyJob = startCandidateCopyJob(db, engine);
 
   bus.on("raw-tx", (event) => {
     logger.debug({ chain: event.chain, source: event.source, txHash: event.txHash }, "raw-tx");
@@ -133,6 +144,7 @@ async function main() {
     logger.info("Shutting down...");
     engine.stop();
     exitJob.stop();
+    candidateCopyJob.stop();
     marksJob.stop();
     scorerJob.stop();
     decoder.stop();
@@ -143,6 +155,37 @@ async function main() {
 
   process.once("SIGINT", () => void shutdown());
   process.once("SIGTERM", () => void shutdown());
+}
+
+function startCandidateCopyJob(db: ReturnType<typeof getDb>, engine: PaperEngine): { stop: () => void } {
+  let running = false;
+  const run = () => {
+    if (running) return;
+    running = true;
+    void (async () => {
+      const candidates = await getCopyRequestedCandidates(db, 10);
+      for (const candidate of candidates) {
+        const claimed = await setCandidateReviewStatus(db, candidate.id, "copying");
+        if (!claimed) continue;
+        try {
+          await engine.executeManualCandidateCopy({ ...candidate, reviewStatus: "copying" });
+          const fill = await getLatestFillForSignal(db, candidate.id);
+          await setCandidateReviewStatus(db, candidate.id, fill?.decision === "copied" ? "copied" : "copy-failed");
+        } catch (err) {
+          logger.error({ err, signalId: candidate.id }, "manual candidate copy failed");
+          await setCandidateReviewStatus(db, candidate.id, "copy-failed");
+        }
+      }
+    })()
+      .catch((err: unknown) => logger.error({ err }, "candidate copy check failed"))
+      .finally(() => {
+        running = false;
+      });
+  };
+
+  run();
+  const timer = setInterval(run, 5_000);
+  return { stop: () => clearInterval(timer) };
 }
 
 main().catch((err: unknown) => {

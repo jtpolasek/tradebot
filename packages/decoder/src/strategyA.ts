@@ -17,9 +17,11 @@ export type StrategyAClients = Partial<Record<ChainId, ReadContractClient>>;
 
 const V2_FACTORY_ABI = parseAbi(["function getPair(address tokenA, address tokenB) view returns (address pair)"]);
 const V3_FACTORY_ABI = parseAbi(["function getPool(address tokenA, address tokenB, uint24 fee) view returns (address pool)"]);
+const AERODROME_CL_FACTORY_ABI = parseAbi(["function getPool(address tokenA, address tokenB, int24 tickSpacing) view returns (address pool)"]);
 const V3_POOL_ABI = parseAbi(["function fee() view returns (uint24)"]);
+const AERODROME_CL_POOL_ABI = parseAbi(["function tickSpacing() view returns (int24)"]);
 const NULL_ADDR = "0x0000000000000000000000000000000000000000";
-const poolVerificationCache = new Map<string, boolean>();
+const poolVerificationCache = new Map<string, string | null>();
 
 /** Returns null if Strategy A can't decode (fall through to B). */
 export async function strategyA(
@@ -165,15 +167,13 @@ async function decodeV3Swap(
 
   const token0Addr = token0IsIn ? tokenInAddr : tokenOutAddr;
   const token1Addr = token0IsIn ? tokenOutAddr : tokenInAddr;
-  const verified = await verifyV3Pool(event.chain, poolAddress, token0Addr, token1Addr, clients);
-  if (!verified) return null;
+  const venue = await verifyV3Pool(event.chain, poolAddress, token0Addr, token1Addr, clients);
+  if (!venue) return null;
 
   const [metaIn, metaOut] = await Promise.all([
     meta.resolve(event.chain, tokenInAddr),
     meta.resolve(event.chain, tokenOutAddr),
   ]);
-
-  const venue = detectV3Venue(swapLog.address.toLowerCase(), event.chain);
 
   return {
     tokenIn: { chain: event.chain, address: tokenInAddr, symbol: metaIn.symbol, decimals: metaIn.decimals },
@@ -272,12 +272,6 @@ function resolveTokensFromTransfersV4(
   };
 }
 
-function detectV3Venue(poolAddress: string, chain: ChainId): string {
-  void poolAddress; void chain;
-  // Could check against known Aerodrome CL pools for Base — for now default to uniswap-v3
-  return "uniswap-v3";
-}
-
 async function verifyV2Pool(
   chain: ChainId,
   poolAddress: string,
@@ -291,7 +285,7 @@ async function verifyV2Pool(
 
   const cacheKey = `${chain}:v2:${poolAddress}`;
   const cached = poolVerificationCache.get(cacheKey);
-  if (cached !== undefined) return cached;
+  if (cached !== undefined) return cached === "uniswap-v2";
 
   const pair = await client.readContract({
     address: factory as `0x${string}`,
@@ -300,7 +294,7 @@ async function verifyV2Pool(
     args: [token0 as `0x${string}`, token1 as `0x${string}`],
   });
   const verified = normalizeAddress(pair) === poolAddress && normalizeAddress(pair) !== NULL_ADDR;
-  poolVerificationCache.set(cacheKey, verified);
+  poolVerificationCache.set(cacheKey, verified ? "uniswap-v2" : null);
   return verified;
 }
 
@@ -310,31 +304,66 @@ async function verifyV3Pool(
   token0: string,
   token1: string,
   clients: StrategyAClients
-): Promise<boolean> {
-  const factory = KNOWN_FACTORIES[chain].v3;
+): Promise<string | null> {
+  const uniFactory = KNOWN_FACTORIES[chain].v3;
+  const aerodromeFactory = KNOWN_FACTORIES[chain].aerodromeCl;
   const client = clients[chain];
-  if (!factory || !client) return true;
+  if (!client) return "uniswap-v3";
 
   const cacheKey = `${chain}:v3:${poolAddress}`;
   const cached = poolVerificationCache.get(cacheKey);
   if (cached !== undefined) return cached;
 
-  const fee = await client.readContract({
-    address: poolAddress as `0x${string}`,
-    abi: V3_POOL_ABI,
-    functionName: "fee",
-  });
-  if (typeof fee !== "number") return false;
+  if (uniFactory) {
+    try {
+      const fee = await client.readContract({
+        address: poolAddress as `0x${string}`,
+        abi: V3_POOL_ABI,
+        functionName: "fee",
+      });
+      if (typeof fee === "number") {
+        const pool = await client.readContract({
+          address: uniFactory as `0x${string}`,
+          abi: V3_FACTORY_ABI,
+          functionName: "getPool",
+          args: [token0 as `0x${string}`, token1 as `0x${string}`, fee],
+        });
+        if (normalizeAddress(pool) === poolAddress && normalizeAddress(pool) !== NULL_ADDR) {
+          poolVerificationCache.set(cacheKey, "uniswap-v3");
+          return "uniswap-v3";
+        }
+      }
+    } catch {
+      // Try Aerodrome CL below.
+    }
+  }
 
-  const pool = await client.readContract({
-    address: factory as `0x${string}`,
-    abi: V3_FACTORY_ABI,
-    functionName: "getPool",
-    args: [token0 as `0x${string}`, token1 as `0x${string}`, fee],
-  });
-  const verified = normalizeAddress(pool) === poolAddress && normalizeAddress(pool) !== NULL_ADDR;
-  poolVerificationCache.set(cacheKey, verified);
-  return verified;
+  if (aerodromeFactory) {
+    try {
+      const tickSpacing = await client.readContract({
+        address: poolAddress as `0x${string}`,
+        abi: AERODROME_CL_POOL_ABI,
+        functionName: "tickSpacing",
+      });
+      if (typeof tickSpacing === "number") {
+        const pool = await client.readContract({
+          address: aerodromeFactory as `0x${string}`,
+          abi: AERODROME_CL_FACTORY_ABI,
+          functionName: "getPool",
+          args: [token0 as `0x${string}`, token1 as `0x${string}`, tickSpacing],
+        });
+        if (normalizeAddress(pool) === poolAddress && normalizeAddress(pool) !== NULL_ADDR) {
+          poolVerificationCache.set(cacheKey, "aerodrome");
+          return "aerodrome";
+        }
+      }
+    } catch {
+      // Fall through to rejected.
+    }
+  }
+
+  poolVerificationCache.set(cacheKey, null);
+  return null;
 }
 
 function normalizeAddress(value: unknown): string {

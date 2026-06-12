@@ -163,12 +163,33 @@ describe("strategyA", () => {
     const result = await strategyA(event, event.from, meta, "test-id");
 
     expect(result).not.toBeNull();
-    // Aerodrome uses V3 Swap event signature — detected as uniswap-v3 until venue registry is extended
     expect(result!.venue).toBe("uniswap-v3");
     expect(result!.tokenIn.address).toBe("0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"); // USDC on Base
     expect(result!.tokenOut.address).toBe("0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf"); // cbBTC
     expect(result!.amountIn).toBeGreaterThan(0n);
     expect(result!.amountOut).toBeGreaterThan(0n);
+  });
+
+  it("assigns Aerodrome venue when a Base V3-style pool verifies through Slipstream", async () => {
+    const event = makeEvent(aeroFixture, "base");
+    const poolAddress = firstSwapLogAddress(event).toLowerCase();
+    const clients: StrategyAClients = {
+      base: {
+        readContract: vi.fn().mockImplementation(({ functionName }: { functionName: string }) => {
+          if (functionName === "fee") return Promise.reject(new Error("not a Uniswap V3 pool"));
+          if (functionName === "tickSpacing") return Promise.resolve(100);
+          if (functionName === "getPool") return Promise.resolve(poolAddress);
+          return Promise.reject(new Error(`unexpected readContract: ${functionName}`));
+        }),
+      },
+    };
+
+    const result = await strategyA(event, event.from, meta, "test-id", clients);
+
+    expect(result).not.toBeNull();
+    expect(result!.venue).toBe("aerodrome");
+    expect(clients.base!.readContract).toHaveBeenCalledWith(expect.objectContaining({ functionName: "tickSpacing" }));
+    expect(clients.base!.readContract).toHaveBeenCalledWith(expect.objectContaining({ functionName: "getPool" }));
   });
 
   it("returns null for a 1inch aggregation with mixed V2+V3+V4 swap logs", async () => {

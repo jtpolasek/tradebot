@@ -5,8 +5,11 @@ import { WETH, QUOTE_ASSETS } from "@tradebot/core";
 const Q96 = 2 ** 96;
 const ETH_USDC = QUOTE_ASSETS.eth[0]!; // 0xa0b86991c...
 const ETH_WETH = WETH.eth;             // 0xc02aaa39b...
+const BASE_USDC = QUOTE_ASSETS.base[0]!;
 const CHAINLINK_FEED_ETH = "0x5f4ec3df9cbd43714fe2740f5e3616155c5b8419";
 const UNI_FACTORY = "0x1f98431c8ad98523631ae4a59f267346ea31f984";
+const BASE_UNI_FACTORY = "0x33128a8fc17869897dce68ed026d694621f6fdfd";
+const BASE_AERODROME_FACTORY = "0x5e7bb104d84c7cb9b682aac2f3d509f5f406809a";
 const NULL_ADDR = "0x0000000000000000000000000000000000000000";
 const FAKE_POOL = "0xaabbccddaabbccddaabbccddaabbccddaabbccdd";
 
@@ -173,6 +176,34 @@ describe("getUsdPrice", () => {
 
     const price = await getUsdPrice("eth", FAKE_TOKEN_HI, client);
     expect(price).toBeCloseTo(0.042, 4);
+  });
+
+  it("prices a Base token through an Aerodrome CL pool when no Uniswap V3 pool exists", async () => {
+    const rawPrice = 0.50 * 10 ** (6 - 18);
+    const sqrtPriceX96 = BigInt(Math.round(Math.sqrt(rawPrice) * Q96));
+
+    const client = makeClient({
+      [`${BASE_UNI_FACTORY}:getPool`]: NULL_ADDR,
+      [`${BASE_AERODROME_FACTORY}:getPool`]: (args?: unknown[]) => {
+        const a = (args?.[0] as string)?.toLowerCase();
+        const b = (args?.[1] as string)?.toLowerCase();
+        return (a === BASE_USDC || b === BASE_USDC) ? FAKE_POOL : NULL_ADDR;
+      },
+      [`${FAKE_POOL}:slot0`]: [sqrtPriceX96, 0, 0, 0, 0, true],
+      [`${FAKE_POOL}:liquidity`]: 1_000_000n,
+      [`${FAKE_POOL}:token0`]: FAKE_TOKEN_LO,
+      [`${FAKE_POOL}:token1`]: BASE_USDC,
+      [`${FAKE_TOKEN_LO}:decimals`]: 18,
+      [`${BASE_USDC}:decimals`]: 6,
+    });
+
+    const price = await getUsdPrice("base", FAKE_TOKEN_LO, client);
+
+    expect(price).toBeCloseTo(0.50, 6);
+    expect(client.readContract).toHaveBeenCalledWith(expect.objectContaining({
+      address: BASE_AERODROME_FACTORY,
+      functionName: "getPool",
+    }));
   });
 });
 

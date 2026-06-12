@@ -39,6 +39,20 @@ const UNI_V3_FACTORY_ABI = [
   },
 ] as const;
 
+const AERODROME_CL_FACTORY_ABI = [
+  {
+    type: "function",
+    name: "getPool",
+    inputs: [
+      { name: "tokenA", type: "address" },
+      { name: "tokenB", type: "address" },
+      { name: "tickSpacing", type: "int24" },
+    ],
+    outputs: [{ name: "pool", type: "address" }],
+    stateMutability: "view",
+  },
+] as const;
+
 const UNI_V3_POOL_ABI = [
   {
     type: "function",
@@ -51,6 +65,44 @@ const UNI_V3_POOL_ABI = [
       { name: "observationCardinality", type: "uint16" },
       { name: "observationCardinalityNext", type: "uint16" },
       { name: "feeProtocol", type: "uint8" },
+      { name: "unlocked", type: "bool" },
+    ],
+    stateMutability: "view",
+  },
+  {
+    type: "function",
+    name: "liquidity",
+    inputs: [],
+    outputs: [{ name: "", type: "uint128" }],
+    stateMutability: "view",
+  },
+  {
+    type: "function",
+    name: "token0",
+    inputs: [],
+    outputs: [{ name: "", type: "address" }],
+    stateMutability: "view",
+  },
+  {
+    type: "function",
+    name: "token1",
+    inputs: [],
+    outputs: [{ name: "", type: "address" }],
+    stateMutability: "view",
+  },
+] as const;
+
+const AERODROME_CL_POOL_ABI = [
+  {
+    type: "function",
+    name: "slot0",
+    inputs: [],
+    outputs: [
+      { name: "sqrtPriceX96", type: "uint160" },
+      { name: "tick", type: "int24" },
+      { name: "observationIndex", type: "uint16" },
+      { name: "observationCardinality", type: "uint16" },
+      { name: "observationCardinalityNext", type: "uint16" },
       { name: "unlocked", type: "bool" },
     ],
     stateMutability: "view",
@@ -103,8 +155,11 @@ const UNI_V3_FACTORIES: Record<ChainId, string> = {
   base: "0x33128a8fc17869897dce68ed026d694621f6fdfd",
 };
 
+const AERODROME_CL_FACTORY_BASE = "0x5e7bb104d84c7cb9b682aac2f3d509f5f406809a";
+
 // Fee tiers to probe in priority order (deepest pool wins by liquidity)
 const V3_FEE_TIERS = [500, 3000, 10000] as const;
+const AERODROME_TICK_SPACINGS = [1, 50, 100, 200, 2000] as const;
 
 // Stablecoins that are always exactly $1.00 USD (not WETH, which needs real price)
 const STABLECOINS: Record<ChainId, Set<string>> = {
@@ -190,63 +245,93 @@ type PoolInfo = {
   decimals1: number;
 };
 
+type V3VenueConfig = {
+  factory: `0x${string}`;
+  factoryAbi: typeof UNI_V3_FACTORY_ABI | typeof AERODROME_CL_FACTORY_ABI;
+  poolAbi: typeof UNI_V3_POOL_ABI | typeof AERODROME_CL_POOL_ABI;
+  spacings: readonly number[];
+};
+
+function v3VenueConfigs(chain: ChainId): V3VenueConfig[] {
+  const configs: V3VenueConfig[] = [
+    {
+      factory: UNI_V3_FACTORIES[chain] as `0x${string}`,
+      factoryAbi: UNI_V3_FACTORY_ABI,
+      poolAbi: UNI_V3_POOL_ABI,
+      spacings: V3_FEE_TIERS,
+    },
+  ];
+
+  if (chain === "base") {
+    configs.push({
+      factory: AERODROME_CL_FACTORY_BASE as `0x${string}`,
+      factoryAbi: AERODROME_CL_FACTORY_ABI,
+      poolAbi: AERODROME_CL_POOL_ABI,
+      spacings: AERODROME_TICK_SPACINGS,
+    });
+  }
+
+  return configs;
+}
+
 async function findDeepestV3Pool(
   chain: ChainId,
   tokenA: string,
   tokenB: string,
   client: RpcClient
 ): Promise<PoolInfo | null> {
-  const factory = UNI_V3_FACTORIES[chain] as `0x${string}`;
   const addrA = tokenA as `0x${string}`;
   const addrB = tokenB as `0x${string}`;
 
   let best: (PoolInfo & { liquidityVal: bigint }) | null = null;
 
-  for (const fee of V3_FEE_TIERS) {
-    try {
-      const poolAddr = await client.readContract({
-        address: factory,
-        abi: UNI_V3_FACTORY_ABI,
-        functionName: "getPool",
-        args: [addrA, addrB, fee],
-      }) as string;
+  for (const venue of v3VenueConfigs(chain)) {
+    for (const spacing of venue.spacings) {
+      try {
+        const poolAddr = await client.readContract({
+          address: venue.factory,
+          abi: venue.factoryAbi,
+          functionName: "getPool",
+          args: [addrA, addrB, spacing],
+        }) as string;
 
-      if (!poolAddr || poolAddr === NULL_ADDRESS) continue;
+        if (!poolAddr || poolAddr === NULL_ADDRESS) continue;
 
-      const pool = poolAddr as `0x${string}`;
+        const pool = poolAddr as `0x${string}`;
 
-      const [slot0Result, liquidityResult, token0Result, token1Result] = await Promise.all([
-        client.readContract({ address: pool, abi: UNI_V3_POOL_ABI, functionName: "slot0" }),
-        client.readContract({ address: pool, abi: UNI_V3_POOL_ABI, functionName: "liquidity" }),
-        client.readContract({ address: pool, abi: UNI_V3_POOL_ABI, functionName: "token0" }),
-        client.readContract({ address: pool, abi: UNI_V3_POOL_ABI, functionName: "token1" }),
-      ]) as [unknown[], bigint, string, string];
+        const [slot0Result, liquidityResult, token0Result, token1Result] = await Promise.all([
+          client.readContract({ address: pool, abi: venue.poolAbi, functionName: "slot0" }),
+          client.readContract({ address: pool, abi: venue.poolAbi, functionName: "liquidity" }),
+          client.readContract({ address: pool, abi: venue.poolAbi, functionName: "token0" }),
+          client.readContract({ address: pool, abi: venue.poolAbi, functionName: "token1" }),
+        ]) as [unknown[], bigint, string, string];
 
-      const sqrtPriceX96 = slot0Result[0] as bigint;
-      if (sqrtPriceX96 === 0n) continue;
+        const sqrtPriceX96 = slot0Result[0] as bigint;
+        if (sqrtPriceX96 === 0n) continue;
 
-      const t0 = (token0Result as string).toLowerCase();
-      const t1 = (token1Result as string).toLowerCase();
+        const t0 = (token0Result as string).toLowerCase();
+        const t1 = (token1Result as string).toLowerCase();
 
-      const [dec0, dec1] = await Promise.all([
-        client.readContract({ address: t0 as `0x${string}`, abi: ERC20_BALANCE_ABI, functionName: "decimals" }).catch(() => 18),
-        client.readContract({ address: t1 as `0x${string}`, abi: ERC20_BALANCE_ABI, functionName: "decimals" }).catch(() => 18),
-      ]) as [number, number];
+        const [dec0, dec1] = await Promise.all([
+          client.readContract({ address: t0 as `0x${string}`, abi: ERC20_BALANCE_ABI, functionName: "decimals" }).catch(() => 18),
+          client.readContract({ address: t1 as `0x${string}`, abi: ERC20_BALANCE_ABI, functionName: "decimals" }).catch(() => 18),
+        ]) as [number, number];
 
-      if (!best || liquidityResult > best.liquidityVal) {
-        best = {
-          address: poolAddr.toLowerCase(),
-          token0: t0,
-          token1: t1,
-          sqrtPriceX96,
-          liquidity: liquidityResult,
-          decimals0: dec0,
-          decimals1: dec1,
-          liquidityVal: liquidityResult,
-        };
+        if (!best || liquidityResult > best.liquidityVal) {
+          best = {
+            address: poolAddr.toLowerCase(),
+            token0: t0,
+            token1: t1,
+            sqrtPriceX96,
+            liquidity: liquidityResult,
+            decimals0: dec0,
+            decimals1: dec1,
+            liquidityVal: liquidityResult,
+          };
+        }
+      } catch {
+        // pool not found or call failed — try next fee tier/tick spacing
       }
-    } catch {
-      // pool not found or call failed — try next fee tier
     }
   }
 

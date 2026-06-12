@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { NATIVE_TOKEN_PLACEHOLDER, WETH } from "@tradebot/core";
-import { baselineWeightForTradeCount, resolveQuoteUsdPrice } from "./scorer.js";
+import { baselineWeightForTradeCount, resolveQuoteUsdPrice, scoreResultAgainstCohort } from "./scorer.js";
+import type { ScoringResult } from "./scoring.js";
 
 describe("baselineWeightForTradeCount", () => {
   it("uses 0.5 weight while the leader has fewer than five trades", () => {
@@ -11,6 +12,49 @@ describe("baselineWeightForTradeCount", () => {
   it("uses neutral 1.0 weight once the leader reaches five trades", () => {
     expect(baselineWeightForTradeCount(5)).toBe(1.0);
     expect(baselineWeightForTradeCount(20)).toBe(1.0);
+  });
+});
+
+describe("scoreResultAgainstCohort", () => {
+  function result(overrides: Partial<ScoringResult>): ScoringResult {
+    return {
+      walletId: "wallet",
+      window: "7d",
+      trades: 5,
+      winRate: 0.5,
+      avgReturnPct: 0,
+      medianHoldMinutes: 10,
+      realizedPnlUsd: 0,
+      maxDrawdownPct: 0,
+      ...overrides,
+    };
+  }
+
+  it("computes z-scores from the current run's cohort", () => {
+    const target = result({
+      walletId: "target",
+      realizedPnlUsd: 200,
+      winRate: 0.8,
+      avgReturnPct: 20,
+      maxDrawdownPct: 5,
+    });
+    const cohort = [
+      result({ walletId: "low", realizedPnlUsd: -100, winRate: 0.2, avgReturnPct: -10, maxDrawdownPct: 40 }),
+      target,
+      result({ walletId: "mid", realizedPnlUsd: 50, winRate: 0.5, avgReturnPct: 5, maxDrawdownPct: 20 }),
+    ];
+
+    const scored = scoreResultAgainstCohort(target, cohort);
+
+    expect(scored.score).toBeGreaterThan(0.9);
+    expect(scored.weight).toBeGreaterThan(1.4);
+  });
+
+  it("keeps the baseline weight until a leader has enough trades", () => {
+    expect(scoreResultAgainstCohort(result({ trades: 4 }), [])).toEqual({
+      score: null,
+      weight: 0.5,
+    });
   });
 });
 

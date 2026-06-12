@@ -19,7 +19,7 @@ import { fifoRoundTrips, computeScoringResult } from "./scoring.js";
 import { computeZScore, computeScore, scoreToWeight, shouldAutoMute } from "./weights.js";
 import { runLiquidityNotch, computePerLeaderMutes } from "./adaptation.js";
 import type { FillRecord } from "./adaptation.js";
-import type { TradeRow, ScoreWindow } from "./scoring.js";
+import type { ScoringResult, TradeRow, ScoreWindow } from "./scoring.js";
 
 const logger = createLogger("brain");
 
@@ -64,6 +64,31 @@ export class BrainWeightProvider implements WeightProvider {
 
 export function baselineWeightForTradeCount(trades: number): number {
   return trades < 5 ? 0.5 : 1.0;
+}
+
+export function scoreResultAgainstCohort(
+  result: ScoringResult,
+  cohort: ScoringResult[]
+): { score: number | null; weight: number } {
+  let score: number | null = null;
+  let weight = baselineWeightForTradeCount(result.trades);
+
+  if (result.trades >= 5 && result.realizedPnlUsd !== null) {
+    const eligibleCohort = cohort.filter((s) => s.trades >= 5 && s.realizedPnlUsd !== null);
+    const pnlCohort = eligibleCohort.map((s) => s.realizedPnlUsd ?? 0);
+    const winRateCohort = eligibleCohort.map((s) => s.winRate ?? 0);
+    const avgRetCohort = eligibleCohort.map((s) => s.avgReturnPct ?? 0);
+    const ddCohort = eligibleCohort.map((s) => s.maxDrawdownPct ?? 0);
+
+    const pnlZ = computeZScore(result.realizedPnlUsd, pnlCohort);
+    const winRateZ = computeZScore(result.winRate ?? 0, winRateCohort);
+    const avgRetZ = computeZScore(result.avgReturnPct ?? 0, avgRetCohort);
+    const ddZ = computeZScore(result.maxDrawdownPct ?? 0, ddCohort);
+    score = computeScore(pnlZ, winRateZ, avgRetZ, ddZ);
+    weight = scoreToWeight(score);
+  }
+
+  return { score, weight };
 }
 
 function normalizeQuoteAddress(chain: ChainId, address: string): string {
@@ -202,31 +227,28 @@ export async function runScorerJob(db: Db, weightProvider: BrainWeightProvider, 
   const windows: ScoreWindow[] = ["7d", "30d", "all"];
   const quotePriceCache: QuotePriceCache = new Map();
 
-  for (const wallet of wallets) {
-    for (const window of windows) {
+  for (const window of windows) {
+    const currentResults: ScoringResult[] = [];
+    const failedWalletIds = new Set<string>();
+
+    for (const wallet of wallets) {
       try {
         const since = windowToSince(window);
         const { result } = await scoreWallet(db, wallet.id, window, since, rpcClients, quotePriceCache);
+        currentResults.push(result);
+      } catch (err) {
+        failedWalletIds.add(wallet.id);
+        logger.error({ walletId: wallet.id, window, err }, "failed to score wallet");
+      }
+    }
 
-        // Fetch cohort stats for z-score computation
-        const cohortStats = await getAllLeaderStats(db, window);
-        const pnlCohort = cohortStats.map((s) => s.realizedPnlUsd ?? 0);
-        const winRateCohort = cohortStats.map((s) => s.winRate ?? 0);
-        const avgRetCohort = cohortStats.map((s) => s.avgReturnPct ?? 0);
-        const ddCohort = cohortStats.map((s) => s.maxDrawdownPct ?? 0);
+    for (const wallet of wallets) {
+      if (failedWalletIds.has(wallet.id)) continue;
+      const result = currentResults.find((r) => r.walletId === wallet.id);
+      if (!result) continue;
 
-        let score: number | null = null;
-        let weight = baselineWeightForTradeCount(result.trades);
-
-        if (result.trades >= 5 && result.realizedPnlUsd !== null) {
-          const pnlZ = computeZScore(result.realizedPnlUsd, pnlCohort);
-          const winRateZ = computeZScore(result.winRate ?? 0, winRateCohort);
-          const avgRetZ = computeZScore(result.avgReturnPct ?? 0, avgRetCohort);
-          const ddZ = computeZScore(result.maxDrawdownPct ?? 0, ddCohort);
-          score = computeScore(pnlZ, winRateZ, avgRetZ, ddZ);
-          weight = scoreToWeight(score);
-        }
-
+      try {
+        let { score, weight } = scoreResultAgainstCohort(result, currentResults);
         // Auto-mute check on 7d window
         if (window === "7d" && shouldAutoMute(score)) {
           weight = 0;

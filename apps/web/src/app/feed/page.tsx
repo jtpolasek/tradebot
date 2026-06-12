@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { apiFetch, wsUrl, formatUsd, shortAddr, timeAgo } from "@/lib/api";
+import { apiFetch, streamUrl, formatUsd, shortAddr, timeAgo } from "@/lib/api";
 
 type SignalItem = {
   type: "trade-signal";
@@ -47,7 +47,7 @@ export default function FeedPage() {
   const [entries, setEntries] = useState<FeedEntry[]>([]);
   const [wsStatus, setWsStatus] = useState<"connecting" | "connected" | "disconnected">("disconnected");
   const [error, setError] = useState("");
-  const wsRef = useRef<WebSocket | null>(null);
+  const streamRef = useRef<EventSource | null>(null);
 
   function addEntry(entry: FeedEntry) {
     setEntries((prev) => [entry, ...prev].slice(0, 200));
@@ -68,20 +68,19 @@ export default function FeedPage() {
       setEntries(all.slice(0, 200));
     }).catch((err) => setError(err instanceof Error ? err.message : "Failed to load history"));
 
-    // WebSocket for live updates
+    // Server-sent events for live updates through the same-origin proxy.
     function connect() {
-      const url = wsUrl();
       setWsStatus("connecting");
-      const ws = new WebSocket(url);
-      wsRef.current = ws;
+      const stream = new EventSource(streamUrl());
+      streamRef.current = stream;
 
-      ws.onopen = () => setWsStatus("connected");
-      ws.onclose = () => {
+      stream.onopen = () => setWsStatus("connected");
+      stream.onerror = () => {
+        stream.close();
         setWsStatus("disconnected");
         setTimeout(connect, 3_000);
       };
-      ws.onerror = () => ws.close();
-      ws.onmessage = (evt) => {
+      stream.onmessage = (evt) => {
         try {
           const msg = JSON.parse(evt.data as string) as FeedEvent;
           if (msg.type === "trade-signal") {
@@ -95,7 +94,7 @@ export default function FeedPage() {
     connect();
 
     return () => {
-      wsRef.current?.close();
+      streamRef.current?.close();
     };
   }, []);
 

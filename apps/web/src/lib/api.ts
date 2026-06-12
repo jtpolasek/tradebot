@@ -1,12 +1,9 @@
-const API_URL = process.env["NEXT_PUBLIC_API_URL"] ?? "http://localhost:3001";
-const API_KEY = process.env["NEXT_PUBLIC_API_KEY"] ?? "";
-
 export function apiUrl(path: string) {
-  return `${API_URL}${path}`;
+  return `/api${path}`;
 }
 
-export function wsUrl() {
-  return API_URL.replace(/^http/, "ws") + "/stream";
+export function streamUrl() {
+  return "/api/stream";
 }
 
 export async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
@@ -14,7 +11,6 @@ export async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> 
     ...init,
     headers: {
       "Content-Type": "application/json",
-      ...(API_KEY ? { "X-Api-Key": API_KEY } : {}),
       ...(init?.headers ?? {}),
     },
     cache: "no-store",

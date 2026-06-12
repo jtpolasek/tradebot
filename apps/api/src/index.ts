@@ -1,9 +1,3 @@
-import { config as loadDotenv } from "dotenv";
-import { resolve } from "path";
-import { fileURLToPath } from "url";
-const __dirname = fileURLToPath(new URL(".", import.meta.url));
-loadDotenv({ path: resolve(__dirname, "../../../.env") });
-
 import Fastify from "fastify";
 import wsPlugin from "@fastify/websocket";
 import { z } from "zod";
@@ -26,24 +20,16 @@ import {
   deleteSetting,
   latestMark,
 } from "@tradebot/store";
-
-const API_KEY = process.env["API_KEY"] ?? "";
-const PORT = Number(process.env["API_PORT"] ?? 3001);
-const CORS_ORIGIN = process.env["CORS_ORIGIN"] ?? "http://localhost:3000";
-
-if (!API_KEY) {
-  console.warn("[api] WARNING: API_KEY is not set — all requests will be accepted. Set API_KEY in .env.");
-}
+import { apiConfig } from "./config.js";
 
 const db = getDb();
 
-const app = Fastify({ logger: { level: process.env["LOG_LEVEL"] ?? "info" } });
+const app = Fastify({ logger: { level: apiConfig.LOG_LEVEL } });
 await app.register(wsPlugin);
 
-// Auth: always enforce when API_KEY is set; warn-only when unset (dev convenience)
 app.addHook("preHandler", async (req, reply) => {
   if (req.method === "OPTIONS") return;
-  if (API_KEY && req.headers["x-api-key"] !== API_KEY) {
+  if (req.headers["x-api-key"] !== apiConfig.API_KEY) {
     return reply.code(401).send({ error: "Unauthorized" });
   }
 });
@@ -51,8 +37,8 @@ app.addHook("preHandler", async (req, reply) => {
 // CORS: restrict to configured dashboard origin
 app.addHook("onSend", async (req, reply) => {
   const origin = req.headers["origin"];
-  if (origin === CORS_ORIGIN) {
-    reply.header("Access-Control-Allow-Origin", CORS_ORIGIN);
+  if (origin === apiConfig.CORS_ORIGIN) {
+    reply.header("Access-Control-Allow-Origin", apiConfig.CORS_ORIGIN);
     reply.header("Access-Control-Allow-Methods", "GET,POST,PATCH,DELETE,OPTIONS");
     reply.header("Access-Control-Allow-Headers", "Content-Type,X-Api-Key");
   }
@@ -262,8 +248,8 @@ function serializeSignal(s: Awaited<ReturnType<typeof getRecentSignals>>[number]
 // ── Boot ──────────────────────────────────────────────────────────────────────
 
 try {
-  await app.listen({ port: PORT, host: "0.0.0.0" });
-  console.log(`API listening on port ${PORT}`);
+  await app.listen({ port: apiConfig.API_PORT, host: "0.0.0.0" });
+  console.log(`API listening on port ${apiConfig.API_PORT}`);
 } catch (err) {
   app.log.error(err);
   process.exit(1);

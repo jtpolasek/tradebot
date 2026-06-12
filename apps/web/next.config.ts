@@ -8,7 +8,8 @@ if (existsSync(rootEnvPath)) {
     const match = line.match(/^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/);
     if (!match) continue;
     const [, key, rawValue] = match;
-    if (!key.startsWith("NEXT_PUBLIC_") || process.env[key] !== undefined) continue;
+    if (key === "NEXT_PUBLIC_API_KEY") continue;
+    if (!(key.startsWith("NEXT_PUBLIC_") || key === "API_KEY" || key === "API_URL") || process.env[key] !== undefined) continue;
     process.env[key] = rawValue.replace(/^['"]|['"]$/g, "");
   }
 }

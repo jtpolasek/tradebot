@@ -49,7 +49,7 @@ Review of the Sonnet-built implementation against `PLAN.md`. Status in `CLAUDE.m
 - [x] **3.3 API key shipped to browser** fixed: browser calls now go through same-origin Next route handlers that inject `API_KEY` server-side; live feed uses an SSE proxy; API startup validates `API_KEY` with zod and fails closed when missing.
 - [x] **3.4 `decide()` clamp order** fixed: minimum notional is applied before the max cap, capped dust trades skip instead of exceeding max size, equity/snapshots use latest marks with avg-cost fallback, and `dailyPnlUsd` is based on recent equity movement.
 - [x] **3.5 `getDb(url)` ignores arg** fixed: store tracks the initialized database URL and throws on later mismatched URLs until `closeDb()` resets the singleton.
-- [ ] **3.6 Repo hygiene** — 11 `tmp_*.json` files in root.
+- [x] **3.6 Repo hygiene** fixed: no tracked or untracked root `tmp_*.json` files remain.
 
 ## Notes on uncommitted working-tree changes (at review time)
 - `paperFills.ts` chain-join fix: **good**, keep.

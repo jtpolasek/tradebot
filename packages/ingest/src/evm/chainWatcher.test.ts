@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { ChainWatcher } from "./chainWatcher.js";
+import { ChainWatcher, planBackfill } from "./chainWatcher.js";
 import { EventBus } from "@tradebot/core";
 import { Recorder } from "../recorder.js";
 import type { Db } from "@tradebot/store";
@@ -74,6 +74,35 @@ describe("ChainWatcher unit", () => {
     expect(set.add("c")).toBe(true); // evicts "a"
     expect(set.has("a")).toBe(false);
     expect(set.has("c")).toBe(true);
+  });
+});
+
+describe("planBackfill", () => {
+  it("does nothing when no saved block exists", () => {
+    expect(planBackfill(null, 100, 150)).toEqual({ action: "none" });
+  });
+
+  it("does nothing when the head is already at or one ahead of the saved block", () => {
+    expect(planBackfill(100, 100, 150)).toEqual({ action: "none" });
+    expect(planBackfill(100, 101, 150)).toEqual({ action: "none" });
+  });
+
+  it("backfills a gap within the cap", () => {
+    expect(planBackfill(50, 150, 150)).toEqual({ action: "backfill", fromBlock: 51, toBlock: 150 });
+  });
+
+  it("backfills right up to the cap boundary", () => {
+    // gap = current - saved = 150, exactly the cap → still backfill
+    expect(planBackfill(0, 150, 150)).toEqual({ action: "backfill", fromBlock: 1, toBlock: 150 });
+  });
+
+  it("skips to live when the gap exceeds the cap", () => {
+    // gap = 151 > 150 → skip
+    expect(planBackfill(0, 151, 150)).toEqual({ action: "skip-to-live", toBlock: 151 });
+  });
+
+  it("skips a multi-hour Base gap to live", () => {
+    expect(planBackfill(1_000, 50_000, 900)).toEqual({ action: "skip-to-live", toBlock: 50_000 });
   });
 });
 

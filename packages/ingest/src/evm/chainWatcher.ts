@@ -18,6 +18,14 @@ const BACKFILL_ADDRESS_CHUNK_BY_CHAIN: Record<ChainId, number> = {
   eth: CHUNK_SIZE,
   base: 5,
 };
+// Cap how far back a reconnect will backfill — roughly 30 minutes of blocks per chain.
+// When the gap is larger (e.g. the DB was stopped for hours during testing) we skip to
+// live rather than replaying long-dead trades at the current price. The engine's
+// staleness veto is the second line of defense for anything within this window.
+const MAX_BACKFILL_BLOCKS_BY_CHAIN: Record<ChainId, number> = {
+  eth: 150, // ~12s blocks → ~30 min
+  base: 900, // ~2s blocks → ~30 min
+};
 const FAILOVER_TIMEOUT_MS = 60_000;
 const WALLET_RELOAD_MS = 60_000;
 const MEMPOOL_RECONNECT_MS = 1_000;
@@ -220,8 +228,20 @@ export class ChainWatcher {
 
     const currentBlock = Number(await this.client.getBlockNumber());
 
-    if (savedBlock !== null && currentBlock > savedBlock + 1) {
-      await this.backfillGap(savedBlock + 1, currentBlock);
+    const plan = planBackfill(savedBlock, currentBlock, MAX_BACKFILL_BLOCKS_BY_CHAIN[this.chain]);
+    if (plan.action === "backfill") {
+      await this.backfillGap(plan.fromBlock, plan.toBlock);
+    } else if (plan.action === "skip-to-live") {
+      this.logger.warn(
+        {
+          savedBlock,
+          currentBlock,
+          gap: currentBlock - (savedBlock ?? currentBlock),
+          maxBlocks: MAX_BACKFILL_BLOCKS_BY_CHAIN[this.chain],
+        },
+        "gap exceeds backfill cap — skipping to live to avoid replaying stale trades"
+      );
+      await upsertLastBlock(this.db, this.chain, plan.toBlock);
     }
 
     await new Promise<void>((resolve, reject) => {
@@ -419,6 +439,9 @@ export class ChainWatcher {
 
   // ── Gap backfill ────────────────────────────────────────────────────────────
 
+  // planBackfill (module-level, exported) decides whether a reconnect backfills the gap,
+  // skips it as too large, or has nothing to do.
+
   async backfillGap(fromBlock: number, toBlock: number): Promise<void> {
     this._backfillCallCount++;
     this.logger.info({ fromBlock, toBlock }, "backfilling gap");
@@ -482,6 +505,22 @@ export class ChainWatcher {
     this.bus.emit("raw-tx", event);
     void this.recorder.record(event);
   }
+}
+
+export type BackfillPlan =
+  | { action: "backfill"; fromBlock: number; toBlock: number }
+  | { action: "skip-to-live"; toBlock: number }
+  | { action: "none" };
+
+/**
+ * Decide what a reconnect should do given the last persisted block and the current head.
+ * Gaps wider than `maxBlocks` are skipped to live so a long downtime doesn't replay
+ * stale trades; smaller gaps are backfilled; an unknown or already-current head does nothing.
+ */
+export function planBackfill(savedBlock: number | null, currentBlock: number, maxBlocks: number): BackfillPlan {
+  if (savedBlock === null || currentBlock <= savedBlock + 1) return { action: "none" };
+  if (currentBlock - savedBlock > maxBlocks) return { action: "skip-to-live", toBlock: currentBlock };
+  return { action: "backfill", fromBlock: savedBlock + 1, toBlock: currentBlock };
 }
 
 function isRateLimitError(err: unknown): boolean {

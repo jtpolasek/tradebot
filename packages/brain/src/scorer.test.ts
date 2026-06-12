@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { NATIVE_TOKEN_PLACEHOLDER, WETH } from "@tradebot/core";
-import { baselineWeightForTradeCount, resolveQuoteUsdPrice, scoreResultAgainstCohort } from "./scorer.js";
+import { baselineWeightForTradeCount, resolveQuoteUsdPrice, scoreResultAgainstCohort, tokenDecimalsForScoring } from "./scorer.js";
 import type { ScoringResult } from "./scoring.js";
 
 describe("baselineWeightForTradeCount", () => {
@@ -119,5 +119,19 @@ describe("resolveQuoteUsdPrice", () => {
       latestMarkLookup: vi.fn().mockResolvedValue(null),
       quotePriceLookup: vi.fn().mockResolvedValue(null),
     })).resolves.toBeNull();
+  });
+});
+
+describe("tokenDecimalsForScoring", () => {
+  it("uses 18 decimals for native ETH placeholders even when the token table has no row", () => {
+    expect(tokenDecimalsForScoring(NATIVE_TOKEN_PLACEHOLDER, undefined, 6)).toBe(18);
+  });
+
+  it("uses 18 decimals for WETH even if metadata is missing", () => {
+    expect(tokenDecimalsForScoring(WETH.base, undefined, 6)).toBe(18);
+  });
+
+  it("uses stored decimals for ordinary tokens", () => {
+    expect(tokenDecimalsForScoring("0x1111111111111111111111111111111111111111", 9, 18)).toBe(9);
   });
 });

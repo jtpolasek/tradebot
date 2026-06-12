@@ -36,6 +36,11 @@ export function formatPct(n: number | null): string {
   return (n >= 0 ? "+" : "") + (n * 100).toFixed(1) + "%";
 }
 
+export function formatPctPoints(n: number | null): string {
+  if (n === null) return "—";
+  return (n >= 0 ? "+" : "") + n.toFixed(1) + "%";
+}
+
 export function shortAddr(addr: string): string {
   return addr.slice(0, 6) + "…" + addr.slice(-4);
 }

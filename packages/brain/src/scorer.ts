@@ -137,6 +137,12 @@ export async function resolveQuoteUsdPrice({
   return null;
 }
 
+export function tokenDecimalsForScoring(address: string, storedDecimals: number | null | undefined, fallback: number): number {
+  const normalized = address.toLowerCase();
+  if (normalized === NATIVE_TOKEN_PLACEHOLDER || normalized === WETH.eth || normalized === WETH.base) return 18;
+  return storedDecimals ?? fallback;
+}
+
 async function signalsToTradeRows(
   db: Db,
   walletId: string,
@@ -155,8 +161,8 @@ async function signalsToTradeRows(
 
     const tokenRow = await getToken(db, sig.chain, nonQuoteAddress);
     const quoteRow = await getToken(db, sig.chain, quoteAddress);
-    const decimals = tokenRow?.decimals ?? 18;
-    const quoteDecimals = quoteRow?.decimals ?? 6;
+    const decimals = tokenDecimalsForScoring(nonQuoteAddress, tokenRow?.decimals, 18);
+    const quoteDecimals = tokenDecimalsForScoring(quoteAddress, quoteRow?.decimals, 6);
 
     const qty = fromBaseUnits(rawQty, decimals);
     const quoteAmt = fromBaseUnits(rawQuoteAmt, quoteDecimals);

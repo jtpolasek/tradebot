@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { RefreshCw } from "lucide-react";
-import { apiFetch, formatUsd, formatPct, shortAddr, timeAgo } from "@/lib/api";
+import { apiFetch, formatUsd, formatPct, formatPctPoints, shortAddr, timeAgo } from "@/lib/api";
 
 type Wallet = { id: string; chain: string; address: string; label: string; active: boolean; addedAt: string };
 type StatRow = {
@@ -124,11 +124,11 @@ export default function LeadersPage() {
                       </td>
                       <td>{s?.trades ?? "—"}</td>
                       <td>{s ? formatPct(s.winRate) : "—"}</td>
-                      <td>{s ? formatPct(s.avgReturnPct) : "—"}</td>
+                      <td>{s ? formatPctPoints(s.avgReturnPct) : "—"}</td>
                       <td className={s?.realizedPnlUsd !== null && s?.realizedPnlUsd !== undefined ? (s.realizedPnlUsd >= 0 ? "good" : "bad") : ""}>
                         {s?.realizedPnlUsd !== null && s?.realizedPnlUsd !== undefined ? formatUsd(s.realizedPnlUsd) : "—"}
                       </td>
-                      <td>{s?.maxDrawdownPct !== null && s?.maxDrawdownPct !== undefined ? formatPct(s.maxDrawdownPct) : "—"}</td>
+                      <td>{s?.maxDrawdownPct !== null && s?.maxDrawdownPct !== undefined ? formatPctPoints(s.maxDrawdownPct) : "—"}</td>
                       <td>{s?.medianHoldMinutes !== null && s?.medianHoldMinutes !== undefined ? `${s.medianHoldMinutes.toFixed(0)}m` : "—"}</td>
                       <td>{s ? timeAgo(s.updatedAt) : "—"}</td>
                     </tr>

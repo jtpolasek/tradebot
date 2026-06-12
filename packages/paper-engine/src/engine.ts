@@ -310,7 +310,10 @@ export class PaperEngine {
   }
 
   private async handleSignal(signal: TradeSignal): Promise<void> {
-    await insertSignal(this.db, signal);
+    const storedSignalId = await insertSignal(this.db, signal);
+    if (storedSignalId !== signal.id) {
+      signal = { ...signal, id: storedSignalId };
+    }
 
     const token: TokenRef = signal.side === "buy" ? signal.tokenOut : signal.tokenIn;
     const quoteToken: TokenRef = signal.side === "buy" ? signal.tokenIn : signal.tokenOut;

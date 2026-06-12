@@ -3,8 +3,8 @@ import type { Db } from "../db.js";
 import { tradeSignals } from "../schema.js";
 import type { TradeSignal, ChainId } from "@tradebot/core";
 
-export async function insertSignal(db: Db, signal: TradeSignal): Promise<void> {
-  await db.insert(tradeSignals).values({
+export async function insertSignal(db: Db, signal: TradeSignal): Promise<string> {
+  const rows = await db.insert(tradeSignals).values({
     id: signal.id,
     chain: signal.chain,
     walletId: signal.walletId,
@@ -19,7 +19,27 @@ export async function insertSignal(db: Db, signal: TradeSignal): Promise<void> {
     observedAt: new Date(signal.observedAt),
     confirmedAt: signal.confirmedAt !== null ? new Date(signal.confirmedAt) : undefined,
     blockNumber: signal.blockNumber ?? undefined,
-  }).onConflictDoNothing();
+  }).onConflictDoNothing().returning({ id: tradeSignals.id });
+
+  const inserted = rows[0];
+  if (inserted) return inserted.id;
+
+  const existing = await db
+    .select({ id: tradeSignals.id })
+    .from(tradeSignals)
+    .where(and(
+      eq(tradeSignals.chain, signal.chain),
+      eq(tradeSignals.txHash, signal.txHash),
+      eq(tradeSignals.tokenIn, signal.tokenIn.address),
+      eq(tradeSignals.tokenOut, signal.tokenOut.address),
+    ))
+    .limit(1);
+
+  const row = existing[0];
+  if (!row) {
+    throw new Error(`trade signal insert conflicted but no existing row was found for ${signal.chain}:${signal.txHash}`);
+  }
+  return row.id;
 }
 
 export async function upsertSignal(db: Db, signal: TradeSignal): Promise<void> {

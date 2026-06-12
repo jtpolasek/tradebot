@@ -445,6 +445,39 @@ describe("PaperEngine integration", () => {
     expect(fills[0]?.skipReason).toBe("token-blocklist");
   });
 
+  it("stores fills against the persisted signal id when duplicate tx signals arrive", async () => {
+    const bus = new EventBus();
+    await db.execute(sql`TRUNCATE paper_fills CASCADE`);
+    await db.execute(sql`TRUNCATE trade_signals CASCADE`);
+    await upsertToken(db, {
+      chain: TOKEN_A.chain,
+      address: TOKEN_A.address,
+      symbol: TOKEN_A.symbol,
+      name: TOKEN_A.symbol,
+      decimals: TOKEN_A.decimals,
+      isBlocked: false,
+    });
+    vi.mocked(getLiquidityUsd).mockResolvedValue(null);
+
+    const engine = new PaperEngine(db, bus, cfg() as never, mockRpcClient as never);
+    await engine.start();
+
+    const txHash = `0x${randomUUID().replace(/-/g, "")}`;
+    const first = makeSignal({ walletId, txHash, tokenOut: TOKEN_A, tokenIn: USDC });
+    const duplicate = makeSignal({ walletId, txHash, tokenOut: TOKEN_A, tokenIn: USDC });
+    bus.emit("trade-signal", first);
+    bus.emit("trade-signal", duplicate);
+    await new Promise<void>((r) => setTimeout(r, 300));
+    engine.stop();
+
+    const fills = await getRecentFills(db, new Date(Date.now() - 60_000), 10);
+    const signalIds = new Set(fills.map((fill) => fill.signalId));
+    expect(fills).toHaveLength(2);
+    expect(signalIds.size).toBe(1);
+    expect([first.id, duplicate.id]).toContain(fills[0]?.signalId);
+    expect(fills.every((fill) => fill.skipReason === "no-liquidity-data")).toBe(true);
+  });
+
   it("uses settings overrides for minimum liquidity", async () => {
     const bus = new EventBus();
     await db.execute(sql`TRUNCATE positions CASCADE`);

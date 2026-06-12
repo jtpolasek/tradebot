@@ -39,6 +39,7 @@ describe("EventBus", () => {
       observedAt: Date.now(),
       confirmedAt: null,
       blockNumber: 100,
+      decodeStatus: "decoded",
     };
     bus.on("trade-signal", listener);
     bus.emit("trade-signal", signal);

@@ -16,7 +16,7 @@ import { strategyC } from "./strategyC.js";
 import { analyzePairs } from "./balanceDelta.js";
 import { SignalDeduper } from "./deduper.js";
 import { TRANSFER_TOPIC, WETH_WITHDRAWAL_TOPIC } from "./venues.js";
-import type { NormalizedTransfer } from "./types.js";
+import type { NormalizedTransfer, BalanceDeltaResult } from "./types.js";
 import type { StrategyAClients } from "./strategyA.js";
 
 const logger = createLogger("decoder");
@@ -277,21 +277,21 @@ export class Decoder {
 
     const result = analyzePairs(outbound, inbound);
     if (result.status === "skipped") return [];
-    // The tx carries both buy- and sell-shaped pairs, so the direction is genuinely un-inferable —
-    // don't copy a trade analyzePairs explicitly flagged as ambiguous. A clean non-quote→non-quote
-    // rotation also reports side "unknown" but is NOT ambiguous; it falls through so classifySide can
-    // expand it into paired sell+buy signals (PLAN §2.2).
-    if (result.ambiguousDirection) return [];
     if (!result.tokenIn || !result.tokenOut) return [];
 
-    return this.buildSignalsFromDelta(event, walletId, result.tokenIn, result.tokenOut);
+    // Ambiguous decodes (including mixed buy/sell shapes that analyzePairs flags via
+    // ambiguousDirection) are no longer dropped — they're persisted as candidates for human
+    // review. The engine refuses to auto-copy anything that isn't decode_status 'decoded', so a
+    // wrong-side guess here can't trigger a trade; it only surfaces the missed activity.
+    return this.buildSignalsFromDelta(event, walletId, result.tokenIn, result.tokenOut, result);
   }
 
   private buildSignals(
     event: RawTxEvent,
     _wallet: string,
     walletId: string,
-    parts: Pick<TradeSignal, "tokenIn" | "tokenOut" | "amountIn" | "amountOut" | "venue">
+    parts: Pick<TradeSignal, "tokenIn" | "tokenOut" | "amountIn" | "amountOut" | "venue"> &
+      Partial<Pick<TradeSignal, "decodeStatus" | "confidence" | "reason">>
   ): TradeSignal[] {
     const { tokenIn, tokenOut, amountIn, amountOut, venue } = parts;
     const side = classifySide(event.chain, tokenIn.address, tokenOut.address);
@@ -313,6 +313,9 @@ export class Decoder {
       confirmedAt: event.source === "confirmed" ? Date.now() : null,
       blockNumber: event.blockNumber,
       blockTimestamp: event.blockTimestamp ?? null,
+      decodeStatus: parts.decodeStatus ?? "decoded",
+      confidence: parts.confidence ?? null,
+      reason: parts.reason ?? null,
     });
 
     return side === "both" ? [makeSignal("sell"), makeSignal("buy")] : [makeSignal(side)];
@@ -322,7 +325,8 @@ export class Decoder {
     event: RawTxEvent,
     walletId: string,
     tokenIn: NormalizedTransfer,
-    tokenOut: NormalizedTransfer
+    tokenOut: NormalizedTransfer,
+    result: BalanceDeltaResult
   ): TradeSignal[] {
     const tokenInRef = { chain: event.chain, address: tokenIn.tokenAddress || NATIVE_TOKEN_PLACEHOLDER, symbol: tokenIn.symbol, decimals: tokenIn.decimals };
     const tokenOutRef = { chain: event.chain, address: tokenOut.tokenAddress || NATIVE_TOKEN_PLACEHOLDER, symbol: tokenOut.symbol, decimals: tokenOut.decimals };
@@ -333,6 +337,10 @@ export class Decoder {
       amountIn: tokenIn.amountRaw,
       amountOut: tokenOut.amountRaw,
       venue: "balance-delta",
+      // analyzePairs returns only "decoded" | "candidate" here (skipped already returned above).
+      decodeStatus: result.status === "candidate" ? "candidate" : "decoded",
+      confidence: result.confidence,
+      reason: result.reason,
     });
   }
 

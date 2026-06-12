@@ -150,7 +150,9 @@ async function signalsToTradeRows(
   rpcClients?: RpcClients,
   quotePriceCache?: QuotePriceCache
 ): Promise<TradeRow[]> {
-  const signals = await getSignalsByWallet(db, walletId, since);
+  // Candidates are the decoder's uncertainty, not the leader's behavior — exclude them from
+  // scoring (see docs/adr/0001-persist-candidates-outside-scoring.md).
+  const signals = await getSignalsByWallet(db, walletId, since, { decodedOnly: true });
   const rows: TradeRow[] = [];
 
   for (const sig of signals) {

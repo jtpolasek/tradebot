@@ -60,6 +60,7 @@ function makeSignal(overrides: Partial<TradeSignal> = {}): TradeSignal {
     observedAt: Date.now(),
     confirmedAt: null,
     blockNumber: null,
+    decodeStatus: "decoded",
     ...overrides,
   };
 }
@@ -351,6 +352,64 @@ describe("Decoder class", () => {
       expect(signal.tokenOut.address).toBe(MEME2);
       expect(signal.venue).toBe("balance-delta");
       expect(signal.walletId).toBe(WALLET_ID);
+    }
+  });
+
+  it("tags a clean balance-delta buy as decoded and persists a candidate for an ambiguous tx", async () => {
+    const { Decoder } = await import("./decoder.js");
+    const TRANSFER = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+    const ROUTER = "0xcccccccccccccccccccccccccccccccccccccccc";
+    const padded = (addr: string) => `0x000000000000000000000000${addr.slice(2)}`;
+    const ONE_WETH = "0x0000000000000000000000000000000000000000000000000de0b6b3a7640000";
+    const SOME_MEME = "0x00000000000000000000000000000000000000000000003635c9adc5dea00000";
+    const SOME_MEME2 = "0x0000000000000000000000000000000000000000000000056bc75e2d63100000";
+    const SOME_USDC = "0x000000000000000000000000000000000000000000000000000000003b9aca00";
+
+    // Clean buy: spend WETH (quote) for MEME1 → decoded.
+    {
+      const bus = new EventBus();
+      const decoder = new Decoder({ bus, db: {} as never, wallets: [{ address: WALLET, id: WALLET_ID, chain: "eth" }], rpcUrls: { eth: "http://0.0.0.0:1", base: "http://0.0.0.0:1" } });
+      decoder.start();
+
+      const signals: TradeSignal[] = [];
+      bus.on("trade-signal", (s) => signals.push(s));
+      bus.emit("raw-tx", {
+        chain: "eth", source: "confirmed", txHash: "0x501", from: WALLET, to: ROUTER,
+        blockNumber: 5, observedAt: Date.now(), status: "success",
+        logs: [
+          { address: WETH, topics: [TRANSFER, padded(WALLET), padded(ROUTER)], data: ONE_WETH },
+          { address: MEME1, topics: [TRANSFER, padded(ROUTER), padded(WALLET)], data: SOME_MEME },
+        ],
+      });
+      await tick();
+
+      expect(signals).toHaveLength(1);
+      expect(signals[0]!.decodeStatus).toBe("decoded");
+    }
+
+    // Ambiguous tx carrying both a buy shape (WETH→MEME2) and a sell shape (MEME1→USDC).
+    // This was previously dropped; it must now be persisted as a candidate.
+    {
+      const bus = new EventBus();
+      const decoder = new Decoder({ bus, db: {} as never, wallets: [{ address: WALLET, id: WALLET_ID, chain: "eth" }], rpcUrls: { eth: "http://0.0.0.0:1", base: "http://0.0.0.0:1" } });
+      decoder.start();
+
+      const signals: TradeSignal[] = [];
+      bus.on("trade-signal", (s) => signals.push(s));
+      bus.emit("raw-tx", {
+        chain: "eth", source: "confirmed", txHash: "0x502", from: WALLET, to: ROUTER,
+        blockNumber: 5, observedAt: Date.now(), status: "success",
+        logs: [
+          { address: WETH, topics: [TRANSFER, padded(WALLET), padded(ROUTER)], data: ONE_WETH },
+          { address: MEME1, topics: [TRANSFER, padded(WALLET), padded(ROUTER)], data: SOME_MEME2 },
+          { address: USDC, topics: [TRANSFER, padded(ROUTER), padded(WALLET)], data: SOME_USDC },
+          { address: MEME2, topics: [TRANSFER, padded(ROUTER), padded(WALLET)], data: SOME_MEME },
+        ],
+      });
+      await tick();
+
+      expect(signals.length).toBeGreaterThanOrEqual(1);
+      expect(signals.every((s) => s.decodeStatus === "candidate")).toBe(true);
     }
   });
 

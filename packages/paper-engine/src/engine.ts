@@ -349,6 +349,35 @@ export class PaperEngine {
     const token: TokenRef = signal.side === "buy" ? signal.tokenOut : signal.tokenIn;
     const quoteToken: TokenRef = signal.side === "buy" ? signal.tokenIn : signal.tokenOut;
 
+    // Decode-confidence veto: the engine acts on confidently decoded signals only. Candidates are
+    // persisted (above) for the human review queue but never auto-copied, since a wrong side/token
+    // guess would spend paper money on the decoder's uncertainty.
+    if (signal.decodeStatus === "candidate") {
+      const decidedAt = Date.now();
+      const fill: PaperFill = {
+        id: randomUUID(),
+        signalId: signal.id,
+        decidedAt,
+        decision: "skipped",
+        skipReason: "low-confidence-decode",
+        side: signal.side,
+        token,
+        quoteToken,
+        qty: 0,
+        priceUsd: 0,
+        notionalUsd: 0,
+        feeUsd: 0,
+        slippageBps: 0,
+        latencyMs: decidedAt - signal.observedAt,
+        provisional: false,
+      };
+      await insertFill(this.db, fill);
+      this.bus.emit("paper-fill", fill);
+      // Deliberately not updating leader holdings: a candidate's side/token may be wrong, so it
+      // must not feed the holding estimate that sizes real sells.
+      return;
+    }
+
     // Staleness veto: a backfilled trade stamps observedAt at processing time, so latency math
     // can't catch it. The block timestamp reveals the true age — skip copying long-dead trades
     // at the current price (correctness gate, distinct from the risk filters in decide()).
@@ -801,6 +830,7 @@ export class PaperEngine {
       confirmedAt: now,
       blockNumber: null,
       walletId: pos.sourceWalletId,
+      decodeStatus: "decoded",
     };
     await insertSignal(this.db, signal);
 

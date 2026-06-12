@@ -135,6 +135,7 @@ describe("paperFills repository", () => {
       observedAt,
       confirmedAt: observedAt,
       blockNumber: 1,
+      decodeStatus: "decoded",
     });
 
     await insertFill(db as Parameters<typeof insertFill>[0], {

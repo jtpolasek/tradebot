@@ -48,6 +48,11 @@ export const tradeSignals = pgTable("trade_signals", {
   observedAt: timestamptz("observed_at").notNull(),
   confirmedAt: timestamptz("confirmed_at"),
   blockNumber: bigint("block_number", { mode: "number" }),
+  // Decoder's confidence in the classification. 'decoded' signals are copyable/scoreable;
+  // 'candidate' signals are persisted for human review but excluded from auto-copy and scoring.
+  decodeStatus: text("decode_status").notNull().default("decoded"),
+  confidence: numeric("confidence"),
+  reason: text("reason"),
 }, (t) => [unique().on(t.chain, t.txHash, t.tokenIn, t.tokenOut, t.side)]);
 
 export const paperFills = pgTable("paper_fills", {

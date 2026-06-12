@@ -22,6 +22,13 @@
       "when": 1781279782027,
       "tag": "0002_add_side_to_trade_signals_unique",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1781302809288,
+      "tag": "0003_mean_nemesis",
+      "breakpoints": true
     }
   ]
 }

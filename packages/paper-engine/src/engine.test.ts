@@ -53,6 +53,7 @@ function makeSignal(overrides: Partial<TradeSignal> & { walletId: string }): Tra
     observedAt: Date.now() - 100,
     confirmedAt: Date.now(),
     blockNumber: 20_000_000,
+    decodeStatus: "decoded",
     ...overrides,
   };
 }

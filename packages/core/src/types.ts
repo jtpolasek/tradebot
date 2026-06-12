@@ -47,6 +47,15 @@ export interface TradeSignal {
    * processing time rather than when the trade actually happened.
    */
   blockTimestamp?: number | null;
+  /**
+   * Decoder's confidence in the classification. 'decoded' is copyable and counts toward
+   * leader scoring; 'candidate' is persisted for human review but never auto-copied or scored.
+   */
+  decodeStatus: "decoded" | "candidate";
+  /** Decoder confidence 0–1, when available. */
+  confidence?: number | null;
+  /** Human-readable explanation, primarily for candidates surfaced in the review queue. */
+  reason?: string | null;
 }
 
 export interface TokenRef {

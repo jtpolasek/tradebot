@@ -19,6 +19,9 @@ export async function insertSignal(db: Db, signal: TradeSignal): Promise<string>
     observedAt: new Date(signal.observedAt),
     confirmedAt: signal.confirmedAt !== null ? new Date(signal.confirmedAt) : undefined,
     blockNumber: signal.blockNumber ?? undefined,
+    decodeStatus: signal.decodeStatus,
+    confidence: signal.confidence != null ? String(signal.confidence) : undefined,
+    reason: signal.reason ?? undefined,
   }).onConflictDoNothing().returning({ id: tradeSignals.id });
 
   const inserted = rows[0];
@@ -59,6 +62,9 @@ export async function upsertSignal(db: Db, signal: TradeSignal): Promise<void> {
     observedAt: new Date(signal.observedAt),
     confirmedAt: signal.confirmedAt !== null ? new Date(signal.confirmedAt) : undefined,
     blockNumber: signal.blockNumber ?? undefined,
+    decodeStatus: signal.decodeStatus,
+    confidence: signal.confidence != null ? String(signal.confidence) : undefined,
+    reason: signal.reason ?? undefined,
   }).onConflictDoUpdate({
     target: [tradeSignals.chain, tradeSignals.txHash, tradeSignals.tokenIn, tradeSignals.tokenOut, tradeSignals.side],
     set: {
@@ -67,6 +73,9 @@ export async function upsertSignal(db: Db, signal: TradeSignal): Promise<void> {
       amountOut: String(signal.amountOut),
       confirmedAt: signal.confirmedAt !== null ? new Date(signal.confirmedAt) : undefined,
       blockNumber: signal.blockNumber ?? undefined,
+      decodeStatus: signal.decodeStatus,
+      confidence: signal.confidence != null ? String(signal.confidence) : undefined,
+      reason: signal.reason ?? undefined,
     },
   });
 }
@@ -81,10 +90,12 @@ export async function getSignalById(db: Db, id: string): Promise<TradeSignal | n
 export async function getSignalsByWallet(
   db: Db,
   walletId: string,
-  since: Date | null
+  since: Date | null,
+  opts: { decodedOnly?: boolean } = {}
 ): Promise<TradeSignal[]> {
   const conditions = [eq(tradeSignals.walletId, walletId)];
   if (since !== null) conditions.push(gte(tradeSignals.observedAt, since));
+  if (opts.decodedOnly) conditions.push(eq(tradeSignals.decodeStatus, "decoded"));
   const rows = await db.select().from(tradeSignals).where(and(...conditions));
   return rows.map(rowToSignal);
 }
@@ -115,5 +126,8 @@ function rowToSignal(row: typeof tradeSignals.$inferSelect): TradeSignal {
     observedAt: row.observedAt.getTime(),
     confirmedAt: row.confirmedAt ? row.confirmedAt.getTime() : null,
     blockNumber: row.blockNumber ?? null,
+    decodeStatus: row.decodeStatus === "candidate" ? "candidate" : "decoded",
+    confidence: row.confidence != null ? Number(row.confidence) : null,
+    reason: row.reason ?? null,
   };
 }

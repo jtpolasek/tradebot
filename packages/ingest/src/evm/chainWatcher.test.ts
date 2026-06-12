@@ -232,6 +232,42 @@ describe("ChainWatcher backfill logic", () => {
       expect.objectContaining({ fromBlock: 1n, toBlock: 10n, args: { from: ["0x0011", "0x0012"] } })
     );
   });
+
+  it("retries Base backfill getLogs when the provider rate limits", async () => {
+    vi.useFakeTimers();
+    const bus = new EventBus();
+    const recorder = makeRecorder();
+    const watcher = new ChainWatcher({
+      chain: "base",
+      primaryWsUrl: "wss://placeholder",
+      db: makeMockDb(0),
+      bus,
+      recorder,
+    });
+
+    const mockClient = {
+      getLogs: vi.fn()
+        .mockRejectedValueOnce(new Error("Your app has exceeded its compute units per second capacity."))
+        .mockResolvedValue([]),
+    };
+    (watcher as unknown as { client: typeof mockClient }).client = mockClient;
+    (watcher as unknown as { wallets: string[] }).wallets = ["0xaaaa"];
+
+    const backfill = (watcher as unknown as { backfillGap(f: number, t: number): Promise<void> }).backfillGap(1, 1);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await backfill;
+    vi.useRealTimers();
+
+    expect(mockClient.getLogs).toHaveBeenCalledTimes(3);
+    expect(mockClient.getLogs).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ fromBlock: 1n, toBlock: 1n, args: { from: ["0xaaaa"] } })
+    );
+    expect(mockClient.getLogs).toHaveBeenNthCalledWith(
+      3,
+      expect.objectContaining({ fromBlock: 1n, toBlock: 1n, args: { to: ["0xaaaa"] } })
+    );
+  });
 });
 
 describe("ChainWatcher failover", () => {

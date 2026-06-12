@@ -21,6 +21,7 @@ const BACKFILL_ADDRESS_CHUNK_BY_CHAIN: Record<ChainId, number> = {
 const FAILOVER_TIMEOUT_MS = 60_000;
 const WALLET_RELOAD_MS = 60_000;
 const MEMPOOL_RECONNECT_MS = 1_000;
+const GET_LOGS_RATE_LIMIT_RETRIES = 4;
 
 const VIEM_CHAINS = { eth: mainnet, base: base } as const;
 
@@ -432,10 +433,18 @@ export class ChainWatcher {
       for (const batch of chunk(addrs, addressChunk)) {
         try {
           const typedAddrs = batch as `0x${string}`[];
-          const [fromLogs, toLogs] = await Promise.all([
-            this.client!.getLogs({ fromBlock: BigInt(start), toBlock: BigInt(end), event: TRANSFER_ABI[0]!, args: { from: typedAddrs } }),
-            this.client!.getLogs({ fromBlock: BigInt(start), toBlock: BigInt(end), event: TRANSFER_ABI[0]!, args: { to: typedAddrs } }),
-          ]);
+          const fromLogs = await this.getLogsWithRateLimitRetry({
+            fromBlock: BigInt(start),
+            toBlock: BigInt(end),
+            event: TRANSFER_ABI[0]!,
+            args: { from: typedAddrs },
+          });
+          const toLogs = await this.getLogsWithRateLimitRetry({
+            fromBlock: BigInt(start),
+            toBlock: BigInt(end),
+            event: TRANSFER_ABI[0]!,
+            args: { to: typedAddrs },
+          });
 
           const seen = new Set<string>();
           const relevant = [...fromLogs, ...toLogs].filter((l) => {
@@ -453,6 +462,19 @@ export class ChainWatcher {
     }
   }
 
+  private async getLogsWithRateLimitRetry(p: Parameters<Client["getLogs"]>[0]): Promise<ViemLog[]> {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await this.client!.getLogs(p);
+      } catch (err) {
+        if (!isRateLimitError(err) || attempt >= GET_LOGS_RATE_LIMIT_RETRIES) throw err;
+        const delay = backoffMs(attempt, 1_000, 15_000);
+        this.logger.info({ error: errorMessage(err), attempt: attempt + 1, delay }, "backfill getLogs rate-limited — retrying");
+        await sleep(delay);
+      }
+    }
+  }
+
   // ── Helpers ─────────────────────────────────────────────────────────────────
 
   emitAndRecord(event: RawTxEvent): void {
@@ -460,4 +482,17 @@ export class ChainWatcher {
     this.bus.emit("raw-tx", event);
     void this.recorder.record(event);
   }
+}
+
+function isRateLimitError(err: unknown): boolean {
+  const message = errorMessage(err);
+  const normalized = message.toLowerCase();
+  return normalized.includes("rate limit")
+    || normalized.includes("too many requests")
+    || normalized.includes("exceeded")
+    || normalized.includes("compute units per second");
+}
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }

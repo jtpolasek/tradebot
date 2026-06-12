@@ -7,6 +7,7 @@ import { fileURLToPath } from "url";
 import * as schema from "../schema.js";
 import { insertWallet, getActiveWallets, setWalletActive } from "./wallets.js";
 import { getLastBlock, upsertLastBlock } from "./chainState.js";
+import { closeDb, getDb } from "../db.js";
 import { insertSignal } from "./signals.js";
 import { insertFill, getRecentFills } from "./paperFills.js";
 
@@ -42,6 +43,15 @@ beforeEach(async () => {
 });
 
 describe("wallets repository", () => {
+  it("rejects switching singleton database URLs without closeDb", async () => {
+    const first = getDb(url);
+    expect(getDb(url)).toBe(first);
+
+    const otherUrl = url.replace("tradebot_test", "tradebot_other_test");
+    expect(() => getDb(otherUrl)).toThrow(/different URL/);
+    await closeDb();
+  });
+
   it("inserts and retrieves a wallet", async () => {
     const inserted = await insertWallet(db as Parameters<typeof insertWallet>[0], {
       chain: "eth",

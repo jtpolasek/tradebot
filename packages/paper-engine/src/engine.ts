@@ -15,9 +15,11 @@ import {
   getPosition,
   getOpenPositions,
   latestSnapshot,
+  getRecentSnapshots,
   insertSnapshot,
   getToken,
   getAllSettings,
+  latestMark,
 } from "@tradebot/store";
 import { assertUsableZeroxQuote, getLiquidityUsd, getUsdPrice, getZeroxPrice } from "@tradebot/pricing";
 import { applyTradeToState } from "./accounting.js";
@@ -81,6 +83,7 @@ export class PaperEngine {
   private runtimeConfig: RuntimeConfig;
   private readonly recentSourceNotionals = new Map<string, number[]>();
   private readonly leaderHoldings = new Map<string, number>();
+  private readonly markPrices = new Map<string, number>();
 
   private readonly rpcClients: Record<ChainId, RpcClient>;
 
@@ -174,6 +177,10 @@ export class PaperEngine {
     const openPositions = await getOpenPositions(this.db);
     for (const pos of openPositions) {
       const key = posKey(pos.chain, pos.tokenAddress, pos.sourceWalletId);
+      const mark = await latestMark(this.db, pos.chain, pos.tokenAddress);
+      if (mark && mark.priceUsd > 0) {
+        this.markPrices.set(markKey(pos.chain, pos.tokenAddress), mark.priceUsd);
+      }
       this.positions.set(key, {
         qty: pos.qty,
         avgCostUsd: pos.avgCostUsd,
@@ -189,10 +196,16 @@ export class PaperEngine {
 
   private equity(): number {
     let posValue = 0;
-    for (const pos of this.positions.values()) {
-      posValue += pos.qty * pos.avgCostUsd;
+    for (const [key, pos] of this.positions) {
+      posValue += this.positionValueUsd(key, pos);
     }
     return this.cashUsd + posValue;
+  }
+
+  private positionValueUsd(key: string, pos: InMemoryPosition): number {
+    const [chain, tokenAddress] = key.split(":") as [ChainId | undefined, string | undefined];
+    const mark = chain && tokenAddress ? this.markPrices.get(markKey(chain, tokenAddress)) : undefined;
+    return pos.qty * (mark ?? pos.avgCostUsd);
   }
 
   private async refreshRuntimeSettings(): Promise<void> {
@@ -220,13 +233,16 @@ export class PaperEngine {
     if (this.runtimeConfig.SIZING_MODE === "proportional") {
       notional *= this.proportionalScale(signal);
     }
-    notional = Math.min(notional, eq * this.runtimeConfig.MAX_TRADE_PCT);
     notional = Math.max(notional, this.runtimeConfig.MIN_NOTIONAL_USD);
+    notional = Math.min(notional, eq * this.runtimeConfig.MAX_TRADE_PCT);
 
     if (signal.side === "buy") {
       notional = Math.min(notional, this.cashUsd);
       if (notional < this.runtimeConfig.MIN_NOTIONAL_USD) {
-        return { action: "skip", reason: "insufficient-balance" };
+        return {
+          action: "skip",
+          reason: this.cashUsd < this.runtimeConfig.MIN_NOTIONAL_USD ? "insufficient-balance" : "below-min-notional",
+        };
       }
       return { action: "copy", notionalUsd: notional };
     }
@@ -395,6 +411,7 @@ export class PaperEngine {
       this.rememberLeaderHolding(signal);
       return;
     }
+    this.markPrices.set(markKey(signal.chain, token.address), priceUsd);
 
     // Slippage model
     const gasUsd = signal.chain === "eth" ? this.cfg.GAS_USD_ETH : this.cfg.GAS_USD_BASE;
@@ -747,6 +764,7 @@ export class PaperEngine {
     const dexFeeBps = 30;
     const slippageBps = dexFeeBps + impactBps + delayPenaltyBps;
     const fillPrice = currentPriceUsd * (1 - slippageBps / 10_000);
+    this.markPrices.set(markKey(chain, token.address), currentPriceUsd);
     const notionalUsd = qty * fillPrice;
     const feeUsd = gasUsd + (notionalUsd * dexFeeBps) / 10_000;
     const sellProceeds = Math.max(0, notionalUsd - feeUsd);
@@ -842,6 +860,7 @@ export class PaperEngine {
       logger.warn({ signalId }, "confirmed re-price unavailable — keeping mempool estimate");
       return;
     }
+    this.markPrices.set(markKey(confirmed.chain, token.address), newPrice);
 
     // Update the recorded fill to the confirmed price (qty fixed). Cash/position were already
     // committed at the estimate; mempool→confirm is seconds apart, so we don't retroactively
@@ -898,17 +917,20 @@ export class PaperEngine {
 
   private async takeSnapshot(): Promise<void> {
     let posValue = 0;
-    for (const pos of this.positions.values()) {
-      posValue += pos.qty * pos.avgCostUsd;
+    for (const [key, pos] of this.positions) {
+      posValue += this.positionValueUsd(key, pos);
     }
     const equityUsd = this.cashUsd + posValue;
+    const recentSnapshots = await getRecentSnapshots(this.db, 288);
+    const dayAgo = Date.now() - 24 * 60 * 60_000;
+    const baseline = recentSnapshots.find((snap) => snap.ts.getTime() >= dayAgo) ?? recentSnapshots[0] ?? null;
 
     await insertSnapshot(this.db, {
       ts: new Date(),
       equityUsd,
       cashUsd: this.cashUsd,
       positionsValueUsd: posValue,
-      dailyPnlUsd: this.portfolio.realizedPnlUsd,
+      dailyPnlUsd: baseline ? equityUsd - baseline.equityUsd : 0,
     });
   }
 
@@ -927,6 +949,10 @@ export class PaperEngine {
 
 function posKey(chain: ChainId, tokenAddress: string, walletId: string | null): string {
   return `${chain}:${tokenAddress.toLowerCase()}:${walletId ?? ""}`;
+}
+
+function markKey(chain: ChainId, tokenAddress: string): string {
+  return `${chain}:${tokenAddress.toLowerCase()}`;
 }
 
 function leaderHoldingKey(chain: ChainId, tokenAddress: string, walletId: string): string {

@@ -47,7 +47,7 @@ Review of the Sonnet-built implementation against `PLAN.md`. Status in `CLAUDE.m
 - [x] **3.1 Scorer quote pricing** fixed: scorer now prices non-stable quote assets from latest marks or live pricing RPC, normalizes native ETH to WETH, and skips unresolved quotes instead of treating them as $1.
 - [x] **3.2 Z-scores use prior run's stored stats** fixed: scorer now computes all wallet metrics for each window first, then derives z-scores against that current-run cohort before persisting stats.
 - [x] **3.3 API key shipped to browser** fixed: browser calls now go through same-origin Next route handlers that inject `API_KEY` server-side; live feed uses an SSE proxy; API startup validates `API_KEY` with zod and fails closed when missing.
-- [ ] **3.4 `decide()` clamp order** — `Math.max(MIN_NOTIONAL)` after MAX cap; equity valued at avg cost not marks; `dailyPnlUsd` is cumulative not daily.
+- [x] **3.4 `decide()` clamp order** fixed: minimum notional is applied before the max cap, capped dust trades skip instead of exceeding max size, equity/snapshots use latest marks with avg-cost fallback, and `dailyPnlUsd` is based on recent equity movement.
 - [ ] **3.5 `getDb(url)` ignores arg** once singleton exists.
 - [ ] **3.6 Repo hygiene** — 11 `tmp_*.json` files in root.
 

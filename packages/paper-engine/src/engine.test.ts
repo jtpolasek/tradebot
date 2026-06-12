@@ -2,7 +2,19 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vites
 import { randomUUID } from "crypto";
 import { sql } from "drizzle-orm";
 import { EventBus, type TradeSignal, type TokenRef } from "@tradebot/core";
-import { getDb, closeDb, insertWallet, getOpenPositions, getRecentFills, setSetting, upsertToken } from "@tradebot/store";
+import {
+  getDb,
+  closeDb,
+  insertWallet,
+  getOpenPositions,
+  getRecentFills,
+  setSetting,
+  upsertToken,
+  upsertPosition,
+  insertPriceMark,
+  insertSnapshot,
+  latestSnapshot,
+} from "@tradebot/store";
 import { PaperEngine } from "./engine.js";
 
 // Require test DB
@@ -74,6 +86,7 @@ beforeAll(async () => {
   await db.execute(sql`TRUNCATE portfolio_snapshots CASCADE`);
   await db.execute(sql`TRUNCATE paper_fills CASCADE`);
   await db.execute(sql`TRUNCATE positions CASCADE`);
+  await db.execute(sql`TRUNCATE price_marks CASCADE`);
   await db.execute(sql`TRUNCATE trade_signals CASCADE`);
   await db.execute(sql`TRUNCATE tokens CASCADE`);
   await db.execute(sql`TRUNCATE wallets CASCADE`);
@@ -223,6 +236,55 @@ describe("PaperEngine integration", () => {
     const signal = makeSignal({ walletId, tokenOut: TOKEN_A, tokenIn: USDC });
     const result = engine.decide(signal, 1_000_000);
     expect(result).toEqual({ action: "skip", reason: "insufficient-balance" });
+  });
+
+  it("decide skips buys rather than clamping minimum above the max trade cap", () => {
+    const bus = new EventBus();
+    const engine = new PaperEngine(db, bus, cfg({ MAX_TRADE_PCT: 0.001 }) as never, mockRpcClient as never);
+
+    const signal = makeSignal({ walletId, tokenOut: TOKEN_A, tokenIn: USDC });
+
+    expect(engine.decide(signal, 1_000_000)).toEqual({ action: "skip", reason: "below-min-notional" });
+  });
+
+  it("snapshots value positions at marks and report daily equity movement", async () => {
+    const bus = new EventBus();
+    await db.execute(sql`TRUNCATE portfolio_snapshots CASCADE`);
+    await db.execute(sql`TRUNCATE positions CASCADE`);
+    await db.execute(sql`TRUNCATE price_marks CASCADE`);
+
+    await insertSnapshot(db, {
+      ts: new Date(Date.now() - 60 * 60_000),
+      equityUsd: 9_000,
+      cashUsd: 9_000,
+      positionsValueUsd: 0,
+      dailyPnlUsd: 0,
+    });
+    await upsertPosition(db, {
+      chain: "eth",
+      tokenAddress: TOKEN_A.address,
+      qty: 10,
+      avgCostUsd: 100,
+      realizedPnlUsd: 0,
+      sourceWalletId: walletId,
+    });
+    await insertPriceMark(db, {
+      chain: "eth",
+      tokenAddress: TOKEN_A.address,
+      ts: new Date(),
+      priceUsd: 120,
+      source: "test",
+    });
+
+    const engine = new PaperEngine(db, bus, cfg() as never, mockRpcClient as never);
+    await engine.start();
+    await (engine as unknown as { takeSnapshot: () => Promise<void> }).takeSnapshot();
+    engine.stop();
+
+    const snap = await latestSnapshot(db);
+    expect(snap?.positionsValueUsd).toBeCloseTo(1_200);
+    expect(snap?.equityUsd).toBeCloseTo(10_200);
+    expect(snap?.dailyPnlUsd).toBeCloseTo(1_200);
   });
 
   it("closes the position (no zombie open row) when a sell empties it", async () => {
@@ -437,7 +499,10 @@ describe("PaperEngine integration", () => {
       tokenOut: TOKEN_A,
       amountIn: 1_600_000_000n, // 4x the recent median, then capped by MAX_TRADE_PCT
     });
-    expect(engine.decide(large, 1_000_000)).toEqual({ action: "copy", notionalUsd: 300 });
+    expect(engine.decide(large, 1_000_000)).toEqual({
+      action: "copy",
+      notionalUsd: expect.closeTo(299.86, 2),
+    });
 
     engine.stop();
   });

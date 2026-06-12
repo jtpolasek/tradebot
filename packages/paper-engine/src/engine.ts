@@ -1,5 +1,6 @@
 import { randomUUID } from "crypto";
 import PQueue from "p-queue";
+import { CHAIN_IDS } from "@tradebot/core";
 import type { ChainId, TradeSignal, PaperFill, TokenRef } from "@tradebot/core";
 import type { Config, EventBus } from "@tradebot/core";
 import type { Db } from "@tradebot/store";
@@ -18,7 +19,7 @@ import {
   getToken,
   getAllSettings,
 } from "@tradebot/store";
-import { getUsdPrice, getLiquidityUsd } from "@tradebot/pricing";
+import { assertUsableZeroxQuote, getLiquidityUsd, getUsdPrice, getZeroxPrice } from "@tradebot/pricing";
 import { applyTradeToState } from "./accounting.js";
 import type { AccountingPortfolio, AccountingPosition } from "./accounting.js";
 import { estimateSourceNotionalUsd } from "./sizing.js";
@@ -67,6 +68,7 @@ export type LiquidityTier = "major" | "mid" | "longtail";
 type RuntimeConfig = Pick<Config, "BASE_TRADE_PCT" | "MAX_TRADE_PCT" | "MIN_NOTIONAL_USD" | "MIN_LIQUIDITY_USD" | "SIZING_MODE">;
 
 const RECENT_NOTIONAL_WINDOW = 20;
+const DEX_FEE_BPS = 30;
 
 export class PaperEngine {
   private cashUsd: number;
@@ -400,13 +402,13 @@ export class PaperEngine {
       ? this.cfg.COPY_DELAY_PENALTY_BPS_ETH
       : this.cfg.COPY_DELAY_PENALTY_BPS_BASE;
     const impactBps = Math.min(500, Math.round(10_000 * decision.notionalUsd / (2 * Math.max(liquidityUsd ?? 1, 1))));
-    const dexFeeBps = 30;
-    const slippageBps = dexFeeBps + impactBps + delayPenaltyBps;
-    const feeUsd = gasUsd + (decision.notionalUsd * dexFeeBps) / 10_000;
+    const slippageBps = DEX_FEE_BPS + impactBps + delayPenaltyBps;
+    const feeUsd = gasUsd + (decision.notionalUsd * DEX_FEE_BPS) / 10_000;
 
     let fillPrice: number;
     let qty: number;
     let notionalUsd: number;
+    let zeroxFeeUsd: number | null = null;
 
     // Snapshot pre-trade state so a provisional (mempool) fill can be reversed exactly on void/replace.
     const snapKey = posKey(signal.chain, token.address, signal.walletId);
@@ -418,11 +420,20 @@ export class PaperEngine {
     const prevLeaderHolding = this.leaderHoldings.get(signalLeaderHoldingKey);
 
     if (signal.side === "buy") {
-      fillPrice = priceUsd * (1 + slippageBps / 10_000);
-      notionalUsd = decision.notionalUsd;
+      const quoted = await this.quoteFillPriceWithZerox({
+        side: "buy",
+        token,
+        quoteToken,
+        notionalUsd: decision.notionalUsd,
+        qty: null,
+      });
+      fillPrice = quoted?.priceUsd ?? priceUsd * (1 + slippageBps / 10_000);
+      notionalUsd = quoted?.notionalUsd ?? decision.notionalUsd;
+      zeroxFeeUsd = quoted?.dexFeeUsd ?? null;
       qty = fillPrice > 0 ? notionalUsd / fillPrice : 0;
+      const effectiveFeeUsd = zeroxFeeUsd !== null ? gasUsd + zeroxFeeUsd : feeUsd;
 
-      if (this.cashUsd < notionalUsd + feeUsd) {
+      if (this.cashUsd < notionalUsd + effectiveFeeUsd) {
         const skipFill: PaperFill = {
           id: fillId,
           signalId: signal.id,
@@ -462,8 +473,8 @@ export class PaperEngine {
           notionalUsd,
           gasUsd,
           slippageUsd: 0,
-          dexFeeUsd: (notionalUsd * dexFeeBps) / 10_000,
-          totalCostUsd: notionalUsd + feeUsd,
+          dexFeeUsd: zeroxFeeUsd ?? (notionalUsd * DEX_FEE_BPS) / 10_000,
+          totalCostUsd: notionalUsd + effectiveFeeUsd,
           sellProceedsUsd: 0,
         },
       });
@@ -515,9 +526,18 @@ export class PaperEngine {
       const posValue = existing.qty * existing.avgCostUsd;
       const fraction = Math.min(1, decision.notionalUsd / Math.max(posValue, 1e-10));
       qty = fraction * existing.qty;
-      fillPrice = priceUsd * (1 - slippageBps / 10_000);
+      const quoted = await this.quoteFillPriceWithZerox({
+        side: "sell",
+        token,
+        quoteToken,
+        notionalUsd: decision.notionalUsd,
+        qty,
+      });
+      fillPrice = quoted?.priceUsd ?? priceUsd * (1 - slippageBps / 10_000);
+      zeroxFeeUsd = quoted?.dexFeeUsd ?? null;
       notionalUsd = qty * fillPrice;
-      const sellProceeds = Math.max(0, notionalUsd - feeUsd);
+      const effectiveFeeUsd = zeroxFeeUsd !== null ? gasUsd + zeroxFeeUsd : feeUsd;
+      const sellProceeds = Math.max(0, notionalUsd - effectiveFeeUsd);
 
       const existingAcct: AccountingPosition = {
         quantity: existing.qty,
@@ -536,8 +556,8 @@ export class PaperEngine {
           notionalUsd,
           gasUsd,
           slippageUsd: 0,
-          dexFeeUsd: (notionalUsd * dexFeeBps) / 10_000,
-          totalCostUsd: feeUsd,
+          dexFeeUsd: zeroxFeeUsd ?? (notionalUsd * DEX_FEE_BPS) / 10_000,
+          totalCostUsd: effectiveFeeUsd,
           sellProceedsUsd: sellProceeds,
         },
       });
@@ -582,7 +602,7 @@ export class PaperEngine {
       qty,
       priceUsd: fillPrice,
       notionalUsd,
-      feeUsd,
+      feeUsd: zeroxFeeUsd !== null ? gasUsd + zeroxFeeUsd : feeUsd,
       slippageBps,
       latencyMs: decidedAt - signal.observedAt,
       provisional,
@@ -612,6 +632,59 @@ export class PaperEngine {
     this.rememberLeaderHolding(signal);
     this.rememberSourceNotional(signal);
     logger.info({ fillId, side: signal.side, notionalUsd, priceUsd: fillPrice, provisional }, "paper fill");
+  }
+
+  private async quoteFillPriceWithZerox(input: {
+    side: "buy" | "sell";
+    token: TokenRef;
+    quoteToken: TokenRef;
+    notionalUsd: number;
+    qty: number | null;
+  }): Promise<{ priceUsd: number; notionalUsd: number; dexFeeUsd: number } | null> {
+    if (!this.cfg.ZEROX_API_KEY) return null;
+
+    try {
+      if (input.side === "buy") {
+        const quoteUsdPrice = await this.resolveQuoteUsdPrice(input.quoteToken);
+        if (quoteUsdPrice <= 0) return null;
+        const quoteAmount = input.notionalUsd / quoteUsdPrice;
+        const quote = await getZeroxPrice({
+          chainId: CHAIN_IDS[input.token.chain],
+          sellToken: input.quoteToken.address,
+          buyToken: input.token.address,
+          sellAmount: toRawAmount(quoteAmount, input.quoteToken.decimals).toString(),
+        });
+        assertUsableZeroxQuote(quote, "buy");
+        const tokenQty = rawToHumanNumber(BigInt(quote.buyAmount), input.token.decimals);
+        const notionalUsd = rawToHumanNumber(BigInt(quote.sellAmount), input.quoteToken.decimals) * quoteUsdPrice;
+        if (tokenQty <= 0 || notionalUsd <= 0) return null;
+        return { priceUsd: notionalUsd / tokenQty, notionalUsd, dexFeeUsd: quote.dexFeeUsd };
+      }
+
+      if (input.qty === null || input.qty <= 0) return null;
+      const quoteUsdPrice = await this.resolveQuoteUsdPrice(input.quoteToken);
+      if (quoteUsdPrice <= 0) return null;
+      const quote = await getZeroxPrice({
+        chainId: CHAIN_IDS[input.token.chain],
+        sellToken: input.token.address,
+        buyToken: input.quoteToken.address,
+        sellAmount: toRawAmount(input.qty, input.token.decimals).toString(),
+      });
+      assertUsableZeroxQuote(quote, "sell");
+      const soldQty = rawToHumanNumber(BigInt(quote.sellAmount), input.token.decimals);
+      const quoteQty = rawToHumanNumber(BigInt(quote.buyAmount), input.quoteToken.decimals);
+      const notionalUsd = quoteQty * quoteUsdPrice;
+      if (soldQty <= 0 || notionalUsd <= 0) return null;
+      return { priceUsd: notionalUsd / soldQty, notionalUsd, dexFeeUsd: quote.dexFeeUsd };
+    } catch (err) {
+      logger.debug({ err, side: input.side, token: input.token.address, quoteToken: input.quoteToken.address }, "0x fill quote unavailable; falling back to spot pricing");
+      return null;
+    }
+  }
+
+  private async resolveQuoteUsdPrice(quoteToken: TokenRef): Promise<number> {
+    const price = await getUsdPrice(quoteToken.chain, quoteToken.address, this.rpcClients[quoteToken.chain]);
+    return price ?? 0;
   }
 
   async executeExitSell(

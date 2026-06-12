@@ -12,11 +12,13 @@ if (!TEST_DB_URL.endsWith("_test")) throw new Error("TEST_DATABASE_URL must end 
 
 // Mock pricing so tests are deterministic and offline
 vi.mock("@tradebot/pricing", () => ({
+  assertUsableZeroxQuote: vi.fn(),
   getLiquidityUsd: vi.fn().mockResolvedValue(1_000_000),
   getUsdPrice: vi.fn().mockResolvedValue(10),
+  getZeroxPrice: vi.fn(),
 }));
 
-import { getLiquidityUsd, getUsdPrice } from "@tradebot/pricing";
+import { getLiquidityUsd, getUsdPrice, getZeroxPrice } from "@tradebot/pricing";
 
 const mockRpcClient = { readContract: vi.fn() };
 
@@ -87,6 +89,7 @@ afterAll(async () => {
 beforeEach(() => {
   vi.mocked(getLiquidityUsd).mockResolvedValue(1_000_000);
   vi.mocked(getUsdPrice).mockResolvedValue(10);
+  vi.mocked(getZeroxPrice).mockReset();
   return db.execute(sql`TRUNCATE settings CASCADE`);
 });
 
@@ -296,6 +299,52 @@ describe("PaperEngine integration", () => {
 
     const remainingQty = engine.getPositions().get(key)?.qty ?? 0;
     expect(remainingQty).toBeCloseTo(qtyAfterBuy * 0.75, 8);
+  });
+
+  it("uses a usable 0x quote as the primary fill price", async () => {
+    const bus = new EventBus();
+    await db.execute(sql`TRUNCATE paper_fills CASCADE`);
+    await db.execute(sql`TRUNCATE positions CASCADE`);
+    await db.execute(sql`TRUNCATE portfolio_snapshots CASCADE`);
+    await db.execute(sql`TRUNCATE trade_signals CASCADE`);
+
+    vi.mocked(getUsdPrice).mockImplementation(async (_chain, addr) => {
+      if (addr === USDC.address) return 1;
+      return 10;
+    });
+    vi.mocked(getZeroxPrice).mockResolvedValue({
+      provider: "0x",
+      endpoint: "/swap/allowance-holder/price",
+      chainId: 1,
+      sellToken: USDC.address,
+      buyToken: TOKEN_A.address,
+      sellAmount: "100000000",
+      buyAmount: "12500000000000000000",
+      gasUnits: 0,
+      gasPriceWei: 0,
+      dexFeeUsd: 0.12,
+      unpricedFees: [],
+      warnings: [],
+      rawResponse: {},
+    });
+
+    const engine = new PaperEngine(db, bus, cfg({ ZEROX_API_KEY: "test" }) as never, mockRpcClient as never);
+    await engine.start();
+    bus.emit("trade-signal", makeSignal({ walletId, tokenIn: USDC, tokenOut: TOKEN_A }));
+    await new Promise<void>((r) => setTimeout(r, 200));
+    engine.stop();
+
+    const fill = (await getRecentFills(db, new Date(Date.now() - 60_000), 5))[0];
+    expect(fill?.decision).toBe("copied");
+    expect(fill?.priceUsd).toBeCloseTo(8);
+    expect(fill?.qty).toBeCloseTo(12.5);
+    expect(fill?.feeUsd).toBeCloseTo(4.12);
+    expect(getZeroxPrice).toHaveBeenCalledWith(expect.objectContaining({
+      chainId: 1,
+      sellToken: USDC.address,
+      buyToken: TOKEN_A.address,
+      sellAmount: "100000000",
+    }));
   });
 
   it("decide returns skip for zero-weight leader", async () => {

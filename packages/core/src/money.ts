@@ -48,6 +48,22 @@ export function fromBaseUnits(raw: string | number | bigint, decimals: number): 
   return Number(`${whole.toString()}${fractionText ? `.${fractionText}` : ""}`);
 }
 
+export function bigintRatioToNumber(numerator: bigint, denominator: bigint, significantDigits = 18): number {
+  if (denominator === 0n) throw new Error("Cannot divide by zero.");
+  if (numerator === 0n) return 0;
+
+  const negative = (numerator < 0n) !== (denominator < 0n);
+  const absNumerator = numerator < 0n ? -numerator : numerator;
+  const absDenominator = denominator < 0n ? -denominator : denominator;
+  const scale = 10n ** BigInt(significantDigits);
+  const scaled = (absNumerator * scale) / absDenominator;
+  const text = scaled.toString().padStart(significantDigits + 1, "0");
+  const whole = text.slice(0, -significantDigits);
+  const fraction = text.slice(-significantDigits).replace(/0+$/, "");
+  const value = Number(`${whole}${fraction ? `.${fraction}` : ""}`);
+  return negative ? -value : value;
+}
+
 export function normalizeAddress(address: string): string {
   const trimmed = address.trim();
   if (!/^0x[a-fA-F0-9]{40}$/.test(trimmed)) {

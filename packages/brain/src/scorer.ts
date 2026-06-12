@@ -1,4 +1,4 @@
-import { createLogger } from "@tradebot/core";
+import { createLogger, fromBaseUnits } from "@tradebot/core";
 import type { ChainId } from "@tradebot/core";
 import type { Db } from "@tradebot/store";
 import {
@@ -64,6 +64,10 @@ export class BrainWeightProvider implements WeightProvider {
   }
 }
 
+export function baselineWeightForTradeCount(trades: number): number {
+  return trades < 5 ? 0.5 : 1.0;
+}
+
 async function getQuotePrice(db: Db, chain: ChainId, address: string): Promise<number> {
   if (STABLE_ADDRESSES.has(address.toLowerCase())) return 1.0;
   if (WETH_ADDRESSES.has(address.toLowerCase())) {
@@ -88,8 +92,8 @@ async function signalsToTradeRows(db: Db, walletId: string, since: Date | null):
     const decimals = tokenRow?.decimals ?? 18;
     const quoteDecimals = quoteRow?.decimals ?? 6;
 
-    const qty = Number(rawQty) / 10 ** decimals;
-    const quoteAmt = Number(rawQuoteAmt) / 10 ** quoteDecimals;
+    const qty = fromBaseUnits(rawQty, decimals);
+    const quoteAmt = fromBaseUnits(rawQuoteAmt, quoteDecimals);
 
     const quoteUsd = await getQuotePrice(db, sig.chain, quoteAddress);
     const costOrProceeds = quoteAmt * quoteUsd;
@@ -161,7 +165,7 @@ export async function runScorerJob(db: Db, weightProvider: BrainWeightProvider, 
         const ddCohort = cohortStats.map((s) => s.maxDrawdownPct ?? 0);
 
         let score: number | null = null;
-        let weight = 1.0;
+        let weight = baselineWeightForTradeCount(result.trades);
 
         if (result.trades >= 5 && result.realizedPnlUsd !== null) {
           const pnlZ = computeZScore(result.realizedPnlUsd, pnlCohort);

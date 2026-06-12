@@ -39,8 +39,8 @@ Review of the Sonnet-built implementation against `PLAN.md`. Status in `CLAUDE.m
 - [x] **2.10 0x `getQuotePrice`** fixed: paper engine now attempts usable 0x price quotes for buy/sell fills when `ZEROX_API_KEY` is configured, derives effective USD fill prices from quote amounts, applies quoted dex fees, and falls back to spot/slippage pricing when 0x is unavailable. Regression test added.
 - [x] **2.11 `verifyLedger` script vacuous** fixed: script now replays real non-voided copied fills through the accounting engine, compares derived open positions and latest snapshot totals against the DB, and exits non-zero on mismatches.
 - [x] **2.12 Aerodrome pricing on Base** fixed: Base pricing/liquidity discovery now probes Aerodrome Slipstream pools after Uni V3, and Base V3-style swaps verified through the Slipstream factory are tagged with venue `aerodrome`.
-- [ ] **2.13 trades < 5 → weight 0.5** — scorer defaults to 1.0.
-- [ ] **2.14 bigint discipline** — `Number(rawAmount)` in `scorer.ts`, decoder Strategy B, pricing diff.
+- [x] **2.13 trades < 5 → weight 0.5** fixed: scorer now uses a 0.5 baseline weight until a leader reaches five trades, with a unit test covering the threshold.
+- [x] **2.14 bigint discipline** fixed: raw token amounts now use shared base-unit/ratio helpers in scorer, Strategy B, and pricing; quote amount validation uses bigint parsing.
 
 ## P3 — Moderate
 

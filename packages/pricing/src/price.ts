@@ -1,5 +1,5 @@
 import type { ChainId } from "@tradebot/core";
-import { CHAIN_IDS, WETH, QUOTE_ASSETS, CHAINLINK_ETH_USD, createLogger } from "@tradebot/core";
+import { WETH, QUOTE_ASSETS, CHAINLINK_ETH_USD, bigintRatioToNumber, createLogger, fromBaseUnits } from "@tradebot/core";
 
 const logger = createLogger("pricing");
 
@@ -207,9 +207,8 @@ export function sqrtPriceX96ToPrice(
   decimals0: number,
   decimals1: number
 ): number {
-  // Use regular JS numbers — safe because sqrtPriceX96 fits as a ratio
-  const Q96 = 2 ** 96;
-  const ratio = Number(sqrtPriceX96) / Q96;
+  const Q96 = 2n ** 96n;
+  const ratio = bigintRatioToNumber(sqrtPriceX96, Q96);
   const rawPrice = ratio * ratio;
   return rawPrice * 10 ** (decimals0 - decimals1);
 }
@@ -226,7 +225,7 @@ async function getChainlinkEthUsd(chain: ChainId, client: RpcClient): Promise<nu
     }) as [bigint, bigint, bigint, bigint, bigint];
     const answer = result[1]; // int256 with 8 decimals
     if (answer <= 0n) return null;
-    return Number(answer) / 1e8;
+    return fromBaseUnits(answer, 8);
   } catch (err) {
     logger.warn({ err, chain }, "Chainlink ETH/USD read failed");
     return null;
@@ -481,7 +480,7 @@ export async function getLiquidityUsd(
         args: [pool.address as `0x${string}`],
       }) as bigint;
 
-      const balanceHuman = Number(balanceRaw) / 10 ** quoteDecimals;
+      const balanceHuman = fromBaseUnits(balanceRaw, quoteDecimals);
       const liquidityUsd = balanceHuman * quoteUsdPrice * 2;
 
       liqCache.set(cacheKey, { liquidityUsd, fetchedAt: Date.now() });

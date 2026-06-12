@@ -143,10 +143,9 @@ export function summarizeZeroxIssues(quote: Pick<ZeroxRawQuote, "issues" | "liqu
 }
 
 export function assertUsableZeroxQuote(quote: NormalizedZeroxQuote, side: "buy" | "sell") {
-  const amount = Number(quote.buyAmount);
   const hasNoLiquidity = quote.warnings.some((w) => w.startsWith("No usable 0x liquidity"));
 
-  if (hasNoLiquidity || !Number.isFinite(amount) || amount <= 0) {
+  if (hasNoLiquidity || !isPositiveIntegerString(quote.buyAmount)) {
     const reason = quote.warnings.length ? ` ${quote.warnings.join(" ")}` : "";
     throw new Error(
       `No usable 0x liquidity/route for this ${side}. The simulator cannot price this trade, which usually means the position is not practically tradable at this size.${reason}`
@@ -183,8 +182,7 @@ export function summarizeDexFees(
     ["integratorFee", fees.integratorFee],
   ] as const) {
     if (!fee?.amount || !fee.token || isUsdc(fee.token)) continue;
-    const amount = Number(fee.amount);
-    if (!Number.isFinite(amount) || amount <= 0) continue;
+    if (!isPositiveIntegerString(fee.amount)) continue;
     unpriced.push({ type, token: fee.token, amount: fee.amount });
   }
 
@@ -226,4 +224,12 @@ function hasVisibleUnknownIssue(issues: ZeroxIssueMap) {
 function finiteNumber(value: unknown) {
   const number = Number(value ?? 0);
   return Number.isFinite(number) ? number : 0;
+}
+
+function isPositiveIntegerString(value: string) {
+  try {
+    return BigInt(value) > 0n;
+  } catch {
+    return false;
+  }
 }

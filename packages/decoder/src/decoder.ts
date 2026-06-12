@@ -1,7 +1,7 @@
 import { createPublicClient, http } from "viem";
 import { mainnet, base } from "viem/chains";
 import PQueue from "p-queue";
-import { createLogger, isQuoteAsset, NATIVE_TOKEN_PLACEHOLDER, WETH } from "@tradebot/core";
+import { createLogger, fromBaseUnits, isQuoteAsset, NATIVE_TOKEN_PLACEHOLDER, WETH } from "@tradebot/core";
 import type { EventBus, RawTxEvent, TradeSignal, ChainId } from "@tradebot/core";
 import type { Db } from "@tradebot/store";
 import { getActiveWallets } from "@tradebot/store";
@@ -228,7 +228,7 @@ export class Decoder {
       const m = metaMap.get(addr) ?? { symbol: "UNKNOWN", decimals: 18 };
       // amount is in log.data (uint256)
       const amountRaw = log.data && log.data !== "0x" ? BigInt(log.data) : 0n;
-      const amountHuman = m.decimals > 0 ? Number(amountRaw) / 10 ** m.decimals : Number(amountRaw);
+      const amountHuman = fromBaseUnits(amountRaw, m.decimals);
       return { tokenAddress: addr, symbol: m.symbol, decimals: m.decimals, amountRaw, amountHuman, direction };
     };
 
@@ -242,7 +242,7 @@ export class Decoder {
         symbol: "ETH",
         decimals: 18,
         amountRaw: event.valueWei,
-        amountHuman: Number(event.valueWei) / 1e18,
+        amountHuman: fromBaseUnits(event.valueWei, 18),
         direction: "out",
       });
     }
@@ -264,7 +264,7 @@ export class Decoder {
           symbol: "WETH",
           decimals: 18,
           amountRaw: withdrawnWad,
-          amountHuman: Number(withdrawnWad) / 1e18,
+          amountHuman: fromBaseUnits(withdrawnWad, 18),
           direction: "in",
         }];
       }

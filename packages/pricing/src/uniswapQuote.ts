@@ -107,9 +107,8 @@ export function normalizeUniswapQuote(
 }
 
 export function assertUsableUniswapQuote(quote: NormalizedUniswapQuote) {
-  const amount = Number(quote.buyAmount);
   const hasNoRoute = quote.warnings.some((w) => w.startsWith("No usable Uniswap route"));
-  if (hasNoRoute || !Number.isFinite(amount) || amount <= 0) {
+  if (hasNoRoute || !isPositiveIntegerString(quote.buyAmount)) {
     const reason = quote.warnings.length ? ` ${quote.warnings.join(" ")}` : "";
     throw new Error(`No usable Uniswap route for this trade.${reason}`);
   }
@@ -153,4 +152,12 @@ function parseJson(value: string) {
 function finiteNumber(value: unknown) {
   const number = Number(value ?? 0);
   return Number.isFinite(number) ? number : 0;
+}
+
+function isPositiveIntegerString(value: string) {
+  try {
+    return BigInt(value) > 0n;
+  } catch {
+    return false;
+  }
 }

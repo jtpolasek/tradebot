@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatUsdPrice, normalizeAddressInput, toBaseUnits, fromBaseUnits, normalizeAddress } from "./money.js";
+import { bigintRatioToNumber, formatUsdPrice, normalizeAddressInput, toBaseUnits, fromBaseUnits, normalizeAddress } from "./money.js";
 
 describe("formatUsdPrice", () => {
   it("keeps tiny token prices visible", () => {
@@ -46,6 +46,17 @@ describe("toBaseUnits / fromBaseUnits", () => {
 
   it("throws on zero amount", () => {
     expect(() => toBaseUnits(0, 18)).toThrow("Amount must be greater than zero.");
+  });
+});
+
+describe("bigintRatioToNumber", () => {
+  it("converts ratios without coercing the raw bigint inputs to Number first", () => {
+    expect(bigintRatioToNumber(10n ** 30n, 10n ** 18n)).toBe(1_000_000_000_000);
+    expect(bigintRatioToNumber((2n ** 96n) * 3n, 2n ** 96n)).toBe(3);
+  });
+
+  it("throws on division by zero", () => {
+    expect(() => bigintRatioToNumber(1n, 0n)).toThrow("Cannot divide by zero.");
   });
 });
 

@@ -1,4 +1,4 @@
-import { createLogger, fromBaseUnits } from "@tradebot/core";
+import { createLogger, fromBaseUnits, NATIVE_TOKEN_PLACEHOLDER, WETH } from "@tradebot/core";
 import type { ChainId } from "@tradebot/core";
 import type { Db } from "@tradebot/store";
 import {
@@ -13,7 +13,7 @@ import {
   getCopiedFills,
   insertAdaptationLog,
 } from "@tradebot/store";
-import { getLiquidityUsd } from "@tradebot/pricing";
+import { getLiquidityUsd, getUsdPrice } from "@tradebot/pricing";
 import type { LiquidityTier, WeightProvider } from "@tradebot/paper-engine";
 import { fifoRoundTrips, computeScoringResult } from "./scoring.js";
 import { computeZScore, computeScore, scoreToWeight, shouldAutoMute } from "./weights.js";
@@ -27,6 +27,9 @@ const logger = createLogger("brain");
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type RpcClient = { readContract: (args: any) => Promise<any> };
 type RpcClients = Record<ChainId, RpcClient>;
+type QuotePriceCache = Map<string, number>;
+type LatestMarkLookup = typeof latestMark;
+type QuotePriceLookup = typeof getUsdPrice;
 
 // Quote asset addresses that price to 1 USD
 const STABLE_ADDRESSES = new Set([
@@ -34,11 +37,6 @@ const STABLE_ADDRESSES = new Set([
   "0xdac17f958d2ee523a2206206994597c13d831ec7", // USDT eth
   "0x6b175474e89094c44da98b954eedeac495271d0f", // DAI eth
   "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913", // USDC base
-]);
-
-const WETH_ADDRESSES = new Set([
-  "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2", // WETH eth
-  "0x4200000000000000000000000000000000000006", // WETH base
 ]);
 
 export class BrainWeightProvider implements WeightProvider {
@@ -68,16 +66,59 @@ export function baselineWeightForTradeCount(trades: number): number {
   return trades < 5 ? 0.5 : 1.0;
 }
 
-async function getQuotePrice(db: Db, chain: ChainId, address: string): Promise<number> {
-  if (STABLE_ADDRESSES.has(address.toLowerCase())) return 1.0;
-  if (WETH_ADDRESSES.has(address.toLowerCase())) {
-    const mark = await latestMark(db, chain, address.toLowerCase());
-    return mark?.priceUsd ?? 0;
-  }
-  return 1.0; // unknown quote — treat as 1:1 (will cause inaccuracies but won't crash)
+function normalizeQuoteAddress(chain: ChainId, address: string): string {
+  const addr = address.toLowerCase();
+  return addr === "" || addr === NATIVE_TOKEN_PLACEHOLDER ? WETH[chain] : addr;
 }
 
-async function signalsToTradeRows(db: Db, walletId: string, since: Date | null): Promise<TradeRow[]> {
+export async function resolveQuoteUsdPrice({
+  db,
+  chain,
+  address,
+  rpcClient,
+  cache,
+  latestMarkLookup = latestMark,
+  quotePriceLookup = getUsdPrice,
+}: {
+  db: Db;
+  chain: ChainId;
+  address: string;
+  rpcClient?: RpcClient;
+  cache?: QuotePriceCache;
+  latestMarkLookup?: LatestMarkLookup;
+  quotePriceLookup?: QuotePriceLookup;
+}): Promise<number | null> {
+  const quoteAddress = normalizeQuoteAddress(chain, address);
+  if (STABLE_ADDRESSES.has(quoteAddress)) return 1.0;
+
+  const cacheKey = `${chain}:${quoteAddress}`;
+  const cached = cache?.get(cacheKey);
+  if (cached !== undefined) return cached;
+
+  const mark = await latestMarkLookup(db, chain, quoteAddress);
+  if (mark && mark.priceUsd > 0) {
+    cache?.set(cacheKey, mark.priceUsd);
+    return mark.priceUsd;
+  }
+
+  if (rpcClient) {
+    const price = await quotePriceLookup(chain, quoteAddress, rpcClient);
+    if (price !== null && price > 0) {
+      cache?.set(cacheKey, price);
+      return price;
+    }
+  }
+
+  return null;
+}
+
+async function signalsToTradeRows(
+  db: Db,
+  walletId: string,
+  since: Date | null,
+  rpcClients?: RpcClients,
+  quotePriceCache?: QuotePriceCache
+): Promise<TradeRow[]> {
   const signals = await getSignalsByWallet(db, walletId, since);
   const rows: TradeRow[] = [];
 
@@ -95,7 +136,14 @@ async function signalsToTradeRows(db: Db, walletId: string, since: Date | null):
     const qty = fromBaseUnits(rawQty, decimals);
     const quoteAmt = fromBaseUnits(rawQuoteAmt, quoteDecimals);
 
-    const quoteUsd = await getQuotePrice(db, sig.chain, quoteAddress);
+    const quoteUsd = await resolveQuoteUsdPrice({
+      db,
+      chain: sig.chain,
+      address: quoteAddress,
+      ...(rpcClients ? { rpcClient: rpcClients[sig.chain] } : {}),
+      ...(quotePriceCache ? { cache: quotePriceCache } : {}),
+    });
+    if (quoteUsd === null) continue;
     const costOrProceeds = quoteAmt * quoteUsd;
     const priceUsd = qty > 0 ? costOrProceeds / qty : 0;
 
@@ -118,9 +166,11 @@ async function scoreWallet(
   db: Db,
   walletId: string,
   window: ScoreWindow,
-  since: Date | null
+  since: Date | null,
+  rpcClients?: RpcClients,
+  quotePriceCache?: QuotePriceCache
 ): Promise<{ result: ReturnType<typeof computeScoringResult>; rows: TradeRow[] }> {
-  const rows = await signalsToTradeRows(db, walletId, since);
+  const rows = await signalsToTradeRows(db, walletId, since, rpcClients, quotePriceCache);
 
   // Build mark prices for open remainders
   const markPrices = new Map<string, number>();
@@ -150,12 +200,13 @@ export async function runScorerJob(db: Db, weightProvider: BrainWeightProvider, 
 
   const wallets = await getActiveWallets(db);
   const windows: ScoreWindow[] = ["7d", "30d", "all"];
+  const quotePriceCache: QuotePriceCache = new Map();
 
   for (const wallet of wallets) {
     for (const window of windows) {
       try {
         const since = windowToSince(window);
-        const { result } = await scoreWallet(db, wallet.id, window, since);
+        const { result } = await scoreWallet(db, wallet.id, window, since, rpcClients, quotePriceCache);
 
         // Fetch cohort stats for z-score computation
         const cohortStats = await getAllLeaderStats(db, window);

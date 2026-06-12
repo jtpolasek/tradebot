@@ -44,7 +44,7 @@ Review of the Sonnet-built implementation against `PLAN.md`. Status in `CLAUDE.m
 
 ## P3 — Moderate
 
-- [ ] **3.1 Scorer quote pricing** — cbBTC treated as $1; WETH-quoted trades dropped unless WETH is an open position.
+- [x] **3.1 Scorer quote pricing** fixed: scorer now prices non-stable quote assets from latest marks or live pricing RPC, normalizes native ETH to WETH, and skips unresolved quotes instead of treating them as $1.
 - [ ] **3.2 Z-scores use prior run's stored stats** as cohort (need two-pass).
 - [ ] **3.3 API key shipped to browser** via `NEXT_PUBLIC_API_KEY`; API accepts all requests when `API_KEY` unset; reads `process.env` directly (bypasses zod config).
 - [ ] **3.4 `decide()` clamp order** — `Math.max(MIN_NOTIONAL)` after MAX cap; equity valued at avg cost not marks; `dailyPnlUsd` is cumulative not daily.

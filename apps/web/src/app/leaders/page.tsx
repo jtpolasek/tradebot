@@ -105,10 +105,10 @@ export default function LeadersPage() {
                 </tr>
               </thead>
               <tbody>
-                {sorted.map((l) => {
+                {sorted.map((l, i) => {
                   const s = l.stats[activeWindow];
                   return (
-                    <tr key={l.wallet?.id ?? l.wallet?.address}>
+                    <tr key={l.wallet?.id ?? l.wallet?.address ?? `orphan-${i}`}>
                       <td>
                         <div style={{ fontWeight: 700, fontSize: "0.82rem" }}>{l.wallet?.label ?? "—"}</div>
                         <div className="mono subtle">{l.wallet ? shortAddr(l.wallet.address) : "—"}</div>

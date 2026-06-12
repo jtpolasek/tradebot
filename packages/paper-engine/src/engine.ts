@@ -1,6 +1,6 @@
 import { randomUUID } from "crypto";
 import PQueue from "p-queue";
-import { CHAIN_IDS } from "@tradebot/core";
+import { CHAIN_IDS, WETH } from "@tradebot/core";
 import type { ChainId, TradeSignal, PaperFill, TokenRef } from "@tradebot/core";
 import type { Config, EventBus } from "@tradebot/core";
 import type { Db } from "@tradebot/store";
@@ -60,8 +60,11 @@ type ProvisionalEntry = {
   qty: number;
   leaderHoldingKey: string;
   prevLeaderHolding: number | undefined;
-  // Pre-trade snapshot, used to reverse the fill exactly on void/replace.
-  prevPortfolio: AccountingPortfolio;
+  // Per-trade portfolio deltas, reversed on void/replace so interleaved fills aren't clobbered.
+  cashDelta: number;
+  realizedPnlDelta: number;
+  feesDelta: number;
+  // Pre-trade position snapshot for this token, restored on void/replace.
   prevPosition: InMemoryPosition | null;
 };
 
@@ -84,6 +87,7 @@ export class PaperEngine {
   private readonly recentSourceNotionals = new Map<string, number[]>();
   private readonly leaderHoldings = new Map<string, number>();
   private readonly markPrices = new Map<string, number>();
+  private readonly nativeUsd: Record<ChainId, number> = { eth: 0, base: 0 };
 
   private readonly rpcClients: Record<ChainId, RpcClient>;
 
@@ -217,6 +221,19 @@ export class PaperEngine {
       MIN_LIQUIDITY_USD: numberSetting(settings, ["MIN_LIQUIDITY_USD", "min_liquidity_usd"], this.cfg.MIN_LIQUIDITY_USD),
       SIZING_MODE: sizingModeSetting(settings, ["SIZING_MODE", "sizing_mode"], this.cfg.SIZING_MODE),
     };
+    await this.refreshNativePrices();
+  }
+
+  /** Cache the native (WETH) USD price per chain so proportional sizing can value ETH-quoted trades. */
+  private async refreshNativePrices(): Promise<void> {
+    for (const chain of ["eth", "base"] as ChainId[]) {
+      try {
+        const price = await getUsdPrice(chain, WETH[chain], this.rpcClients[chain]);
+        if (price && price > 0) this.nativeUsd[chain] = price;
+      } catch {
+        // keep last known native price
+      }
+    }
   }
 
   decide(signal: TradeSignal, liquidityUsd: number | null): { action: "copy"; notionalUsd: number } | { action: "skip"; reason: string } {
@@ -259,8 +276,22 @@ export class PaperEngine {
     return { action: "copy", notionalUsd: sellQty * pos.avgCostUsd };
   }
 
+  private estimateSignalSourceNotionalUsd(signal: TradeSignal): number | null {
+    const candidate: SizingCandidate = {
+      side: signal.side,
+      tokenInSymbol: signal.tokenIn.symbol,
+      tokenInAddress: signal.tokenIn.address,
+      tokenInAmountHuman: rawToHumanNumber(signal.amountIn, signal.tokenIn.decimals),
+      tokenOutSymbol: signal.tokenOut.symbol,
+      tokenOutAddress: signal.tokenOut.address,
+      tokenOutAmountHuman: rawToHumanNumber(signal.amountOut, signal.tokenOut.decimals),
+    };
+    const notional = estimateSourceNotionalUsd(candidate, this.nativeUsd[signal.chain] ?? 0);
+    return Number.isFinite(notional) && notional > 0 ? notional : null;
+  }
+
   private proportionalScale(signal: TradeSignal): number {
-    const sourceNotionalUsd = estimateSignalSourceNotionalUsd(signal);
+    const sourceNotionalUsd = this.estimateSignalSourceNotionalUsd(signal);
     const recent = this.recentSourceNotionals.get(signal.walletId) ?? [];
     const median = medianNumber(recent);
     if (sourceNotionalUsd === null || median === null || median <= 0) return 1;
@@ -268,7 +299,7 @@ export class PaperEngine {
   }
 
   private rememberSourceNotional(signal: TradeSignal): void {
-    const sourceNotionalUsd = estimateSignalSourceNotionalUsd(signal);
+    const sourceNotionalUsd = this.estimateSignalSourceNotionalUsd(signal);
     if (sourceNotionalUsd === null || sourceNotionalUsd <= 0) return;
     const recent = this.recentSourceNotionals.get(signal.walletId) ?? [];
     recent.push(sourceNotionalUsd);
@@ -642,7 +673,9 @@ export class PaperEngine {
         qty,
         leaderHoldingKey: signalLeaderHoldingKey,
         prevLeaderHolding,
-        prevPortfolio,
+        cashDelta: this.portfolio.cashUsd - prevPortfolio.cashUsd,
+        realizedPnlDelta: this.portfolio.realizedPnlUsd - prevPortfolio.realizedPnlUsd,
+        feesDelta: this.portfolio.feesPaidUsd - prevPortfolio.feesPaidUsd,
         prevPosition,
       });
     }
@@ -882,8 +915,13 @@ export class PaperEngine {
     const prov = this.provisionals.get(signalId);
     if (!prov) return;
 
-    // Restore portfolio and position to the exact pre-trade snapshot, then persist.
-    this.portfolio = { ...prov.prevPortfolio };
+    // Reverse only this trade's portfolio deltas so fills processed concurrently between the
+    // provisional and the void keep their cash/realizedPnl/fee effects.
+    this.portfolio = {
+      cashUsd: this.portfolio.cashUsd - prov.cashDelta,
+      realizedPnlUsd: this.portfolio.realizedPnlUsd - prov.realizedPnlDelta,
+      feesPaidUsd: this.portfolio.feesPaidUsd - prov.feesDelta,
+    };
     this.cashUsd = this.portfolio.cashUsd;
 
     if (prov.prevPosition) {
@@ -980,20 +1018,6 @@ function sizingModeSetting(settings: Record<string, unknown>, keys: string[], fa
     if (value === "fixed" || value === "proportional") return value;
   }
   return fallback;
-}
-
-function estimateSignalSourceNotionalUsd(signal: TradeSignal): number | null {
-  const candidate: SizingCandidate = {
-    side: signal.side,
-    tokenInSymbol: signal.tokenIn.symbol,
-    tokenInAddress: signal.tokenIn.address,
-    tokenInAmountHuman: rawToHumanNumber(signal.amountIn, signal.tokenIn.decimals),
-    tokenOutSymbol: signal.tokenOut.symbol,
-    tokenOutAddress: signal.tokenOut.address,
-    tokenOutAmountHuman: rawToHumanNumber(signal.amountOut, signal.tokenOut.decimals),
-  };
-  const notional = estimateSourceNotionalUsd(candidate, 0);
-  return Number.isFinite(notional) && notional > 0 ? notional : null;
 }
 
 function rawToHumanNumber(amount: bigint, decimals: number): number {

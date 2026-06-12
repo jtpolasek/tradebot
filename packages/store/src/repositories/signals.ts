@@ -32,6 +32,7 @@ export async function insertSignal(db: Db, signal: TradeSignal): Promise<string>
       eq(tradeSignals.txHash, signal.txHash),
       eq(tradeSignals.tokenIn, signal.tokenIn.address),
       eq(tradeSignals.tokenOut, signal.tokenOut.address),
+      eq(tradeSignals.side, signal.side),
     ))
     .limit(1);
 
@@ -59,7 +60,7 @@ export async function upsertSignal(db: Db, signal: TradeSignal): Promise<void> {
     confirmedAt: signal.confirmedAt !== null ? new Date(signal.confirmedAt) : undefined,
     blockNumber: signal.blockNumber ?? undefined,
   }).onConflictDoUpdate({
-    target: [tradeSignals.chain, tradeSignals.txHash, tradeSignals.tokenIn, tradeSignals.tokenOut],
+    target: [tradeSignals.chain, tradeSignals.txHash, tradeSignals.tokenIn, tradeSignals.tokenOut, tradeSignals.side],
     set: {
       source: signal.source,
       amountIn: String(signal.amountIn),

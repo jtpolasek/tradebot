@@ -234,7 +234,7 @@ describe("Decoder class", () => {
   it("emits no signal-voided when a reverted tx has no pending mempool signal", async () => {
     const { Decoder } = await import("./decoder.js");
     const bus = new EventBus();
-    const decoder = new Decoder({ bus, db: {} as never, wallets: [{ address: WALLET, id: WALLET_ID }], rpcUrls: { eth: "http://0.0.0.0:1", base: "http://0.0.0.0:1" } });
+    const decoder = new Decoder({ bus, db: {} as never, wallets: [{ address: WALLET, id: WALLET_ID, chain: "eth" }], rpcUrls: { eth: "http://0.0.0.0:1", base: "http://0.0.0.0:1" } });
     decoder.start();
 
     const voided: unknown[] = [];
@@ -252,7 +252,7 @@ describe("Decoder class", () => {
   it("ignores raw-tx events from untracked wallets", async () => {
     const { Decoder } = await import("./decoder.js");
     const bus = new EventBus();
-    const decoder = new Decoder({ bus, db: {} as never, wallets: [{ address: WALLET, id: WALLET_ID }], rpcUrls: { eth: "http://0.0.0.0:1", base: "http://0.0.0.0:1" } });
+    const decoder = new Decoder({ bus, db: {} as never, wallets: [{ address: WALLET, id: WALLET_ID, chain: "eth" }], rpcUrls: { eth: "http://0.0.0.0:1", base: "http://0.0.0.0:1" } });
     decoder.start();
 
     const signals: unknown[] = [];
@@ -270,7 +270,7 @@ describe("Decoder class", () => {
   it("emits trade-signal for a confirmed tx with recognisable Transfer logs (Strategy B buy)", async () => {
     const { Decoder } = await import("./decoder.js");
     const bus = new EventBus();
-    const decoder = new Decoder({ bus, db: {} as never, wallets: [{ address: WALLET, id: WALLET_ID }], rpcUrls: { eth: "http://0.0.0.0:1", base: "http://0.0.0.0:1" } });
+    const decoder = new Decoder({ bus, db: {} as never, wallets: [{ address: WALLET, id: WALLET_ID, chain: "eth" }], rpcUrls: { eth: "http://0.0.0.0:1", base: "http://0.0.0.0:1" } });
     decoder.start();
 
     const signals: TradeSignal[] = [];
@@ -314,7 +314,7 @@ describe("Decoder class", () => {
   it("emits sell and buy signals when both Strategy B tokens are non-quote assets", async () => {
     const { Decoder } = await import("./decoder.js");
     const bus = new EventBus();
-    const decoder = new Decoder({ bus, db: {} as never, wallets: [{ address: WALLET, id: WALLET_ID }], rpcUrls: { eth: "http://0.0.0.0:1", base: "http://0.0.0.0:1" } });
+    const decoder = new Decoder({ bus, db: {} as never, wallets: [{ address: WALLET, id: WALLET_ID, chain: "eth" }], rpcUrls: { eth: "http://0.0.0.0:1", base: "http://0.0.0.0:1" } });
     decoder.start();
 
     const signals: TradeSignal[] = [];
@@ -359,7 +359,7 @@ describe("Decoder class", () => {
     const bus = new EventBus();
     // setWallets with an address-only identity leaves the id map without this address.
     const decoder = new Decoder({ bus, db: {} as never, wallets: [], rpcUrls: { eth: "http://0.0.0.0:1", base: "http://0.0.0.0:1" } });
-    (decoder as unknown as { wallets: Set<string> }).wallets = new Set([WALLET]);
+    (decoder as unknown as { wallets: Set<string> }).wallets = new Set([`eth:${WALLET}`]);
     decoder.start();
 
     const signals: unknown[] = [];
@@ -377,7 +377,7 @@ describe("Decoder class", () => {
   it("decodes a token→ETH sell from a WETH Withdrawal log (no ERC-20 inbound)", async () => {
     const { Decoder } = await import("./decoder.js");
     const bus = new EventBus();
-    const decoder = new Decoder({ bus, db: {} as never, wallets: [{ address: WALLET, id: WALLET_ID }], rpcUrls: { eth: "http://0.0.0.0:1", base: "http://0.0.0.0:1" } });
+    const decoder = new Decoder({ bus, db: {} as never, wallets: [{ address: WALLET, id: WALLET_ID, chain: "eth" }], rpcUrls: { eth: "http://0.0.0.0:1", base: "http://0.0.0.0:1" } });
     decoder.start();
 
     const signals: TradeSignal[] = [];

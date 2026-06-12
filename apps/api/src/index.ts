@@ -126,14 +126,17 @@ app.get("/portfolio", async (_req, reply) => {
 // ── Leaders ───────────────────────────────────────────────────────────────────
 
 app.get("/leaders", async (_req, reply) => {
-  const [wallets, stats7d, stats30d, statsAll] = await Promise.all([
+  const [activeWallets, allWallets, stats7d, stats30d, statsAll] = await Promise.all([
     getActiveWallets(db),
+    getAllWallets(db),
     getAllLeaderStats(db, "7d"),
     getAllLeaderStats(db, "30d"),
     getAllLeaderStats(db, "all"),
   ]);
 
-  const byWallet = new Map(wallets.map((w) => [w.id, w]));
+  // Resolve stats to any known wallet (active or deactivated); only truly
+  // orphaned stats with no matching wallet row fall back to null.
+  const byWallet = new Map(allWallets.map((w) => [w.id, w]));
   const statsByWallet = new Map<string, Record<string, (typeof stats7d)[number]>>();
 
   for (const row of [...stats7d, ...stats30d, ...statsAll]) {
@@ -141,15 +144,16 @@ app.get("/leaders", async (_req, reply) => {
     statsByWallet.get(row.walletId)![row.window] = row;
   }
 
-  const leaders = wallets.map((w) => ({
+  const leaders = activeWallets.map((w) => ({
     wallet: w,
     stats: statsByWallet.get(w.id) ?? {},
   }));
 
-  // Include wallets that have stats but may not be "active" any more
+  // Include wallets that have stats but are no longer active.
+  const activeIds = new Set(activeWallets.map((w) => w.id));
   for (const [walletId, stats] of statsByWallet) {
-    if (!byWallet.has(walletId)) {
-      leaders.push({ wallet: null as unknown as (typeof wallets)[number], stats });
+    if (!activeIds.has(walletId)) {
+      leaders.push({ wallet: byWallet.get(walletId) ?? (null as unknown as (typeof allWallets)[number]), stats });
     }
   }
 

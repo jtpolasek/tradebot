@@ -63,10 +63,13 @@ export class SignalDeduper {
     return this.resolveReplacedAll(chain, from, nonce)[0] ?? null;
   }
 
-  resolveReplacedAll(chain: string, from: string, nonce: number): TradeSignal[] {
+  resolveReplacedAll(chain: string, from: string, nonce: number, currentTxHash?: string): TradeSignal[] {
     const nonceKey = `${chain}:${from.toLowerCase()}:${nonce}`;
     const txKey = this.nonceToTx.get(nonceKey);
     if (!txKey) return [];
+    // The confirmed tx carries the same nonce as its own pending entry — that's a confirmation,
+    // not a replacement. Leave the entry intact so resolveConfirmed can match it.
+    if (currentTxHash !== undefined && txKey === `${chain}:${currentTxHash}`) return [];
     const entries = this.pending.get(txKey) ?? [];
     this.nonceToTx.delete(nonceKey);
     this.pending.delete(txKey);
@@ -95,7 +98,9 @@ export class SignalDeduper {
     if (!entries || entries.length === 0) return null;
 
     const index = entries.findIndex((entry) => signalsMatch(entry.signal, confirmedSignal));
-    const [entry] = entries.splice(index >= 0 ? index : 0, 1);
+    // No pending entry matches this confirmed signal — don't consume an unrelated provisional.
+    if (index < 0) return null;
+    const [entry] = entries.splice(index, 1);
     if (entries.length === 0) this.pending.delete(txKey);
     if (entry) this.deleteNonce(entry);
     return entry ?? null;

@@ -40,8 +40,15 @@ export async function GET(req: NextRequest) {
 
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
+      let closed = false;
+
       const send = (value: unknown) => {
-        controller.enqueue(encoder.encode(`data: ${JSON.stringify(value)}\n\n`));
+        if (closed) return;
+        try {
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify(value)}\n\n`));
+        } catch {
+          closed = true;
+        }
       };
 
       const poll = async () => {
@@ -72,6 +79,7 @@ export async function GET(req: NextRequest) {
       void poll();
       const timer = setInterval(() => void poll(), 2_000);
       req.signal.addEventListener("abort", () => {
+        closed = true;
         clearInterval(timer);
         controller.close();
       });

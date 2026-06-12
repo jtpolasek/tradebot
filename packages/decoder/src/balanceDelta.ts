@@ -53,6 +53,7 @@ export function analyzePairs(
       tokenIn: tokenIn ?? null,
       tokenOut: tokenOut ?? null,
       reason: "No paired inbound and outbound wallet transfers were found for this transaction.",
+      ambiguousDirection: false,
     };
   }
 
@@ -71,6 +72,7 @@ export function analyzePairs(
       tokenIn: tokenIn ?? null,
       tokenOut: tokenOut ?? null,
       reason,
+      ambiguousDirection: hasMixedSideShapes,
     };
   }
 
@@ -87,6 +89,7 @@ export function analyzePairs(
       : needsReview
       ? describeAmbiguousPair(side, tokenIn?.symbol ?? "", tokenOut?.symbol ?? "")
       : describeDecodedPair(side, tokenIn?.symbol ?? "", tokenOut?.symbol ?? ""),
+    ambiguousDirection: false,
   };
 }
 

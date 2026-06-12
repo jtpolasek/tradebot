@@ -7,8 +7,8 @@ import type { Db } from "@tradebot/store";
 import { getActiveWallets } from "@tradebot/store";
 import { TokenMetadataResolver } from "./tokenMetadata.js";
 
-/** A tracked wallet's address + its DB UUID, so signals carry a valid FK. */
-export type WalletIdentity = { address: string; id: string };
+/** A tracked wallet's address + its DB UUID + chain, so signals carry a valid FK per chain. */
+export type WalletIdentity = { address: string; id: string; chain: ChainId };
 
 const WALLET_RELOAD_MS = 60_000;
 import { strategyA } from "./strategyA.js";
@@ -82,9 +82,10 @@ export class Decoder {
     const next = new Set<string>();
     const nextIds = new Map<string, string>();
     for (const w of wallets) {
-      const addr = w.address.toLowerCase();
-      next.add(addr);
-      nextIds.set(addr, w.id);
+      // Key by chain:address so an address tracked on both chains resolves to the right UUID.
+      const key = `${w.chain}:${w.address.toLowerCase()}`;
+      next.add(key);
+      nextIds.set(key, w.id);
     }
     this.wallets = next;
     this.walletIds = nextIds;
@@ -94,16 +95,18 @@ export class Decoder {
   private async reloadWallets(): Promise<void> {
     try {
       const wallets = await getActiveWallets(this.db);
-      this.applyWallets(wallets.map((w) => ({ address: w.address, id: w.id })));
+      this.applyWallets(wallets.map((w) => ({ address: w.address, id: w.id, chain: w.chain })));
     } catch (err) {
       logger.warn({ err }, "wallet reload failed");
     }
   }
 
   private async handleRawTx(event: RawTxEvent): Promise<void> {
-    const wallet = this.wallets.has(event.from.toLowerCase()) ? event.from.toLowerCase() : null;
+    const addr = event.from.toLowerCase();
+    const walletKey = `${event.chain}:${addr}`;
+    const wallet = this.wallets.has(walletKey) ? addr : null;
     if (!wallet) return;
-    const walletId = this.walletIds.get(wallet);
+    const walletId = this.walletIds.get(walletKey);
     if (!walletId) {
       // Tracked address with no resolved UUID — skip rather than write a bad FK.
       logger.warn({ chain: event.chain, wallet }, "no wallet id for tracked address — skipping");
@@ -127,7 +130,7 @@ export class Decoder {
       if (event.source === "confirmed") {
         // Check for replaced tx (same from+nonce, different hash)
         if (event.nonce !== undefined) {
-          const replacedSignals = this.deduper.resolveReplacedAll(event.chain, event.from, event.nonce);
+          const replacedSignals = this.deduper.resolveReplacedAll(event.chain, event.from, event.nonce, event.txHash);
           for (const replaced of replacedSignals) {
             if (replaced.txHash !== event.txHash) {
               this.bus.emit("signal-voided", { signalId: replaced.id, reason: "replaced" });
@@ -274,6 +277,11 @@ export class Decoder {
 
     const result = analyzePairs(outbound, inbound);
     if (result.status === "skipped") return [];
+    // The tx carries both buy- and sell-shaped pairs, so the direction is genuinely un-inferable —
+    // don't copy a trade analyzePairs explicitly flagged as ambiguous. A clean non-quote→non-quote
+    // rotation also reports side "unknown" but is NOT ambiguous; it falls through so classifySide can
+    // expand it into paired sell+buy signals (PLAN §2.2).
+    if (result.ambiguousDirection) return [];
     if (!result.tokenIn || !result.tokenOut) return [];
 
     return this.buildSignalsFromDelta(event, walletId, result.tokenIn, result.tokenOut);

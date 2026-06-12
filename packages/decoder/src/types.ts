@@ -14,4 +14,7 @@ export type BalanceDeltaResult = {
   reason: string;
   tokenIn: NormalizedTransfer | null;
   tokenOut: NormalizedTransfer | null;
+  /** True only when the tx contains both buy- and sell-shaped pairs, so the direction is
+   * genuinely un-inferable (distinct from a clean non-quote→non-quote rotation). */
+  ambiguousDirection: boolean;
 };

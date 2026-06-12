@@ -134,12 +134,10 @@ async function main() {
 
   const snapshot = await latestSnapshot(db);
   if (snapshot) {
-    const positionsValueUsd = Array.from(replayPositions.values())
-      .reduce((sum, pos) => sum + pos.quantity * pos.averageEntryUsd, 0);
+    // Only cash is replayable and mark-independent. positionsValue/equity use live marks and
+    // dailyPnl is a 24h equity delta — neither is derivable from a cost-basis fill replay, so
+    // comparing them produces constant false alarms. Position rows are reconciled above.
     compareNumber(mismatches, "latest-snapshot", "cashUsd", portfolio.cashUsd, snapshot.cashUsd);
-    compareNumber(mismatches, "latest-snapshot", "positionsValueUsd", positionsValueUsd, snapshot.positionsValueUsd);
-    compareNumber(mismatches, "latest-snapshot", "equityUsd", portfolio.cashUsd + positionsValueUsd, snapshot.equityUsd);
-    compareNumber(mismatches, "latest-snapshot", "dailyPnlUsd", portfolio.realizedPnlUsd, snapshot.dailyPnlUsd);
   }
 
   console.log(`Copied fills replayed: ${fills.length - skippedVoided}`);

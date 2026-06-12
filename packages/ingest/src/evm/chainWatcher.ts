@@ -11,7 +11,7 @@ import { TRANSFER_TOPIC, chunk } from "./topics.js";
 const CHUNK_SIZE = 50;
 const DEDUPE_SIZE = 50_000;
 const BACKFILL_CHUNK_BY_CHAIN: Record<ChainId, number> = {
-  eth: 500,
+  eth: 10,
   base: 10,
 };
 const BACKFILL_ADDRESS_CHUNK_BY_CHAIN: Record<ChainId, number> = {

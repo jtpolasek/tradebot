@@ -54,3 +54,40 @@ Review of the Sonnet-built implementation against `PLAN.md`. Status in `CLAUDE.m
 ## Notes on uncommitted working-tree changes (at review time)
 - `paperFills.ts` chain-join fix: **good**, keep.
 - `price.ts` 0x liquidity-impact fallback: feature not in PLAN.md; recommend revert in favor of Aerodrome pool support (2.12).
+
+---
+
+# Round 2 — Review of the fix branch (2026-06-12)
+
+Multi-angle review of `fix/code-review-2026-06-11` (main...HEAD, 20 commits). Every finding below was independently verified against the code (9 confirmed, 2 plausible). The first four corrupt the paper ledger on routine paths — fix those before trusting any PnL output.
+
+## R2-P0 — Ledger corruption on routine paths
+
+- [ ] **4.1 Mempool→confirm double-commits every trade.** `decoder.ts:130`: confirmed events always carry a nonce (`chainWatcher.ts:306`), so `resolveReplacedAll` runs first and unconditionally evicts the pending entry for the *same* txHash (`deduper.ts:66-74` — the `txHash !==` check at `decoder.ts:132` only suppresses the voided event, not the eviction). `resolveConfirmed` then finds nothing and returns `{action:'new'}`: a second trade-signal is emitted, the engine commits cash/position twice for one trade, and the provisional is never confirmed nor voided (provisionals map leaks).
+- [ ] **4.2 `handleVoided` erases interleaved fills.** `engine.ts:886` restores the *entire* pre-trade portfolio snapshot (`{...prov.prevPortfolio}`, captured at `engine.ts:436`). Any fill processed between the provisional fill and the void (queue concurrency is 4, `engine.ts:104`) has its cash/realizedPnl/fee effects erased while its position rows remain — equity permanently inflated. Fix: reverse only the provisional trade's delta, not the whole snapshot. (This is the rework done for item 0.5; the snapshot approach itself is the bug.)
+- [ ] **4.3 'Both'-leg signals collapse onto one id.** `signals.ts:34`: the `trade_signals` unique key (`schema.ts:51`) and the conflict-fallback select omit `side`, while `buildSignals` (`decoder.ts:309`) emits sell+buy legs with identical `(chain, txHash, tokenIn, tokenOut)`. The buy leg's insert no-ops and the fallback returns the *sell* leg's id; `engine.ts:313-316` rebinds `signal.id`, so the buy's provisional overwrites the sell's in `provisionals`. On revert only one leg is reversed; on confirm the wrong leg is re-priced. (Undoes item 2.2 at the persistence layer — add `side` to the unique key + fallback filter.)
+- [ ] **4.4 Unknown-side trades are now copied.** `decoder.ts:276`: the old guard `result.side === "unknown"` was dropped; only `status === "skipped"` is checked. `analyzePairs` (`balanceDelta.ts:59-75`) returns `status:'candidate', side:'unknown'`, confidence 0.4 ("review before copying") for mixed buy/sell shapes, and `buildSignals` re-derives side from token addresses alone — two non-quote tokens → paired sell+buy for a trade whose direction was explicitly un-inferable.
+
+## R2-P1 — Wrong attribution / broken features
+
+- [ ] **4.5 Wallet-id map drops the chain key.** `decoder.ts:87`: `walletIds` is keyed by address only (old code keyed `chain:address`); the shared decoder loads `getActiveWallets(db)` unfiltered (`apps/runner/src/index.ts:70-72`), so an address tracked on both eth and base collapses to one UUID (last writer wins) and the other chain's signals/fills/leader stats land on the wrong wallet row.
+- [ ] **4.6 Proportional sizing is a silent no-op for native-quoted trades.** `engine.ts:995` calls `estimateSourceNotionalUsd(candidate, 0)` — `nativeUsd` hardcoded to 0 — so ETH/WETH-quoted trades (`sizing.ts:36/41`) compute notional 0 → null → `proportionalScale` returns 1 and the median window never seeds. Item 2.4 effectively works only for stablecoin-quoted signals. Pass a real native price.
+- [ ] **4.7 `verify-ledger` fails healthy ledgers.** `verify-ledger.ts:142`: compares replayed cost-basis position value (`qty × averageEntryUsd`, line 138) against the engine's *mark-priced* snapshot (`engine.ts:208`), and inception `realizedPnlUsd` against `dailyPnlUsd` = 24h equity delta (`engine.ts:936`), with epsilon 1e-6 and no tolerance. Any position whose mark differs from cost, or any account older than a day, exits 1 — constant false alarms mask real corruption. (Item 2.11's replay is good; the snapshot comparison compares incompatible quantities.)
+- [ ] **4.8 SSE proxy unhandled rejection on disconnect.** `apps/web/src/app/api/stream/route.ts:44`: `send` enqueues with no closed-guard; the abort handler closes the controller (lines 74-77) while a poll may be mid-fetch; the resumed poll's `send` throws, the catch (line 67) calls `send` *again*, and the second throw escapes `void poll()` with no rejection handler — unhandled rejection in the Next server on every mid-poll disconnect (process exit under Node's default `unhandled-rejections=throw`, depending on Next's handler).
+
+## R2-P2 — Moderate
+
+- [ ] **4.9 Deduper consumes unrelated entries on no-match.** `deduper.ts:98`: `entries.splice(index >= 0 ? index : 0, 1)` — when `signalsMatch` fails for every pending entry, entry[0] is consumed anyway and returned as `{action:'update'}`, so a confirmed signal with a different side/token re-prices an unrelated provisional with the wrong token's price (`engine.ts:845-875`). Return `{action:'new'}` (or leave entries intact) when nothing matches.
+- [ ] **4.10 `/leaders` returns null wallets → duplicate React keys.** `apps/api/src/index.ts:152` pushes `wallet: null as unknown as Wallet` for deactivated wallets that still have stats (`getAllLeaderStats` has no active filter); `leaders/page.tsx:111` keys rows on `l.wallet?.id ?? l.wallet?.address` with no fallback → `key={undefined}` duplicates and rows rendering as "—" with unattributable stats.
+
+## R2 — Verified-plausible (below the cut)
+
+- **`executeExitSell` skips `sourceWalletId === null` positions** (`engine.ts:715-718`) every 60s forever. No current write path produces null-wallet positions, so it only bites legacy rows in an old paper DB; the skip is at least logged.
+
+## R2 — Cleanup / efficiency (no behavior change required, but cheap insurance)
+
+- **`executeExitSell` duplicates the whole sell path** and has already diverged from `handleSignal` (hardcoded `dexFeeBps = 30`, no 0x quoting from 2.10) — exit fills are priced under a different model than copy fills. Extract a shared sell-fill function.
+- Five copy-pasted 17-field skip-fill literals in `engine.ts` (327/363/395/457/523) → one `recordSkip(signal, reason)` helper.
+- `rawToHumanNumber`/`toRawAmount` (`engine.ts:999/1030`) re-implement `money.ts` `fromBaseUnits`/`toBaseUnits`; `classifyLiquidityTier` and the stablecoin address tables are each maintained in two packages (move shared copies to `@tradebot/core`).
+- `this.cashUsd` mirrors `portfolio.cashUsd` across six sync sites — replace with a getter.
+- Efficiency: `takeSnapshot` fetches 288 rows per fill; scorer does sequential N+1 token lookups per window; the SSE route polls upstream per-client every 2s while the API's old WebSocket poller runs for zero clients (pick one stream mechanism); `subscribeNewHeads` writes `upsertLastBlock` on every ~2s head.

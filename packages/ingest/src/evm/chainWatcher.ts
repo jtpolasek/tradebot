@@ -14,6 +14,10 @@ const BACKFILL_CHUNK_BY_CHAIN: Record<ChainId, number> = {
   eth: 500,
   base: 10,
 };
+const BACKFILL_ADDRESS_CHUNK_BY_CHAIN: Record<ChainId, number> = {
+  eth: CHUNK_SIZE,
+  base: 5,
+};
 const FAILOVER_TIMEOUT_MS = 60_000;
 const WALLET_RELOAD_MS = 60_000;
 const MEMPOOL_RECONNECT_MS = 1_000;
@@ -422,26 +426,29 @@ export class ChainWatcher {
     if (addrs.length === 0) return;
 
     const backfillChunk = BACKFILL_CHUNK_BY_CHAIN[this.chain];
+    const addressChunk = BACKFILL_ADDRESS_CHUNK_BY_CHAIN[this.chain];
     for (let start = fromBlock; start <= toBlock; start += backfillChunk) {
       const end = Math.min(start + backfillChunk - 1, toBlock);
-      try {
-        const typedAddrs = addrs as `0x${string}`[];
-        const [fromLogs, toLogs] = await Promise.all([
-          this.client!.getLogs({ fromBlock: BigInt(start), toBlock: BigInt(end), event: TRANSFER_ABI[0]!, args: { from: typedAddrs } }),
-          this.client!.getLogs({ fromBlock: BigInt(start), toBlock: BigInt(end), event: TRANSFER_ABI[0]!, args: { to: typedAddrs } }),
-        ]);
+      for (const batch of chunk(addrs, addressChunk)) {
+        try {
+          const typedAddrs = batch as `0x${string}`[];
+          const [fromLogs, toLogs] = await Promise.all([
+            this.client!.getLogs({ fromBlock: BigInt(start), toBlock: BigInt(end), event: TRANSFER_ABI[0]!, args: { from: typedAddrs } }),
+            this.client!.getLogs({ fromBlock: BigInt(start), toBlock: BigInt(end), event: TRANSFER_ABI[0]!, args: { to: typedAddrs } }),
+          ]);
 
-        const seen = new Set<string>();
-        const relevant = [...fromLogs, ...toLogs].filter((l) => {
-          if (!l.transactionHash) return false;
-          if (seen.has(l.transactionHash)) return false;
-          seen.add(l.transactionHash);
-          return true;
-        });
+          const seen = new Set<string>();
+          const relevant = [...fromLogs, ...toLogs].filter((l) => {
+            if (!l.transactionHash) return false;
+            if (seen.has(l.transactionHash)) return false;
+            seen.add(l.transactionHash);
+            return true;
+          });
 
-        await this.handleConfirmedLogs(relevant);
-      } catch (err) {
-        this.logger.warn({ err, start, end }, "backfill chunk failed");
+          await this.handleConfirmedLogs(relevant);
+        } catch (err) {
+          this.logger.warn({ err, start, end, addressCount: batch.length }, "backfill chunk failed");
+        }
       }
     }
   }

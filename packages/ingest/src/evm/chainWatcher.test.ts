@@ -185,6 +185,53 @@ describe("ChainWatcher backfill logic", () => {
       expect.objectContaining({ fromBlock: 21n, toBlock: 27n, args: { from: ["0xaaaa"] } })
     );
   });
+
+  it("chunks Base backfill wallet filters into small address batches", async () => {
+    const bus = new EventBus();
+    const recorder = makeRecorder();
+    const watcher = new ChainWatcher({
+      chain: "base",
+      primaryWsUrl: "wss://placeholder",
+      db: makeMockDb(0),
+      bus,
+      recorder,
+    });
+
+    const mockClient = {
+      getLogs: vi.fn().mockResolvedValue([]),
+    };
+    (watcher as unknown as { client: typeof mockClient }).client = mockClient;
+    (watcher as unknown as { wallets: string[] }).wallets = [
+      "0x0001",
+      "0x0002",
+      "0x0003",
+      "0x0004",
+      "0x0005",
+      "0x0006",
+      "0x0007",
+      "0x0008",
+      "0x0009",
+      "0x0010",
+      "0x0011",
+      "0x0012",
+    ];
+
+    await (watcher as unknown as { backfillGap(f: number, t: number): Promise<void> }).backfillGap(1, 10);
+
+    expect(mockClient.getLogs).toHaveBeenCalledTimes(6);
+    expect(mockClient.getLogs).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ fromBlock: 1n, toBlock: 10n, args: { from: ["0x0001", "0x0002", "0x0003", "0x0004", "0x0005"] } })
+    );
+    expect(mockClient.getLogs).toHaveBeenNthCalledWith(
+      3,
+      expect.objectContaining({ fromBlock: 1n, toBlock: 10n, args: { from: ["0x0006", "0x0007", "0x0008", "0x0009", "0x0010"] } })
+    );
+    expect(mockClient.getLogs).toHaveBeenNthCalledWith(
+      5,
+      expect.objectContaining({ fromBlock: 1n, toBlock: 10n, args: { from: ["0x0011", "0x0012"] } })
+    );
+  });
 });
 
 describe("ChainWatcher failover", () => {

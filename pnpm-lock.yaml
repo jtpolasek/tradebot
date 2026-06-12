@@ -29,6 +29,9 @@ importers:
       '@fastify/websocket':
         specifier: ^11.0.0
         version: 11.2.0
+      '@tradebot/brain':
+        specifier: workspace:*
+        version: link:../../packages/brain
       '@tradebot/core':
         specifier: workspace:*
         version: link:../../packages/core
@@ -41,6 +44,9 @@ importers:
       fastify:
         specifier: ^5.4.0
         version: 5.8.5
+      viem:
+        specifier: ^2.31.3
+        version: 2.52.2(typescript@5.9.3)(zod@3.25.76)
       zod:
         specifier: ^3.25.0
         version: 3.25.76

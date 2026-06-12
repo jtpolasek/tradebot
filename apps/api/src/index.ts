@@ -1,7 +1,10 @@
 import Fastify from "fastify";
 import wsPlugin from "@fastify/websocket";
 import { z } from "zod";
-import { normalizeAddressInput } from "@tradebot/core";
+import { BrainWeightProvider, runScorerJob } from "@tradebot/brain";
+import { config, normalizeAddressInput } from "@tradebot/core";
+import { createPublicClient, webSocket } from "viem";
+import { mainnet, base as baseChain } from "viem/chains";
 import {
   getDb,
   getAllWallets,
@@ -27,6 +30,20 @@ import {
 import { apiConfig } from "./config.js";
 
 const db = getDb();
+const manualWeightProvider = new BrainWeightProvider();
+let leaderRefresh: Promise<void> | null = null;
+const rpcClients = {
+  eth: createPublicClient({
+    chain: mainnet,
+    batch: { multicall: true },
+    transport: webSocket(`wss://eth-mainnet.g.alchemy.com/v2/${config.ALCHEMY_API_KEY}`),
+  }),
+  base: createPublicClient({
+    chain: baseChain,
+    batch: { multicall: true },
+    transport: webSocket(`wss://base-mainnet.g.alchemy.com/v2/${config.BASE_ALCHEMY_API_KEY ?? config.ALCHEMY_API_KEY}`),
+  }),
+};
 
 const app = Fastify({ logger: { level: apiConfig.LOG_LEVEL } });
 await app.register(wsPlugin);
@@ -204,6 +221,17 @@ app.get("/leaders", async (_req, reply) => {
   }
 
   reply.send({ leaders });
+});
+
+app.post("/leaders/refresh", async (_req, reply) => {
+  if (!leaderRefresh) {
+    leaderRefresh = runScorerJob(db, manualWeightProvider, rpcClients).finally(() => {
+      leaderRefresh = null;
+    });
+  }
+
+  await leaderRefresh;
+  reply.send({ ok: true });
 });
 
 // ── Adaptations ───────────────────────────────────────────────────────────────

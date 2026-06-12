@@ -20,6 +20,7 @@ export default function LeadersPage() {
   const [data, setData] = useState<LeadersData | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [activeWindow, setActiveWindow] = useState<(typeof WINDOWS)[number]>("7d");
 
   async function load() {
@@ -35,6 +36,20 @@ export default function LeadersPage() {
   }
 
   useEffect(() => { void load(); }, []);
+
+  async function refreshLeaders() {
+    setRefreshing(true);
+    setLoading(true);
+    try {
+      await apiFetch<{ ok: true }>("/leaders/refresh", { method: "POST" });
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to refresh leaders");
+    } finally {
+      setRefreshing(false);
+      setLoading(false);
+    }
+  }
 
   const leaders = data?.leaders ?? [];
   const sorted = [...leaders].sort((a, b) => {
@@ -60,8 +75,8 @@ export default function LeadersPage() {
     <div className="stack">
       <div className="page-header">
         <h1>Leaders</h1>
-        <button className="button secondary" onClick={() => void load()} disabled={loading}>
-          <RefreshCw size={15} /> Refresh
+        <button className="button secondary" onClick={() => void refreshLeaders()} disabled={loading || refreshing}>
+          <RefreshCw size={15} /> {refreshing ? "Refreshing" : "Refresh"}
         </button>
       </div>
 

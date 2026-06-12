@@ -125,6 +125,18 @@ tbody tr:hover { background: rgba(56,189,248,0.06); }
 td a { color: var(--text); text-decoration: none; }
 td a:hover { color: var(--accent); }
 
+.token-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  color: var(--text);
+  text-decoration: none;
+}
+.token-link:hover .token-name { color: var(--accent); }
+.token-name { font-weight: 800; }
+.token-address { font-size: 0.72rem; }
+
 /* Pill */
 .pill {
   display: inline-flex; align-items: center; min-height: 24px;

@@ -1,14 +1,15 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { TokenLink } from "@/components/TokenLink";
 import { apiFetch, streamUrl, formatUsd, shortAddr, timeAgo } from "@/lib/api";
 
 type SignalItem = {
   type: "trade-signal";
   data: {
     id: string; chain: string; walletId: string; txHash: string;
-    source: string; side: string; tokenIn: { address: string; symbol: string };
-    tokenOut: { address: string; symbol: string }; venue: string; observedAt: number;
+    source: string; side: string; tokenIn: { address: string; symbol: string; name?: string };
+    tokenOut: { address: string; symbol: string; name?: string }; venue: string; observedAt: number;
     amountIn: string; amountOut: string;
   };
 };
@@ -17,7 +18,7 @@ type FillItem = {
   type: "paper-fill";
   data: {
     id: string; signalId: string; decidedAt: number; decision: string; skipReason?: string;
-    side: string; token: { address: string; symbol: string }; qty: number;
+    side: string; token: { chain?: string; address: string; symbol: string; name?: string }; qty: number;
     priceUsd: number; notionalUsd: number; feeUsd: number; slippageBps: number;
     latencyMs: number; provisional: boolean; voided: boolean;
   };
@@ -27,14 +28,14 @@ type FeedEvent = SignalItem | FillItem | { type: "ping" };
 
 type HistoricalSignal = {
   id: string; chain: string; walletId: string; txHash: string;
-  source: string; side: string; tokenIn: { address: string; symbol: string };
-  tokenOut: { address: string; symbol: string }; venue: string; observedAt: number;
+  source: string; side: string; tokenIn: { address: string; symbol: string; name?: string };
+  tokenOut: { address: string; symbol: string; name?: string }; venue: string; observedAt: number;
   amountIn: string; amountOut: string;
 };
 
 type HistoricalFill = {
   id: string; signalId: string; decidedAt: number; decision: string; skipReason?: string;
-  side: string; token: { address: string; symbol: string }; qty: number;
+  side: string; token: { chain?: string; address: string; symbol: string; name?: string }; qty: number;
   priceUsd: number; notionalUsd: number; feeUsd: number; slippageBps: number;
   latencyMs: number; provisional: boolean; voided: boolean;
 };
@@ -141,7 +142,7 @@ export default function FeedPage() {
               {entry.kind === "signal" ? (
                 <div>
                   <span style={{ fontWeight: 700 }}>
-                    {shortAddr(entry.data.tokenIn.address)} → {shortAddr(entry.data.tokenOut.address)}
+                    <TokenLink chain={entry.data.chain} token={entry.data.tokenIn} /> {"->"} <TokenLink chain={entry.data.chain} token={entry.data.tokenOut} />
                   </span>
                   <div className="subtle mono" style={{ fontSize: "0.72rem", marginTop: 2 }}>
                     tx: {shortAddr(entry.data.txHash)}
@@ -150,7 +151,7 @@ export default function FeedPage() {
               ) : (
                 <div>
                   <span style={{ fontWeight: 700 }}>
-                    {shortAddr(entry.data.token.address)} · {entry.data.qty.toFixed(4)} @ {formatUsd(entry.data.priceUsd)}
+                    <TokenLink chain={entry.data.token.chain ?? ""} token={entry.data.token} /> · {entry.data.qty.toFixed(4)} @ {formatUsd(entry.data.priceUsd)}
                   </span>
                   <div className="subtle" style={{ fontSize: "0.78rem", marginTop: 2 }}>
                     {formatUsd(entry.data.notionalUsd)} notional · {entry.data.slippageBps} bps · {entry.data.latencyMs}ms

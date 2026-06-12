@@ -1,7 +1,8 @@
 import { eq, and, isNull } from "drizzle-orm";
 import type { Db } from "../db.js";
 import { positions } from "../schema.js";
-import type { ChainId } from "@tradebot/core";
+import type { ChainId, TokenRef } from "@tradebot/core";
+import { getToken } from "./tokens.js";
 
 export type PositionRow = {
   id: string;
@@ -13,6 +14,7 @@ export type PositionRow = {
   closedAt: Date | null;
   realizedPnlUsd: number;
   sourceWalletId: string | null;
+  token?: TokenRef;
 };
 
 export async function upsertPosition(db: Db, pos: Omit<PositionRow, "id" | "openedAt" | "closedAt">): Promise<void> {
@@ -74,7 +76,7 @@ export async function getPosition(
 
 export async function getOpenPositions(db: Db): Promise<PositionRow[]> {
   const rows = await db.select().from(positions).where(isNull(positions.closedAt));
-  return rows.map(rowToPosition);
+  return Promise.all(rows.map((row) => hydratePosition(db, rowToPosition(row))));
 }
 
 export async function closePosition(db: Db, id: string, realizedPnlUsd: number): Promise<void> {
@@ -119,5 +121,20 @@ function rowToPosition(row: typeof positions.$inferSelect): PositionRow {
     closedAt: row.closedAt ?? null,
     realizedPnlUsd: Number(row.realizedPnlUsd),
     sourceWalletId: row.sourceWalletId ?? null,
+  };
+}
+
+async function hydratePosition(db: Db, position: PositionRow): Promise<PositionRow> {
+  const row = await getToken(db, position.chain, position.tokenAddress);
+  if (!row) return position;
+  return {
+    ...position,
+    token: {
+      chain: row.chain,
+      address: row.address,
+      symbol: row.symbol,
+      decimals: row.decimals,
+      ...(row.name ? { name: row.name } : {}),
+    },
   };
 }

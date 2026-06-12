@@ -2,7 +2,8 @@
 
 import { useEffect, useRef, useState } from "react";
 import { RefreshCw } from "lucide-react";
-import { apiFetch, formatUsd, shortAddr, timeAgo } from "@/lib/api";
+import { TokenLink } from "@/components/TokenLink";
+import { apiFetch, formatUsd, timeAgo } from "@/lib/api";
 
 type PositionRow = {
   id: string;
@@ -15,6 +16,7 @@ type PositionRow = {
   realizedPnlUsd: number;
   sourceWalletId: string | null;
   currentPriceUsd: number | null;
+  token?: { chain?: string; address: string; symbol?: string; name?: string };
 };
 
 type SnapshotRow = {
@@ -180,7 +182,12 @@ export default function PortfolioPage() {
                   const unrealized = p.currentPriceUsd !== null ? (p.currentPriceUsd - p.avgCostUsd) * p.qty : null;
                   return (
                     <tr key={p.id}>
-                      <td><span className="mono">{shortAddr(p.tokenAddress)}</span></td>
+                      <td>
+                        <TokenLink
+                          chain={p.chain}
+                          token={p.token ?? { chain: p.chain, address: p.tokenAddress }}
+                        />
+                      </td>
                       <td><span className="pill">{p.chain}</span></td>
                       <td>{p.qty.toFixed(4)}</td>
                       <td>{formatUsd(p.avgCostUsd)}</td>

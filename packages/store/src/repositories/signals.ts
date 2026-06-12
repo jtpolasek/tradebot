@@ -1,7 +1,8 @@
 import { eq, and, gte, desc, or, isNull, inArray } from "drizzle-orm";
 import type { Db } from "../db.js";
 import { tradeSignals } from "../schema.js";
-import type { TradeSignal, ChainId } from "@tradebot/core";
+import type { TradeSignal, TokenRef, ChainId } from "@tradebot/core";
+import { getToken } from "./tokens.js";
 
 export type CandidateReviewStatus = NonNullable<TradeSignal["reviewStatus"]>;
 const openCandidateStatuses: CandidateReviewStatus[] = ["pending", "copy-requested", "copying", "copy-failed"];
@@ -90,7 +91,7 @@ export async function getSignalById(db: Db, id: string): Promise<TradeSignal | n
   const rows = await db.select().from(tradeSignals).where(eq(tradeSignals.id, id)).limit(1);
   const row = rows[0];
   if (!row) return null;
-  return rowToSignal(row);
+  return hydrateSignal(db, rowToSignal(row));
 }
 
 export async function getSignalsByWallet(
@@ -103,7 +104,7 @@ export async function getSignalsByWallet(
   if (since !== null) conditions.push(gte(tradeSignals.observedAt, since));
   if (opts.decodedOnly) conditions.push(eq(tradeSignals.decodeStatus, "decoded"));
   const rows = await db.select().from(tradeSignals).where(and(...conditions));
-  return rows.map(rowToSignal);
+  return hydrateSignals(db, rows.map(rowToSignal));
 }
 
 export async function getRecentSignals(db: Db, since: Date, limit: number): Promise<TradeSignal[]> {
@@ -113,7 +114,7 @@ export async function getRecentSignals(db: Db, since: Date, limit: number): Prom
     .where(gte(tradeSignals.observedAt, since))
     .orderBy(desc(tradeSignals.observedAt))
     .limit(limit);
-  return rows.map(rowToSignal);
+  return hydrateSignals(db, rows.map(rowToSignal));
 }
 
 export async function getCandidateSignals(db: Db, limit: number): Promise<TradeSignal[]> {
@@ -126,7 +127,7 @@ export async function getCandidateSignals(db: Db, limit: number): Promise<TradeS
     ))
     .orderBy(desc(tradeSignals.observedAt))
     .limit(limit);
-  return rows.map(rowToSignal);
+  return hydrateSignals(db, rows.map(rowToSignal));
 }
 
 export async function getCopyRequestedCandidates(db: Db, limit: number): Promise<TradeSignal[]> {
@@ -139,7 +140,7 @@ export async function getCopyRequestedCandidates(db: Db, limit: number): Promise
     ))
     .orderBy(tradeSignals.observedAt)
     .limit(limit);
-  return rows.map(rowToSignal);
+  return hydrateSignals(db, rows.map(rowToSignal));
 }
 
 export async function setCandidateReviewStatus(
@@ -153,7 +154,31 @@ export async function setCandidateReviewStatus(
     .where(and(eq(tradeSignals.id, id), eq(tradeSignals.decodeStatus, "candidate")))
     .returning();
   const row = rows[0];
-  return row ? rowToSignal(row) : null;
+  return row ? hydrateSignal(db, rowToSignal(row)) : null;
+}
+
+async function hydrateSignals(db: Db, signals: TradeSignal[]): Promise<TradeSignal[]> {
+  return Promise.all(signals.map((signal) => hydrateSignal(db, signal)));
+}
+
+async function hydrateSignal(db: Db, signal: TradeSignal): Promise<TradeSignal> {
+  const [tokenIn, tokenOut] = await Promise.all([
+    hydrateToken(db, signal.tokenIn),
+    hydrateToken(db, signal.tokenOut),
+  ]);
+  return { ...signal, tokenIn, tokenOut };
+}
+
+async function hydrateToken(db: Db, token: TokenRef): Promise<TokenRef> {
+  if (!token.address) return token;
+  const row = await getToken(db, token.chain, token.address);
+  if (!row) return token;
+  return {
+    ...token,
+    symbol: row.symbol || token.symbol,
+    decimals: row.decimals,
+    ...(row.name ? { name: row.name } : {}),
+  };
 }
 
 function rowToSignal(row: typeof tradeSignals.$inferSelect): TradeSignal {

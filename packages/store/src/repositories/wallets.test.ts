@@ -11,11 +11,13 @@ import { getLastBlock, upsertLastBlock } from "./chainState.js";
 import { closeDb, getDb } from "../db.js";
 import {
   insertSignal,
+  getRecentSignals,
   getCandidateSignals,
   getCopyRequestedCandidates,
   setCandidateReviewStatus,
 } from "./signals.js";
 import { insertFill, getRecentFills } from "./paperFills.js";
+import { upsertToken } from "./tokens.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -46,6 +48,7 @@ beforeEach(async () => {
   await db.delete(schema.positions);
   await db.delete(schema.portfolioSnapshots);
   await db.delete(schema.wallets);
+  await db.delete(schema.tokens);
 });
 
 describe("wallets repository", () => {
@@ -178,6 +181,23 @@ describe("candidate review repositories", () => {
     expect(requested).toHaveLength(1);
     expect(requested[0]?.id).toBe(id);
   });
+
+  it("hydrates signal token names from stored token metadata", async () => {
+    await upsertToken(db as Parameters<typeof upsertToken>[0], {
+      chain: "eth",
+      address: "0x1111111111111111111111111111111111111111",
+      symbol: "TEST",
+      name: "Test Token",
+      decimals: 18,
+      isBlocked: false,
+    });
+    const id = await insertTestSignal();
+
+    const signals = await getRecentSignals(db as Parameters<typeof getRecentSignals>[0], new Date(Date.now() - 60_000), 10);
+    const signal = signals.find((row) => row.id === id);
+    expect(signal?.tokenOut.symbol).toBe("TEST");
+    expect(signal?.tokenOut.name).toBe("Test Token");
+  });
 });
 
 describe("paperFills repository", () => {
@@ -190,6 +210,14 @@ describe("paperFills repository", () => {
     });
 
     const observedAt = Date.now();
+    await upsertToken(db as Parameters<typeof upsertToken>[0], {
+      chain: "base",
+      address: "0x4b9834edf361f5b7a2b7ac7aed3687304ba1aba3",
+      symbol: "cbBTC",
+      name: "Coinbase Wrapped BTC",
+      decimals: 8,
+      isBlocked: false,
+    });
     await insertSignal(db as Parameters<typeof insertSignal>[0], {
       id: "11111111-1111-4111-8111-111111111111",
       chain: "base",
@@ -229,6 +257,8 @@ describe("paperFills repository", () => {
     const fills = await getRecentFills(db as Parameters<typeof getRecentFills>[0], new Date(observedAt - 1_000), 10);
     expect(fills).toHaveLength(1);
     expect(fills[0]?.token.chain).toBe("base");
+    expect(fills[0]?.token.symbol).toBe("cbBTC");
+    expect(fills[0]?.token.name).toBe("Coinbase Wrapped BTC");
     expect(fills[0]?.quoteToken.chain).toBe("base");
   });
 });

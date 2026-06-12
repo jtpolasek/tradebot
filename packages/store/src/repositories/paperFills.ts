@@ -2,6 +2,7 @@ import { eq, and, gte, desc } from "drizzle-orm";
 import type { Db } from "../db.js";
 import { paperFills, tradeSignals } from "../schema.js";
 import type { PaperFill, TokenRef, ChainId } from "@tradebot/core";
+import { getToken } from "./tokens.js";
 
 export type StoredFill = PaperFill & { voided: boolean };
 
@@ -54,7 +55,7 @@ export async function getFill(db: Db, id: string): Promise<StoredFill | null> {
     .limit(1);
   const row = rows[0];
   if (!row) return null;
-  return rowToFill(row.fill, row.chain as ChainId);
+  return hydrateFill(db, rowToFill(row.fill, row.chain as ChainId));
 }
 
 export async function getRecentFills(db: Db, since: Date, limit: number): Promise<StoredFill[]> {
@@ -68,7 +69,7 @@ export async function getRecentFills(db: Db, since: Date, limit: number): Promis
     .where(gte(paperFills.decidedAt, since))
     .orderBy(desc(paperFills.decidedAt))
     .limit(limit);
-  return rows.map((row) => rowToFill(row.fill, row.chain as ChainId));
+  return Promise.all(rows.map((row) => hydrateFill(db, rowToFill(row.fill, row.chain as ChainId))));
 }
 
 export async function getLatestFillForSignal(db: Db, signalId: string): Promise<StoredFill | null> {
@@ -84,7 +85,7 @@ export async function getLatestFillForSignal(db: Db, signalId: string): Promise<
     .limit(1);
   const row = rows[0];
   if (!row) return null;
-  return rowToFill(row.fill, row.chain as ChainId);
+  return hydrateFill(db, rowToFill(row.fill, row.chain as ChainId));
 }
 
 export type CopiedFillRow = {
@@ -149,5 +150,25 @@ function rowToFill(row: typeof paperFills.$inferSelect, chain: ChainId): StoredF
     latencyMs: row.latencyMs,
     provisional: row.provisional,
     voided: row.voided,
+  };
+}
+
+async function hydrateFill(db: Db, fill: StoredFill): Promise<StoredFill> {
+  const [token, quoteToken] = await Promise.all([
+    hydrateToken(db, fill.token),
+    hydrateToken(db, fill.quoteToken),
+  ]);
+  return { ...fill, token, quoteToken };
+}
+
+async function hydrateToken(db: Db, token: TokenRef): Promise<TokenRef> {
+  if (!token.address) return token;
+  const row = await getToken(db, token.chain, token.address);
+  if (!row) return token;
+  return {
+    ...token,
+    symbol: row.symbol || token.symbol,
+    decimals: row.decimals,
+    ...(row.name ? { name: row.name } : {}),
   };
 }

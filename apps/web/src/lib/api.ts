@@ -45,6 +45,27 @@ export function shortAddr(addr: string): string {
   return addr.slice(0, 6) + "…" + addr.slice(-4);
 }
 
+export type DisplayToken = {
+  chain?: string;
+  address: string;
+  symbol?: string;
+  name?: string;
+};
+
+export function tokenTitle(token: DisplayToken): string {
+  const symbol = token.symbol?.trim();
+  const name = token.name?.trim();
+  if (name && symbol && name.toLowerCase() !== symbol.toLowerCase()) return `${name} (${symbol})`;
+  return name || symbol || shortAddr(token.address);
+}
+
+export function explorerContractUrl(chain: string | undefined, address: string): string | null {
+  if (!/^0x[a-fA-F0-9]{40}$/.test(address)) return null;
+  if (chain === "base") return `https://basescan.org/token/${address}`;
+  if (chain === "eth") return `https://etherscan.io/token/${address}`;
+  return null;
+}
+
 export function timeAgo(ts: string | number): string {
   const ms = typeof ts === "number" ? ts : new Date(ts).getTime();
   const diff = Date.now() - ms;

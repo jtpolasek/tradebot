@@ -64,6 +64,7 @@ export interface TokenRef {
   chain: ChainId;
   address: string;
   symbol: string;
+  name?: string;
   decimals: number;
 }
 

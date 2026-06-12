@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { TokenLink } from "@/components/TokenLink";
 import { apiFetch, shortAddr, timeAgo } from "@/lib/api";
 
 type Candidate = {
@@ -10,8 +11,8 @@ type Candidate = {
   txHash: string;
   source: string;
   side: "buy" | "sell";
-  tokenIn: { address: string; symbol: string };
-  tokenOut: { address: string; symbol: string };
+  tokenIn: { address: string; symbol: string; name?: string };
+  tokenOut: { address: string; symbol: string; name?: string };
   amountIn: string;
   amountOut: string;
   venue: string;
@@ -120,7 +121,7 @@ export default function CandidatesPage() {
                 <div className="row" style={{ alignItems: "flex-start" }}>
                   <div className="stack" style={{ gap: 4 }}>
                     <span style={{ fontWeight: 800 }}>
-                      {shortAddr(candidate.tokenIn.address)} {"->"} {shortAddr(candidate.tokenOut.address)}
+                      <TokenLink chain={candidate.chain} token={candidate.tokenIn} /> {"->"} <TokenLink chain={candidate.chain} token={candidate.tokenOut} />
                     </span>
                     <span className="subtle mono" style={{ fontSize: "0.72rem" }}>
                       tx: {shortAddr(candidate.txHash)} · leader: {shortAddr(candidate.walletId)}

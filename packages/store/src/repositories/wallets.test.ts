@@ -2,13 +2,19 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
 import { drizzle } from "drizzle-orm/postgres-js";
 import { migrate } from "drizzle-orm/postgres-js/migrator";
 import postgres from "postgres";
+import { randomUUID } from "crypto";
 import { resolve, dirname } from "path";
 import { fileURLToPath } from "url";
 import * as schema from "../schema.js";
 import { insertWallet, getActiveWallets, setWalletActive } from "./wallets.js";
 import { getLastBlock, upsertLastBlock } from "./chainState.js";
 import { closeDb, getDb } from "../db.js";
-import { insertSignal } from "./signals.js";
+import {
+  insertSignal,
+  getCandidateSignals,
+  getCopyRequestedCandidates,
+  setCandidateReviewStatus,
+} from "./signals.js";
 import { insertFill, getRecentFills } from "./paperFills.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -107,6 +113,61 @@ describe("chainState repository", () => {
     expect(await getLastBlock(db as Parameters<typeof getLastBlock>[0], "eth")).toBe(19_000_000);
     await upsertLastBlock(db as Parameters<typeof upsertLastBlock>[0], "eth", 19_000_001);
     expect(await getLastBlock(db as Parameters<typeof getLastBlock>[0], "eth")).toBe(19_000_001);
+  });
+});
+
+describe("candidate review repositories", () => {
+  async function insertTestSignal(overrides: Partial<Parameters<typeof insertSignal>[1]> = {}) {
+    const wallet = await insertWallet(db as Parameters<typeof insertWallet>[0], {
+      chain: "eth",
+      address: `0x${Math.random().toString(16).slice(2).padEnd(40, "0").slice(0, 40)}`,
+      label: "Review leader",
+      active: true,
+    });
+    const now = Date.now();
+    return insertSignal(db as Parameters<typeof insertSignal>[0], {
+      id: randomUUID(),
+      chain: "eth",
+      walletId: wallet.id,
+      txHash: `0x${randomUUID().replace(/-/g, "").padEnd(64, "0").slice(0, 64)}`,
+      source: "confirmed",
+      side: "buy",
+      tokenIn: { chain: "eth", address: "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", symbol: "USDC", decimals: 6 },
+      tokenOut: { chain: "eth", address: "0x1111111111111111111111111111111111111111", symbol: "TEST", decimals: 18 },
+      amountIn: 100_000_000n,
+      amountOut: 1_000_000_000_000_000_000n,
+      venue: "balance-delta",
+      observedAt: now,
+      confirmedAt: now,
+      blockNumber: 1,
+      decodeStatus: "candidate",
+      confidence: 0.52,
+      reason: "review before copying",
+      ...overrides,
+    });
+  }
+
+  it("defaults candidates to pending and lists only open review statuses", async () => {
+    const pendingId = await insertTestSignal();
+    const dismissedId = await insertTestSignal({ tokenOut: { chain: "eth", address: "0x2222222222222222222222222222222222222222", symbol: "DONE", decimals: 18 } });
+    await insertTestSignal({ decodeStatus: "decoded" });
+
+    await setCandidateReviewStatus(db as Parameters<typeof setCandidateReviewStatus>[0], dismissedId, "dismissed");
+
+    const candidates = await getCandidateSignals(db as Parameters<typeof getCandidateSignals>[0], 10);
+    expect(candidates.map((signal) => signal.id)).toContain(pendingId);
+    expect(candidates.map((signal) => signal.id)).not.toContain(dismissedId);
+    expect(candidates.find((signal) => signal.id === pendingId)?.reviewStatus).toBe("pending");
+  });
+
+  it("moves candidates into the copy-requested queue", async () => {
+    const id = await insertTestSignal();
+    const updated = await setCandidateReviewStatus(db as Parameters<typeof setCandidateReviewStatus>[0], id, "copy-requested");
+    expect(updated?.reviewStatus).toBe("copy-requested");
+
+    const requested = await getCopyRequestedCandidates(db as Parameters<typeof getCopyRequestedCandidates>[0], 10);
+    expect(requested).toHaveLength(1);
+    expect(requested[0]?.id).toBe(id);
   });
 });
 

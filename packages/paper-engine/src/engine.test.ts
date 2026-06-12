@@ -14,6 +14,8 @@ import {
   insertPriceMark,
   insertSnapshot,
   latestSnapshot,
+  insertSignal,
+  getSignalById,
 } from "@tradebot/store";
 import { PaperEngine } from "./engine.js";
 
@@ -473,6 +475,46 @@ describe("PaperEngine integration", () => {
     const fills = await getRecentFills(db, new Date(Date.now() - 60_000), 5);
     expect(fills[0]?.decision).toBe("skipped");
     expect(fills[0]?.skipReason).toBe("stale-signal");
+  });
+
+  it("manual candidate copy executes through the normal fill path without changing the signal to decoded", async () => {
+    const bus = new EventBus();
+    await db.execute(sql`TRUNCATE paper_fills CASCADE`);
+    await db.execute(sql`TRUNCATE positions CASCADE`);
+    await db.execute(sql`TRUNCATE portfolio_snapshots CASCADE`);
+    await db.execute(sql`TRUNCATE trade_signals CASCADE`);
+    await upsertToken(db, {
+      chain: TOKEN_A.chain,
+      address: TOKEN_A.address,
+      symbol: TOKEN_A.symbol,
+      name: TOKEN_A.symbol,
+      decimals: TOKEN_A.decimals,
+      isBlocked: false,
+    });
+
+    const candidate = makeSignal({
+      walletId,
+      decodeStatus: "candidate",
+      confidence: 0.52,
+      reason: "review before copying",
+      reviewStatus: "copy-requested",
+      blockTimestamp: Date.now() - 4 * 60 * 60_000,
+    });
+    await insertSignal(db, candidate);
+
+    const engine = new PaperEngine(db, bus, cfg() as never, mockRpcClient as never);
+    await engine.start();
+    await engine.executeManualCandidateCopy(candidate);
+    engine.stop();
+
+    const fills = await getRecentFills(db, new Date(Date.now() - 60_000), 5);
+    expect(fills[0]?.signalId).toBe(candidate.id);
+    expect(fills[0]?.decision).toBe("copied");
+    expect(fills[0]?.skipReason).toBeUndefined();
+
+    const stored = await getSignalById(db, candidate.id);
+    expect(stored?.decodeStatus).toBe("candidate");
+    expect(stored?.reviewStatus).toBe("copy-requested");
   });
 
   it("stores fills against the persisted signal id when duplicate tx signals arrive", async () => {

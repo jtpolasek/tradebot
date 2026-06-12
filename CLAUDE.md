@@ -23,3 +23,4 @@ Paper-trading copy-trader (ETH + Base). **`PLAN.md` is the single source of trut
 - Phase 5: **complete** (2026-06-11). 193 non-Docker tests passing, committed 747a828.
 - Phase 6: **complete** (2026-06-11). 195 tests passing, committed 8a8d50d.
 - Code review round 2: **complete** (2026-06-12). All findings 4.1–4.10 fixed on `fix/code-review-2026-06-11`. `pnpm build && pnpm test` green.
+- Hybrid GMGN plan (2026-06-12): 6-part feature plan agreed — full plan in memory file `hybrid-gmgn-plan.md`, terminology in `CONTEXT.md`, key decision in `docs/adr/0001-persist-candidates-outside-scoring.md`. **Part 1 (candidate persistence) in progress**: add `decode_status`/`confidence`/`reason` to `trade_signals`, stop dropping ambiguous decodes, engine acts on `decoded` only, scorer counts `decoded` only.

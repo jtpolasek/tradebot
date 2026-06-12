@@ -35,7 +35,7 @@ Review of the Sonnet-built implementation against `PLAN.md`. Status in `CLAUDE.m
 - [x] **2.6 Exit worker** fixed: runner now starts a settings-driven exit job and executes TP/SL sells through `PaperEngine.executeExitSell`.
 - [x] **2.7 Settings overrides** fixed: engine refreshes runtime sizing/liquidity settings from DB and honors adaptive `min_liquidity_usd`.
 - [x] **2.8 Per-leader tier mutes** fixed: brain provider stores computed muted liquidity tiers and engine skips matching leader/tier signals.
-- [ ] **2.9 Adaptive liquidity notch inert** — scorer feeds `liquidityUsd: null` and `currentPriceUsd = entryPriceUsd`.
+- [x] **2.9 Adaptive liquidity notch inert** fixed: scorer adaptation now uses latest price marks for current price and live per-chain pricing liquidity lookups when runner RPC clients are available; copied-fill rows include chain for mark/liquidity resolution.
 - [ ] **2.10 0x `getQuotePrice`** as primary fill-price source — ported, unused by engine.
 - [ ] **2.11 `verifyLedger` script vacuous** — builds all-zero deltas; can't detect mismatches.
 - [ ] **2.12 Aerodrome pricing on Base** absent; only Uni V3 factory probed; `aerodrome` venue never assigned.

@@ -15,6 +15,7 @@
   "dependencies": {
     "@tradebot/core": "workspace:*",
     "@tradebot/paper-engine": "workspace:*",
+    "@tradebot/pricing": "workspace:*",
     "@tradebot/store": "workspace:*"
   },
   "devDependencies": {

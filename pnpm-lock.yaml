@@ -146,6 +146,9 @@ importers:
       '@tradebot/paper-engine':
         specifier: workspace:*
         version: link:../paper-engine
+      '@tradebot/pricing':
+        specifier: workspace:*
+        version: link:../pricing
       '@tradebot/store':
         specifier: workspace:*
         version: link:../store

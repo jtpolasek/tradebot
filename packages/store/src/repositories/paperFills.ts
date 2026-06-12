@@ -73,6 +73,7 @@ export async function getRecentFills(db: Db, since: Date, limit: number): Promis
 
 export type CopiedFillRow = {
   id: string;
+  chain: ChainId;
   side: "buy" | "sell";
   tokenAddress: string;
   walletId: string | null;
@@ -86,6 +87,7 @@ export async function getCopiedFills(db: Db): Promise<CopiedFillRow[]> {
   const rows = await db
     .select({
       id: paperFills.id,
+      chain: tradeSignals.chain,
       side: paperFills.side,
       tokenAddress: paperFills.tokenAddress,
       walletId: tradeSignals.walletId,
@@ -100,6 +102,7 @@ export async function getCopiedFills(db: Db): Promise<CopiedFillRow[]> {
 
   return rows.map((r) => ({
     id: r.id,
+    chain: r.chain as ChainId,
     side: r.side as "buy" | "sell",
     tokenAddress: r.tokenAddress,
     walletId: r.walletId,

@@ -80,7 +80,7 @@ async function main() {
   const marksJob = startMarksJob(db, rpcClients);
 
   const weightProvider = new BrainWeightProvider();
-  const scorerJob = startScorerJob(db, weightProvider);
+  const scorerJob = startScorerJob(db, weightProvider, rpcClients);
 
   const engine = new PaperEngine(db, bus, config, rpcClients, weightProvider);
   await engine.start();

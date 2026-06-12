@@ -13,13 +13,20 @@ import {
   getCopiedFills,
   insertAdaptationLog,
 } from "@tradebot/store";
+import { getLiquidityUsd } from "@tradebot/pricing";
 import type { LiquidityTier, WeightProvider } from "@tradebot/paper-engine";
 import { fifoRoundTrips, computeScoringResult } from "./scoring.js";
 import { computeZScore, computeScore, scoreToWeight, shouldAutoMute } from "./weights.js";
 import { runLiquidityNotch, computePerLeaderMutes } from "./adaptation.js";
+import type { FillRecord } from "./adaptation.js";
 import type { TradeRow, ScoreWindow } from "./scoring.js";
 
 const logger = createLogger("brain");
+
+// Loose structural RpcClient interface — avoids viem type-identity errors across packages.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type RpcClient = { readContract: (args: any) => Promise<any> };
+type RpcClients = Record<ChainId, RpcClient>;
 
 // Quote asset addresses that price to 1 USD
 const STABLE_ADDRESSES = new Set([
@@ -134,7 +141,7 @@ function windowToSince(window: ScoreWindow): Date | null {
   return new Date(Date.now() - ms);
 }
 
-export async function runScorerJob(db: Db, weightProvider: BrainWeightProvider): Promise<void> {
+export async function runScorerJob(db: Db, weightProvider: BrainWeightProvider, rpcClients?: RpcClients): Promise<void> {
   logger.info("Starting scorer job");
 
   const wallets = await getActiveWallets(db);
@@ -206,30 +213,35 @@ export async function runScorerJob(db: Db, weightProvider: BrainWeightProvider):
   weightProvider.refresh(weightMap);
 
   // Run weekly adaptation (always runs as part of scorer — adaptation guards itself with fill count)
-  const mutedTiers = await runAdaptationJob(db);
+  const mutedTiers = await runAdaptationJob(db, rpcClients);
   weightProvider.refreshMutedTiers(mutedTiers);
 
   logger.info({ wallets: wallets.length }, "Scorer job complete");
 }
 
-async function runAdaptationJob(db: Db): Promise<Map<string, Set<LiquidityTier>>> {
+async function runAdaptationJob(db: Db, rpcClients?: RpcClients): Promise<Map<string, Set<LiquidityTier>>> {
   try {
     const fills = await getCopiedFills(db);
     const minLiqRaw = await getSetting(db, "min_liquidity_usd");
     const currentMin = typeof minLiqRaw === "number" ? minLiqRaw : 150_000;
 
-    // Build FillRecord array (no live liquidity lookups — use 0 for now; adaptation fires on large sample)
-    const fillRecords = fills.map((f) => ({
-      id: f.id,
-      walletId: f.walletId,
-      tokenAddress: f.tokenAddress,
-      side: f.side,
-      qty: f.qty,
-      entryPriceUsd: f.priceUsd,
-      currentPriceUsd: f.priceUsd, // no mark update for adaptation pass
-      notionalUsd: f.notionalUsd,
-      liquidityUsd: null as number | null,
-    }));
+    const liquidityCache = new Map<string, number | null>();
+    const fillRecords: FillRecord[] = [];
+    for (const f of fills) {
+      const mark = await latestMark(db, f.chain, f.tokenAddress);
+      const liquidityUsd = await getAdaptationLiquidityUsd(f.chain, f.tokenAddress, rpcClients, liquidityCache);
+      fillRecords.push({
+        id: f.id,
+        walletId: f.walletId,
+        tokenAddress: f.tokenAddress,
+        side: f.side,
+        qty: f.qty,
+        entryPriceUsd: f.priceUsd,
+        currentPriceUsd: mark?.priceUsd ?? f.priceUsd,
+        notionalUsd: f.notionalUsd,
+        liquidityUsd,
+      });
+    }
 
     await runLiquidityNotch({
       getBuyFills: () => fillRecords.filter((f) => f.side === "buy"),
@@ -254,17 +266,38 @@ async function runAdaptationJob(db: Db): Promise<Map<string, Set<LiquidityTier>>
   }
 }
 
+async function getAdaptationLiquidityUsd(
+  chain: ChainId,
+  tokenAddress: string,
+  rpcClients: RpcClients | undefined,
+  cache: Map<string, number | null>
+): Promise<number | null> {
+  if (!rpcClients) return null;
+  const key = `${chain}:${tokenAddress.toLowerCase()}`;
+  if (cache.has(key)) return cache.get(key) ?? null;
+  try {
+    const value = await getLiquidityUsd(chain, tokenAddress, rpcClients[chain]);
+    cache.set(key, value);
+    return value;
+  } catch (err) {
+    logger.warn({ err, chain, tokenAddress }, "adaptation liquidity lookup failed");
+    cache.set(key, null);
+    return null;
+  }
+}
+
 export function startScorerJob(
   db: Db,
-  weightProvider: BrainWeightProvider
+  weightProvider: BrainWeightProvider,
+  rpcClients?: RpcClients
 ): { stop: () => void } {
   // Run immediately, then every hour
-  void runScorerJob(db, weightProvider).catch((err) =>
+  void runScorerJob(db, weightProvider, rpcClients).catch((err) =>
     logger.error({ err }, "scorer job error")
   );
 
   const timer = setInterval(
-    () => void runScorerJob(db, weightProvider).catch((err) =>
+    () => void runScorerJob(db, weightProvider, rpcClients).catch((err) =>
       logger.error({ err }, "scorer job error")
     ),
     60 * 60_000

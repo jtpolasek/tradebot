@@ -1,6 +1,7 @@
 import Fastify from "fastify";
 import wsPlugin from "@fastify/websocket";
 import { z } from "zod";
+import { normalizeAddressInput } from "@tradebot/core";
 import {
   getDb,
   getAllWallets,
@@ -65,9 +66,16 @@ const PostWalletBody = z.object({
 app.post("/wallets", async (req, reply) => {
   const body = PostWalletBody.safeParse(req.body);
   if (!body.success) return reply.code(400).send({ error: body.error.message });
+  let address: string;
+  try {
+    address = normalizeAddressInput(body.data.address);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Enter a valid Ethereum address.";
+    return reply.code(400).send({ error: message });
+  }
   const wallet = await insertWallet(db, {
     chain: body.data.chain,
-    address: body.data.address.toLowerCase(),
+    address,
     label: body.data.label,
     active: true,
   });

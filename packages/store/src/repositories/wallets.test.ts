@@ -70,6 +70,15 @@ describe("wallets repository", () => {
     expect(inserted.chain).toBe("eth");
   });
 
+  it("rejects invalid wallet addresses before they can reach ingest", async () => {
+    await expect(insertWallet(db as Parameters<typeof insertWallet>[0], {
+      chain: "eth",
+      address: "vein",
+      label: "Bad input",
+      active: true,
+    })).rejects.toThrow("Enter a valid Ethereum address.");
+  });
+
   it("getActiveWallets filters by chain", async () => {
     await insertWallet(db as Parameters<typeof insertWallet>[0], {
       chain: "eth",

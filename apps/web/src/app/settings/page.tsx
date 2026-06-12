@@ -6,6 +6,7 @@ import { apiFetch, shortAddr, timeAgo } from "@/lib/api";
 
 type Wallet = { id: string; chain: string; address: string; label: string; active: boolean; addedAt: string };
 type AdaptationEntry = { id: string; ts: string; rule: string; oldValue: string; newValue: string; evidenceJson?: unknown };
+const ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/;
 
 const SETTING_DESCRIPTIONS: Record<string, { description: string; example: string }> = {
   BASE_TRADE_PCT:              { description: "Fraction of portfolio per copy trade.", example: "0.01 = 1% ($1,000 on a $100k portfolio)" },
@@ -53,10 +54,16 @@ export default function SettingsPage() {
     e.preventDefault();
     setBusy("wallet");
     setError(""); setMessage("");
+    const address = walletForm.address.trim();
+    if (!ADDRESS_RE.test(address)) {
+      setBusy("");
+      setError("Enter a valid Ethereum/Base address starting with 0x.");
+      return;
+    }
     try {
       await apiFetch("/wallets", {
         method: "POST",
-        body: JSON.stringify(walletForm),
+        body: JSON.stringify({ ...walletForm, address, label: walletForm.label.trim() }),
       });
       setWalletForm({ chain: "eth", address: "", label: "" });
       setMessage("Wallet added.");
@@ -141,7 +148,16 @@ export default function SettingsPage() {
           </div>
           <div className="field full">
             <label>Address</label>
-            <input value={walletForm.address} onChange={(e) => setWalletForm({ ...walletForm, address: e.target.value })} placeholder="0x..." required />
+            <input
+              value={walletForm.address}
+              onChange={(e) => setWalletForm({ ...walletForm, address: e.target.value.trim() })}
+              placeholder="0x..."
+              autoComplete="off"
+              spellCheck={false}
+              pattern="^0x[a-fA-F0-9]{40}$"
+              title="Use a 42-character EVM address, starting with 0x."
+              required
+            />
           </div>
           <div style={{ gridColumn: "1 / -1" }}>
             <button className="button" type="submit" disabled={busy === "wallet"}>

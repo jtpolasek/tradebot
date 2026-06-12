@@ -95,7 +95,7 @@ beforeAll(async () => {
   await db.execute(sql`TRUNCATE tokens CASCADE`);
   await db.execute(sql`TRUNCATE wallets CASCADE`);
 
-  const wallet = await insertWallet(db, { chain: "eth", address: "0xleader0000000000000000000000000000000001", label: "Leader", active: true });
+  const wallet = await insertWallet(db, { chain: "eth", address: "0x1eade00000000000000000000000000000000001", label: "Leader", active: true });
   walletId = wallet.id;
 });
 

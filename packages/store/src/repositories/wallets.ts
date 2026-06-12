@@ -2,6 +2,7 @@ import { eq, and } from "drizzle-orm";
 import type { Db } from "../db.js";
 import { wallets } from "../schema.js";
 import type { TrackedWallet, ChainId } from "@tradebot/core";
+import { normalizeAddress } from "@tradebot/core";
 
 export async function insertWallet(
   db: Db,
@@ -11,7 +12,7 @@ export async function insertWallet(
     .insert(wallets)
     .values({
       chain: wallet.chain,
-      address: wallet.address.toLowerCase(),
+      address: normalizeAddress(wallet.address),
       label: wallet.label,
       active: wallet.active,
     })
@@ -25,7 +26,7 @@ export async function getActiveWallets(db: Db, chain?: ChainId): Promise<Tracked
   const rows = chain
     ? await db.select().from(wallets).where(and(eq(wallets.active, true), eq(wallets.chain, chain)))
     : await db.select().from(wallets).where(eq(wallets.active, true));
-  return rows.map(rowToWallet);
+  return rows.map(rowToWallet).filter((wallet) => isValidAddress(wallet.address));
 }
 
 export async function getWalletById(db: Db, id: string): Promise<TrackedWallet | null> {
@@ -51,4 +52,8 @@ function rowToWallet(row: typeof wallets.$inferSelect): TrackedWallet {
     active: row.active,
     addedAt: row.addedAt,
   };
+}
+
+function isValidAddress(address: string): boolean {
+  return /^0x[a-fA-F0-9]{40}$/.test(address);
 }

@@ -527,6 +527,55 @@ describe("PaperEngine integration", () => {
     expect(fill?.skipReason).toBe("no-executable-route");
   });
 
+  it("routes exit-rule sells through 0x when configured", async () => {
+    const bus = new EventBus();
+    await db.execute(sql`TRUNCATE paper_fills CASCADE`);
+    await db.execute(sql`TRUNCATE positions CASCADE`);
+    await db.execute(sql`TRUNCATE portfolio_snapshots CASCADE`);
+    await db.execute(sql`TRUNCATE trade_signals CASCADE`);
+
+    await upsertToken(db, { chain: "eth", address: TOKEN_A.address, symbol: "TKNA", name: "Token A", decimals: 18, isBlocked: false });
+    await upsertPosition(db, { chain: "eth", tokenAddress: TOKEN_A.address, qty: 10, avgCostUsd: 8, realizedPnlUsd: 0, sourceWalletId: walletId });
+
+    vi.mocked(getUsdPrice).mockImplementation(async (_chain, addr) => (addr === USDC.address ? 1 : 10));
+    // 0x fills 10 TOKEN_A → 90 USDC, i.e. a $9 unit price (vs. ~$9.96 spot-minus-slippage).
+    vi.mocked(getZeroxPrice).mockResolvedValue({
+      provider: "0x",
+      endpoint: "/swap/allowance-holder/price",
+      chainId: 1,
+      sellToken: TOKEN_A.address,
+      buyToken: USDC.address,
+      sellAmount: "10000000000000000000",
+      buyAmount: "90000000",
+      gasUnits: 0,
+      gasPriceWei: 0,
+      dexFeeUsd: 0.5,
+      unpricedFees: [],
+      warnings: [],
+      rawResponse: {},
+    });
+
+    const engine = new PaperEngine(db, bus, cfg({ ZEROX_API_KEY: "test" }) as never, mockRpcClient as never);
+    await engine.start();
+    await engine.executeExitSell(
+      { chain: "eth", tokenAddress: TOKEN_A.address, qty: 10, avgCostUsd: 8, sourceWalletId: walletId },
+      "tp",
+      10,
+    );
+    engine.stop();
+
+    const fill = (await getRecentFills(db, new Date(Date.now() - 60_000), 5))[0];
+    expect(fill?.decision).toBe("copied");
+    expect(fill?.side).toBe("sell");
+    expect(fill?.priceUsd).toBeCloseTo(9); // 0x price, not spot-minus-slippage
+    expect(fill?.feeUsd).toBeCloseTo(4.5); // gas 4 + 0x dexFee 0.5
+    expect(getZeroxPrice).toHaveBeenCalledWith(expect.objectContaining({
+      sellToken: TOKEN_A.address,
+      buyToken: USDC.address,
+      sellAmount: "10000000000000000000",
+    }));
+  });
+
   it("decide returns skip for zero-weight leader", async () => {
     const zeroWeights = { getWeight: () => 0 };
     const bus = new EventBus();

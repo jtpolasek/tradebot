@@ -26,6 +26,19 @@ Buy decisions live mainly in `packages/paper-engine/src/engine.ts`.
 - Price must resolve before a copied fill is recorded.
 - Optional 0x pricing is used for fill price when available, otherwise the engine falls back to spot plus synthetic slippage.
 
+## Priority Note (2026-06-15)
+
+After review, the remaining work is reordered by value:
+
+1. **Item 6 (unify sell fill modeling) is the next priority.** It is framed as cleanup but is
+   really a correctness gap: exit-rule sells use a separate pricing/slippage path that never
+   calls 0x, so exit PnL is modeled differently from copied-sell PnL. For a bot whose only
+   output is PnL accuracy, two fill models is a latent bug, not just duplication.
+2. **Item 5 (deeper-pool selection) drops below item 6.** It is a precision nicety by
+   comparison, and it carries an internal inconsistency to resolve first (see its note).
+3. **New item 7 (Chainlink staleness gate)** is added — the missing companion to the V3 TWAP
+   gate.
+
 ## Recommended Implementation Order
 
 ### 1. Return Price Provenance
@@ -190,10 +203,15 @@ Implemented notes:
 - Added `LiquidityResult` metadata and engine logging.
 - Deeper-pool selection across all quote assets/venues is still pending.
 - Liquidity remains the current `quote-balance-x2` approximation.
+- **Metric inconsistency to fix first:** `findDeepestV3Pool` picks the "deepest" pool by the
+  pool's in-range `liquidity()` value (L), but `getLiquidityUsdResult` then reports liquidity as
+  `quote-balance × 2`. Selection and reporting use two different liquidity measures, so the pool
+  chosen as "deepest" is not necessarily the one with the largest reported USD liquidity. When
+  this item is done, selection and the reported metric should agree.
 
 ### 6. Unify Sell Fill Modeling
 
-Status: pending.
+Status: complete (2026-06-15).
 
 Problem:
 Normal copied sells use optional 0x quote pricing. Exit-rule sells duplicate a separate pricing/slippage path and do not call 0x.
@@ -207,13 +225,67 @@ Acceptance:
 - Tests prove exit sells use 0x when configured.
 - Existing position close behavior remains unchanged.
 
+Implemented notes:
+
+- Extracted three shared `PaperEngine` helpers used by buys, copied sells, and exit sells:
+  `modeledSlippageBps` (DEX fee + capped impact + delay penalty), `priceSellFill`
+  (0x-quote-or-spot pricing for sells), and `applySellToState` (accounting + position
+  upsert/close).
+- `executeExitSell` now prices through `priceSellFill`, so exit fills use a usable 0x quote when
+  `ZEROX_API_KEY` is set and fall back to spot-minus-slippage otherwise — identical to copied
+  sells. It hydrates real token decimals via `getToken` first so the 0x sell amount is sized
+  correctly (was hardcoded to 18).
+- Behavior delta to note: exit sells previously applied **no** price impact when the liquidity
+  lookup returned null; they now share the buy/copied-sell model, which penalizes unknown
+  liquidity at the 500 bps impact cap. Accounting/position-close math is otherwise unchanged.
+- Added integration test "routes exit-rule sells through 0x when configured". `pnpm build` and
+  `pnpm test` green (63 paper-engine tests).
+
+### 7. Add A Chainlink Staleness Gate
+
+Status: pending.
+
+Problem:
+`getChainlinkEthUsd()` reads only `answer` from `latestRoundData` and ignores `updatedAt` /
+`answeredInRound`. If the ETH/USD feed freezes, the engine will happily auto-buy on a stale
+price. This is the missing companion to the V3/Aerodrome TWAP gate (item 4): we guard
+manipulated pool spot but not a stalled oracle.
+
+Change:
+Reject Chainlink rounds older than a configurable staleness window, and treat a stale round the
+same as a Chainlink read failure (fall through to DefiLlama, which then hits the existing
+fallback-price-source buy veto).
+
+Potential setting:
+
+```env
+MAX_CHAINLINK_STALENESS_SEC=3600
+```
+
+Acceptance:
+
+- A Chainlink round with `updatedAt` older than the window is treated as unavailable.
+- WETH pricing then falls back to DefiLlama, so DefiLlama-only auto-buys remain vetoed by item 3.
+- Tests cover a fresh round (accepted) and a stale round (rejected → fallback).
+
 ## Open Decisions
 
-- Should 0x network failure skip buys, or only explicit no-route/no-liquidity responses?
-- Should manual candidate copies bypass fallback-price-source and TWAP gates, or should reviewer approval only bypass decode/staleness/auto-copy gates?
-- Should DefiLlama be allowed for sells and exits when no pool price exists?
-- Do we want to persist price/liquidity provenance in `paper_fills`, `price_marks`, both, or only logs first?
+Resolved 2026-06-15:
 
-## Suggested First Work Item
+- **0x network failure → skip or fall back?** Keep falling back (current behavior), but ensure a
+  warning/provenance flag is emitted. Vetoing on transient errors makes the bot flaky for no
+  safety gain on paper.
+- **Manual candidate copies and the fallback/TWAP gates?** Manual copies bypass *leader-behavior*
+  gates (decode confidence, staleness, auto-copy-off) but NOT *execution-quality* gates
+  (fallback-price-source, spot-TWAP divergence). A human clicking Copy does not make a manipulated
+  pool price safe. Consistent with the ADR: manual copies execute at current price.
+- **DefiLlama for sells/exits?** Yes, allow it. Blocking a sell because no pool price exists is the
+  wrong failure mode — you always want to be able to exit. The fallback-price gate stays buy-only.
+- **Persist provenance in `paper_fills`?** Yes, via migration. Cheap, already done for
+  `price_marks`, and without it fills can't be audited for which price source backed them.
 
-Start with price provenance. It enables the later gates without changing buy behavior immediately, and it gives us better observability before making the engine stricter.
+Still open:
+
+- Eviction policy for the module-level pricing caches (`llamaCache`, `poolCache`, etc.): they
+  evict by TTL only, never by size, so they grow unbounded for a long-running bot tracking many
+  tokens. Low priority, tracked so it isn't forgotten.

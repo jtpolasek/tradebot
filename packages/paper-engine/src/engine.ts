@@ -625,13 +625,9 @@ export class PaperEngine {
       "price and liquidity selected for paper fill"
     );
 
-    // Slippage model
+    // Slippage + fee model (shared with exit sells via modeledSlippageBps).
     const gasUsd = signal.chain === "eth" ? this.cfg.GAS_USD_ETH : this.cfg.GAS_USD_BASE;
-    const delayPenaltyBps = signal.chain === "eth"
-      ? this.cfg.COPY_DELAY_PENALTY_BPS_ETH
-      : this.cfg.COPY_DELAY_PENALTY_BPS_BASE;
-    const impactBps = Math.min(500, Math.round(10_000 * decision.notionalUsd / (2 * Math.max(liquidityUsd ?? 1, 1))));
-    const slippageBps = DEX_FEE_BPS + impactBps + delayPenaltyBps;
+    const slippageBps = this.modeledSlippageBps(signal.chain, decision.notionalUsd, liquidityUsd);
     const feeUsd = gasUsd + (decision.notionalUsd * DEX_FEE_BPS) / 10_000;
 
     let fillPrice: number;
@@ -778,69 +774,25 @@ export class PaperEngine {
       const posValue = existing.qty * existing.avgCostUsd;
       const fraction = Math.min(1, decision.notionalUsd / Math.max(posValue, 1e-10));
       qty = fraction * existing.qty;
-      const quoted = await this.quoteFillPriceWithZerox({
-        side: "sell",
-        token,
-        quoteToken,
-        notionalUsd: decision.notionalUsd,
-        qty,
-      });
-      fillPrice = quoted.status === "quoted" ? quoted.priceUsd : priceUsd * (1 - slippageBps / 10_000);
-      zeroxFeeUsd = quoted.status === "quoted" ? quoted.dexFeeUsd : null;
+      const priced = await this.priceSellFill({ token, quoteToken, qty, fallbackPriceUsd: priceUsd, slippageBps });
+      fillPrice = priced.fillPrice;
+      zeroxFeeUsd = priced.dexFeeUsd;
       notionalUsd = qty * fillPrice;
+      const dexFeeUsd = zeroxFeeUsd ?? (notionalUsd * DEX_FEE_BPS) / 10_000;
       const effectiveFeeUsd = zeroxFeeUsd !== null ? gasUsd + zeroxFeeUsd : feeUsd;
-      const sellProceeds = Math.max(0, notionalUsd - effectiveFeeUsd);
 
-      const existingAcct: AccountingPosition = {
-        quantity: existing.qty,
-        averageEntryUsd: existing.avgCostUsd,
-        costBasisUsd: existing.qty * existing.avgCostUsd,
-        realizedPnlUsd: existing.realizedPnlUsd,
-        feesPaidUsd: 0,
-      };
-
-      const next = applyTradeToState({
-        portfolio: this.portfolio,
-        position: existingAcct,
-        trade: {
-          side: "sell",
-          quantity: qty,
-          notionalUsd,
-          gasUsd,
-          slippageUsd: 0,
-          dexFeeUsd: zeroxFeeUsd ?? (notionalUsd * DEX_FEE_BPS) / 10_000,
-          totalCostUsd: effectiveFeeUsd,
-          sellProceedsUsd: sellProceeds,
-        },
+      await this.applySellToState({
+        chain: signal.chain,
+        tokenAddress: token.address,
+        walletId: signal.walletId,
+        posKey: key,
+        existing,
+        qty,
+        notionalUsd,
+        gasUsd,
+        dexFeeUsd,
+        effectiveFeeUsd,
       });
-
-      this.portfolio = next.portfolio;
-      this.cashUsd = next.portfolio.cashUsd;
-
-      if (next.position.quantity < 1e-10) {
-        this.positions.delete(key);
-        // Stamp closedAt so the flat position doesn't reload as a zombie at boot.
-        await closePositionByKey(this.db, {
-          chain: signal.chain,
-          tokenAddress: token.address,
-          sourceWalletId: signal.walletId,
-          realizedPnlUsd: next.position.realizedPnlUsd,
-        });
-      } else {
-        this.positions.set(key, {
-          qty: next.position.quantity,
-          avgCostUsd: next.position.averageEntryUsd,
-          realizedPnlUsd: next.position.realizedPnlUsd,
-        });
-        await upsertPosition(this.db, {
-          chain: signal.chain,
-          tokenAddress: token.address,
-          qty: next.position.quantity,
-          avgCostUsd: next.position.averageEntryUsd,
-          realizedPnlUsd: next.position.realizedPnlUsd,
-          sourceWalletId: signal.walletId,
-        });
-      }
     }
 
     const fill: PaperFill = {
@@ -961,6 +913,109 @@ export class PaperEngine {
     return price ?? 0;
   }
 
+  /**
+   * Modeled execution slippage in bps: DEX fee + price impact (scaled by notional/liquidity, capped
+   * at 500 bps) + a fixed copy-delay penalty. Shared by buys, copied sells, and exit sells so every
+   * fill path applies the same slippage model.
+   */
+  private modeledSlippageBps(chain: ChainId, grossNotionalUsd: number, liquidityUsd: number | null): number {
+    const delayPenaltyBps = chain === "eth" ? this.cfg.COPY_DELAY_PENALTY_BPS_ETH : this.cfg.COPY_DELAY_PENALTY_BPS_BASE;
+    const impactBps = Math.min(500, Math.round(10_000 * grossNotionalUsd / (2 * Math.max(liquidityUsd ?? 1, 1))));
+    return DEX_FEE_BPS + impactBps + delayPenaltyBps;
+  }
+
+  /**
+   * Price a sell fill: prefer an executable 0x quote (when ZEROX_API_KEY is set), otherwise fall
+   * back to spot minus modeled slippage. `dexFeeUsd` is the 0x fee when quoted, else null (the
+   * caller models the DEX fee from notional). Shared by copied sells and exit-rule sells.
+   */
+  private async priceSellFill(input: {
+    token: TokenRef;
+    quoteToken: TokenRef;
+    qty: number;
+    fallbackPriceUsd: number;
+    slippageBps: number;
+  }): Promise<{ fillPrice: number; dexFeeUsd: number | null }> {
+    const quoted = await this.quoteFillPriceWithZerox({
+      side: "sell",
+      token: input.token,
+      quoteToken: input.quoteToken,
+      notionalUsd: input.qty * input.fallbackPriceUsd,
+      qty: input.qty,
+    });
+    if (quoted.status === "quoted") {
+      return { fillPrice: quoted.priceUsd, dexFeeUsd: quoted.dexFeeUsd };
+    }
+    return { fillPrice: input.fallbackPriceUsd * (1 - input.slippageBps / 10_000), dexFeeUsd: null };
+  }
+
+  /**
+   * Apply a sell to portfolio + position state and persist the position row (close when flat,
+   * otherwise upsert). Shared accounting path for copied sells and exit-rule sells.
+   */
+  private async applySellToState(input: {
+    chain: ChainId;
+    tokenAddress: string;
+    walletId: string;
+    posKey: string;
+    existing: InMemoryPosition;
+    qty: number;
+    notionalUsd: number;
+    gasUsd: number;
+    dexFeeUsd: number;
+    effectiveFeeUsd: number;
+  }): Promise<void> {
+    const sellProceeds = Math.max(0, input.notionalUsd - input.effectiveFeeUsd);
+    const next = applyTradeToState({
+      portfolio: this.portfolio,
+      position: {
+        quantity: input.existing.qty,
+        averageEntryUsd: input.existing.avgCostUsd,
+        costBasisUsd: input.existing.qty * input.existing.avgCostUsd,
+        realizedPnlUsd: input.existing.realizedPnlUsd,
+        feesPaidUsd: 0,
+      },
+      trade: {
+        side: "sell",
+        quantity: input.qty,
+        notionalUsd: input.notionalUsd,
+        gasUsd: input.gasUsd,
+        slippageUsd: 0,
+        dexFeeUsd: input.dexFeeUsd,
+        totalCostUsd: input.effectiveFeeUsd,
+        sellProceedsUsd: sellProceeds,
+      },
+    });
+
+    this.portfolio = next.portfolio;
+    this.cashUsd = next.portfolio.cashUsd;
+
+    if (next.position.quantity < 1e-10) {
+      this.positions.delete(input.posKey);
+      // Stamp closedAt so the flat position doesn't reload as a zombie at boot.
+      await closePositionByKey(this.db, {
+        chain: input.chain,
+        tokenAddress: input.tokenAddress,
+        sourceWalletId: input.walletId,
+        realizedPnlUsd: next.position.realizedPnlUsd,
+      });
+    } else {
+      this.positions.set(input.posKey, {
+        qty: next.position.quantity,
+        avgCostUsd: next.position.averageEntryUsd,
+        realizedPnlUsd: next.position.realizedPnlUsd,
+      });
+      await upsertPosition(this.db, {
+        chain: input.chain,
+        tokenAddress: input.tokenAddress,
+        qty: next.position.quantity,
+        avgCostUsd: next.position.averageEntryUsd,
+        realizedPnlUsd: next.position.realizedPnlUsd,
+        sourceWalletId: input.walletId,
+      });
+    }
+  }
+
   async executeExitSell(
     pos: { chain: string; tokenAddress: string; qty: number; avgCostUsd: number; sourceWalletId: string | null },
     trigger: "tp" | "sl" | null,
@@ -973,7 +1028,15 @@ export class PaperEngine {
     if ((pos.chain !== "eth" && pos.chain !== "base") || pos.qty <= 0 || currentPriceUsd <= 0) return;
 
     const chain = pos.chain;
-    const token: TokenRef = { chain, address: pos.tokenAddress.toLowerCase(), symbol: "", decimals: 18 };
+    // Hydrate real token decimals so the shared 0x sell path (priceSellFill) sizes the quote
+    // correctly; fall back to 18 only when the token is unknown.
+    const tokenRow = await getToken(this.db, chain, pos.tokenAddress.toLowerCase());
+    const token: TokenRef = {
+      chain,
+      address: pos.tokenAddress.toLowerCase(),
+      symbol: tokenRow?.symbol ?? "",
+      decimals: tokenRow?.decimals ?? 18,
+    };
     const quoteToken = quoteTokenFor(chain);
     const now = Date.now();
     const qty = Math.min(pos.qty, this.positions.get(posKey(chain, pos.tokenAddress, pos.sourceWalletId))?.qty ?? pos.qty);
@@ -1006,9 +1069,6 @@ export class PaperEngine {
     };
 
     const gasUsd = chain === "eth" ? this.cfg.GAS_USD_ETH : this.cfg.GAS_USD_BASE;
-    const delayPenaltyBps = chain === "eth"
-      ? this.cfg.COPY_DELAY_PENALTY_BPS_ETH
-      : this.cfg.COPY_DELAY_PENALTY_BPS_BASE;
     let liquidityUsd: number | null = null;
     try {
       liquidityUsd = await getLiquidityUsd(chain, token.address, this.rpcClients[chain]);
@@ -1016,64 +1076,28 @@ export class PaperEngine {
       liquidityUsd = null;
     }
     const grossNotionalUsd = qty * currentPriceUsd;
-    const impactBps = liquidityUsd !== null
-      ? Math.min(500, Math.round(10_000 * grossNotionalUsd / (2 * Math.max(liquidityUsd, 1))))
-      : 0;
-    const dexFeeBps = 30;
-    const slippageBps = dexFeeBps + impactBps + delayPenaltyBps;
-    const fillPrice = currentPriceUsd * (1 - slippageBps / 10_000);
+    const slippageBps = this.modeledSlippageBps(chain, grossNotionalUsd, liquidityUsd);
+    // Use the same 0x-or-spot pricing as copied sells so exit fills are modeled identically.
+    const priced = await this.priceSellFill({ token, quoteToken, qty, fallbackPriceUsd: currentPriceUsd, slippageBps });
+    const fillPrice = priced.fillPrice;
+    const zeroxFeeUsd = priced.dexFeeUsd;
     this.markPrices.set(markKey(chain, token.address), currentPriceUsd);
     const notionalUsd = qty * fillPrice;
-    const feeUsd = gasUsd + (notionalUsd * dexFeeBps) / 10_000;
-    const sellProceeds = Math.max(0, notionalUsd - feeUsd);
+    const dexFeeUsd = zeroxFeeUsd ?? (notionalUsd * DEX_FEE_BPS) / 10_000;
+    const feeUsd = gasUsd + dexFeeUsd;
 
-    const next = applyTradeToState({
-      portfolio: this.portfolio,
-      position: {
-        quantity: existing.qty,
-        averageEntryUsd: existing.avgCostUsd,
-        costBasisUsd: existing.qty * existing.avgCostUsd,
-        realizedPnlUsd: existing.realizedPnlUsd,
-        feesPaidUsd: 0,
-      },
-      trade: {
-        side: "sell",
-        quantity: qty,
-        notionalUsd,
-        gasUsd,
-        slippageUsd: 0,
-        dexFeeUsd: (notionalUsd * dexFeeBps) / 10_000,
-        totalCostUsd: feeUsd,
-        sellProceedsUsd: sellProceeds,
-      },
+    await this.applySellToState({
+      chain,
+      tokenAddress: token.address,
+      walletId: pos.sourceWalletId,
+      posKey: key,
+      existing,
+      qty,
+      notionalUsd,
+      gasUsd,
+      dexFeeUsd,
+      effectiveFeeUsd: feeUsd,
     });
-
-    this.portfolio = next.portfolio;
-    this.cashUsd = next.portfolio.cashUsd;
-
-    if (next.position.quantity < 1e-10) {
-      this.positions.delete(key);
-      await closePositionByKey(this.db, {
-        chain,
-        tokenAddress: token.address,
-        sourceWalletId: pos.sourceWalletId,
-        realizedPnlUsd: next.position.realizedPnlUsd,
-      });
-    } else {
-      this.positions.set(key, {
-        qty: next.position.quantity,
-        avgCostUsd: next.position.averageEntryUsd,
-        realizedPnlUsd: next.position.realizedPnlUsd,
-      });
-      await upsertPosition(this.db, {
-        chain,
-        tokenAddress: token.address,
-        qty: next.position.quantity,
-        avgCostUsd: next.position.averageEntryUsd,
-        realizedPnlUsd: next.position.realizedPnlUsd,
-        sourceWalletId: pos.sourceWalletId,
-      });
-    }
 
     const fill: PaperFill = {
       id: randomUUID(),

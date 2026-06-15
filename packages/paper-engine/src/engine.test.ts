@@ -517,6 +517,77 @@ describe("PaperEngine integration", () => {
     expect(stored?.reviewStatus).toBe("copy-requested");
   });
 
+  it("vetoes a buy from an auto-copy-off wallet with skip reason auto-copy-off", async () => {
+    const bus = new EventBus();
+    await db.execute(sql`TRUNCATE paper_fills CASCADE`);
+    await db.execute(sql`TRUNCATE trade_signals CASCADE`);
+    await upsertToken(db, {
+      chain: TOKEN_A.chain,
+      address: TOKEN_A.address,
+      symbol: TOKEN_A.symbol,
+      name: TOKEN_A.symbol,
+      decimals: TOKEN_A.decimals,
+      isBlocked: false,
+    });
+    const muted = await insertWallet(db, {
+      chain: "eth",
+      address: "0x2eade00000000000000000000000000000000002",
+      label: "Watched only",
+      active: true,
+      autoCopy: false,
+    });
+
+    const engine = new PaperEngine(db, bus, cfg() as never, mockRpcClient as never);
+    await engine.start();
+    bus.emit("trade-signal", makeSignal({ walletId: muted.id, tokenOut: TOKEN_A, tokenIn: USDC }));
+    await new Promise<void>((r) => setTimeout(r, 200));
+    engine.stop();
+
+    const fills = await getRecentFills(db, new Date(Date.now() - 60_000), 5);
+    expect(fills[0]?.decision).toBe("skipped");
+    expect(fills[0]?.skipReason).toBe("auto-copy-off");
+  });
+
+  it("lets a manual candidate copy bypass the auto-copy-off veto", async () => {
+    const bus = new EventBus();
+    await db.execute(sql`TRUNCATE paper_fills CASCADE`);
+    await db.execute(sql`TRUNCATE positions CASCADE`);
+    await db.execute(sql`TRUNCATE portfolio_snapshots CASCADE`);
+    await db.execute(sql`TRUNCATE trade_signals CASCADE`);
+    await upsertToken(db, {
+      chain: TOKEN_A.chain,
+      address: TOKEN_A.address,
+      symbol: TOKEN_A.symbol,
+      name: TOKEN_A.symbol,
+      decimals: TOKEN_A.decimals,
+      isBlocked: false,
+    });
+    const muted = await insertWallet(db, {
+      chain: "eth",
+      address: "0x3eade00000000000000000000000000000000003",
+      label: "Watched only",
+      active: true,
+      autoCopy: false,
+    });
+    const candidate = makeSignal({
+      walletId: muted.id,
+      decodeStatus: "candidate",
+      reviewStatus: "copy-requested",
+      tokenOut: TOKEN_A,
+      tokenIn: USDC,
+    });
+    await insertSignal(db, candidate);
+
+    const engine = new PaperEngine(db, bus, cfg() as never, mockRpcClient as never);
+    await engine.start();
+    await engine.executeManualCandidateCopy(candidate);
+    engine.stop();
+
+    const fills = await getRecentFills(db, new Date(Date.now() - 60_000), 5);
+    expect(fills[0]?.decision).toBe("copied");
+    expect(fills[0]?.skipReason).toBeUndefined();
+  });
+
   it("stores fills against the persisted signal id when duplicate tx signals arrive", async () => {
     const bus = new EventBus();
     await db.execute(sql`TRUNCATE paper_fills CASCADE`);

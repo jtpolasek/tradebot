@@ -6,7 +6,7 @@ import { randomUUID } from "crypto";
 import { resolve, dirname } from "path";
 import { fileURLToPath } from "url";
 import * as schema from "../schema.js";
-import { insertWallet, getActiveWallets, setWalletActive } from "./wallets.js";
+import { insertWallet, getActiveWallets, getAllWallets, setWalletActive, setWalletAutoCopy } from "./wallets.js";
 import { getLastBlock, upsertLastBlock } from "./chainState.js";
 import { closeDb, getDb } from "../db.js";
 import {
@@ -111,6 +111,23 @@ describe("wallets repository", () => {
     await setWalletActive(db as Parameters<typeof setWalletActive>[0], inserted.id, false);
     const active = await getActiveWallets(db as Parameters<typeof getActiveWallets>[0]);
     expect(active.find((w) => w.id === inserted.id)).toBeUndefined();
+  });
+
+  it("defaults auto-copy on and setWalletAutoCopy toggles it", async () => {
+    const inserted = await insertWallet(db as Parameters<typeof insertWallet>[0], {
+      chain: "eth",
+      address: "0xdddddddddddddddddddddddddddddddddddddddd",
+      label: "Auto-copy wallet",
+      active: true,
+    });
+    expect(inserted.autoCopy).toBe(true);
+
+    await setWalletAutoCopy(db as Parameters<typeof setWalletAutoCopy>[0], inserted.id, false);
+    const all = await getAllWallets(db as Parameters<typeof getAllWallets>[0]);
+    const reloaded = all.find((w) => w.id === inserted.id);
+    expect(reloaded?.autoCopy).toBe(false);
+    // Auto-copy off must not affect watching: the wallet is still active/scored.
+    expect(reloaded?.active).toBe(true);
   });
 });
 

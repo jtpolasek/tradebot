@@ -20,6 +20,9 @@ export const wallets = pgTable("wallets", {
   address: text("address").notNull(),
   label: text("label").notNull(),
   active: boolean("active").notNull().default(true),
+  // When false, the wallet is still watched and scored but the engine never opens new positions
+  // from its signals (skip reason 'auto-copy-off'). Existing positions can still be sold to exit.
+  autoCopy: boolean("auto_copy").notNull().default(true),
   addedAt: timestamptz("added_at").notNull().defaultNow(),
 }, (t) => [unique().on(t.chain, t.address)]);
 

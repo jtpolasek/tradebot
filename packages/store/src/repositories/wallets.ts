@@ -6,7 +6,7 @@ import { normalizeAddress } from "@tradebot/core";
 
 export async function insertWallet(
   db: Db,
-  wallet: Omit<TrackedWallet, "id" | "addedAt">
+  wallet: Omit<TrackedWallet, "id" | "addedAt" | "autoCopy"> & { autoCopy?: boolean }
 ): Promise<TrackedWallet> {
   const rows = await db
     .insert(wallets)
@@ -15,6 +15,7 @@ export async function insertWallet(
       address: normalizeAddress(wallet.address),
       label: wallet.label,
       active: wallet.active,
+      autoCopy: wallet.autoCopy ?? true,
     })
     .returning();
   const row = rows[0];
@@ -38,6 +39,10 @@ export async function setWalletActive(db: Db, id: string, active: boolean): Prom
   await db.update(wallets).set({ active }).where(eq(wallets.id, id));
 }
 
+export async function setWalletAutoCopy(db: Db, id: string, autoCopy: boolean): Promise<void> {
+  await db.update(wallets).set({ autoCopy }).where(eq(wallets.id, id));
+}
+
 export async function getAllWallets(db: Db): Promise<TrackedWallet[]> {
   const rows = await db.select().from(wallets);
   return rows.map(rowToWallet);
@@ -50,6 +55,7 @@ function rowToWallet(row: typeof wallets.$inferSelect): TrackedWallet {
     address: row.address,
     label: row.label,
     active: row.active,
+    autoCopy: row.autoCopy,
     addedAt: row.addedAt,
   };
 }

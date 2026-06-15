@@ -1,0 +1,1 @@
+ALTER TABLE "wallets" ADD COLUMN "auto_copy" boolean DEFAULT true NOT NULL;

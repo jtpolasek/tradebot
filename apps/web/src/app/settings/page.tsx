@@ -1,10 +1,10 @@
 "use client";
 
 import { useEffect, useState, FormEvent } from "react";
-import { Plus, Trash2 } from "lucide-react";
+import { Plus, EyeOff, Eye } from "lucide-react";
 import { apiFetch, shortAddr, timeAgo } from "@/lib/api";
 
-type Wallet = { id: string; chain: string; address: string; label: string; active: boolean; addedAt: string };
+type Wallet = { id: string; chain: string; address: string; label: string; active: boolean; autoCopy: boolean; addedAt: string };
 type AdaptationEntry = { id: string; ts: string; rule: string; oldValue: string; newValue: string; evidenceJson?: unknown };
 const ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/;
 
@@ -75,19 +75,27 @@ export default function SettingsPage() {
     }
   }
 
-  async function deleteWallet(id: string) {
-    if (!confirm("Deactivate this wallet? It will no longer be tracked.")) return;
-    setBusy(`del-${id}`);
+  async function patchWallet(id: string, patch: { active?: boolean; autoCopy?: boolean }, busyKey: string, okMsg: string) {
+    setBusy(busyKey);
     setError(""); setMessage("");
     try {
-      await apiFetch(`/wallets/${id}`, { method: "DELETE" });
-      setMessage("Wallet deactivated.");
+      await apiFetch(`/wallets/${id}`, { method: "PATCH", body: JSON.stringify(patch) });
+      setMessage(okMsg);
       await loadAll();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to delete wallet");
+      setError(err instanceof Error ? err.message : "Failed to update wallet");
     } finally {
       setBusy("");
     }
+  }
+
+  async function setWatching(id: string, active: boolean) {
+    if (!active && !confirm("Stop watching this wallet? It will no longer be tracked or scored.")) return;
+    await patchWallet(id, { active }, `watch-${id}`, active ? "Wallet is being watched." : "Stopped watching wallet.");
+  }
+
+  function setAutoCopy(id: string, autoCopy: boolean) {
+    return patchWallet(id, { autoCopy }, `auto-${id}`, autoCopy ? "Auto-copy enabled." : "Auto-copy disabled.");
   }
 
   async function deleteSetting(key: string) {
@@ -175,22 +183,64 @@ export default function SettingsPage() {
                 <div style={{ display: "flex", gap: 6, marginTop: 4 }}>
                   <span className="pill">{w.chain}</span>
                   <span className="pill">added {timeAgo(w.addedAt)}</span>
+                  <span className={`pill ${w.autoCopy ? "good" : "warn"}`}>
+                    {w.autoCopy ? "auto-copy on" : "auto-copy off"}
+                  </span>
                 </div>
               </div>
-              <button
-                className="button danger"
-                style={{ minHeight: 32, padding: "4px 10px", fontSize: 12 }}
-                onClick={() => void deleteWallet(w.id)}
-                disabled={busy === `del-${w.id}`}
-              >
-                <Trash2 size={14} /> Remove
-              </button>
+              <div style={{ display: "flex", gap: 6 }}>
+                <button
+                  className="button"
+                  style={{ minHeight: 32, padding: "4px 10px", fontSize: 12 }}
+                  onClick={() => void setAutoCopy(w.id, !w.autoCopy)}
+                  disabled={busy === `auto-${w.id}`}
+                  title={w.autoCopy ? "Stop copying this wallet's buys (still watched & scored)" : "Resume copying this wallet's buys"}
+                >
+                  {w.autoCopy ? "Disable auto-copy" : "Enable auto-copy"}
+                </button>
+                <button
+                  className="button danger"
+                  style={{ minHeight: 32, padding: "4px 10px", fontSize: 12 }}
+                  onClick={() => void setWatching(w.id, false)}
+                  disabled={busy === `watch-${w.id}`}
+                >
+                  <EyeOff size={14} /> Stop watching
+                </button>
+              </div>
             </div>
           ))}
           {wallets.filter((w) => w.active).length === 0 && (
-            <p className="subtle">No active wallets. Add one above to start tracking.</p>
+            <p className="subtle">No watched wallets. Add one above to start tracking.</p>
           )}
         </div>
+
+        {wallets.some((w) => !w.active) && (
+          <div style={{ marginTop: 20 }}>
+            <h3 style={{ fontSize: 14, color: "var(--subtle)", marginBottom: 8 }}>Not watching</h3>
+            <div className="list">
+              {wallets.filter((w) => !w.active).map((w) => (
+                <div key={w.id} className="card wallet-card" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, opacity: 0.55 }}>
+                  <div>
+                    <div style={{ fontWeight: 700 }}>{w.label}</div>
+                    <div className="mono subtle">{shortAddr(w.address)}</div>
+                    <div style={{ display: "flex", gap: 6, marginTop: 4 }}>
+                      <span className="pill">{w.chain}</span>
+                      <span className="pill">added {timeAgo(w.addedAt)}</span>
+                    </div>
+                  </div>
+                  <button
+                    className="button"
+                    style={{ minHeight: 32, padding: "4px 10px", fontSize: 12 }}
+                    onClick={() => void setWatching(w.id, true)}
+                    disabled={busy === `watch-${w.id}`}
+                  >
+                    <Eye size={14} /> Resume watching
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Runtime settings */}

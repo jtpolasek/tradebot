@@ -19,6 +19,7 @@ import {
   insertSnapshot,
   getToken,
   getAllSettings,
+  getAllWallets,
   latestMark,
 } from "@tradebot/store";
 import { assertUsableZeroxQuote, getLiquidityUsd, getUsdPrice, getZeroxPrice } from "@tradebot/pricing";
@@ -86,6 +87,9 @@ export class PaperEngine {
   private runtimeConfig: RuntimeConfig;
   private readonly recentSourceNotionals = new Map<string, number[]>();
   private readonly leaderHoldings = new Map<string, number>();
+  // Wallet IDs with auto-copy disabled: still watched and scored, but the engine opens no new
+  // positions from their signals. Refreshed on the settings timer.
+  private autoCopyDisabled = new Set<string>();
   private readonly markPrices = new Map<string, number>();
   private readonly nativeUsd: Record<ChainId, number> = { eth: 0, base: 0 };
 
@@ -221,7 +225,18 @@ export class PaperEngine {
       MIN_LIQUIDITY_USD: numberSetting(settings, ["MIN_LIQUIDITY_USD", "min_liquidity_usd"], this.cfg.MIN_LIQUIDITY_USD),
       SIZING_MODE: sizingModeSetting(settings, ["SIZING_MODE", "sizing_mode"], this.cfg.SIZING_MODE),
     };
+    await this.refreshAutoCopyDisabled();
     await this.refreshNativePrices();
+  }
+
+  /** Cache the set of wallets whose auto-copy is off so buys can be vetoed without a per-signal query. */
+  private async refreshAutoCopyDisabled(): Promise<void> {
+    try {
+      const wallets = await getAllWallets(this.db);
+      this.autoCopyDisabled = new Set(wallets.filter((w) => !w.autoCopy).map((w) => w.id));
+    } catch (err) {
+      logger.warn({ err }, "failed to refresh auto-copy-disabled wallets; keeping previous set");
+    }
   }
 
   /** Cache the native (WETH) USD price per chain so proportional sizing can value ETH-quoted trades. */
@@ -418,6 +433,34 @@ export class PaperEngine {
         decidedAt,
         decision: "skipped",
         skipReason: "token-blocklist",
+        side: signal.side,
+        token,
+        quoteToken,
+        qty: 0,
+        priceUsd: 0,
+        notionalUsd: 0,
+        feeUsd: 0,
+        slippageBps: 0,
+        latencyMs: decidedAt - signal.observedAt,
+        provisional: false,
+      };
+      await insertFill(this.db, fill);
+      this.bus.emit("paper-fill", fill);
+      this.rememberLeaderHolding(signal);
+      return;
+    }
+
+    // Auto-copy veto: a wallet with auto-copy off is still watched and scored, but the engine opens
+    // no new positions from it. Sells still flow through so existing positions can be exited, and a
+    // manual candidate copy (reviewStatus 'copying') is an explicit human approval that bypasses this.
+    if (signal.side === "buy" && signal.reviewStatus !== "copying" && this.autoCopyDisabled.has(signal.walletId)) {
+      const decidedAt = Date.now();
+      const fill: PaperFill = {
+        id: randomUUID(),
+        signalId: signal.id,
+        decidedAt,
+        decision: "skipped",
+        skipReason: "auto-copy-off",
         side: signal.side,
         token,
         quoteToken,
@@ -757,7 +800,10 @@ export class PaperEngine {
       confirmedAt: Date.now(),
       blockTimestamp: null,
       decodeStatus: "decoded",
-      reviewStatus: signal.reviewStatus ?? "copying",
+      // Mark as in-flight manual copy: this is the explicit human approval that bypasses the decode,
+      // staleness, and auto-copy vetoes. It is in-memory only — insertSignal won't overwrite the
+      // persisted candidate's reviewStatus, which the runner advances to 'copied' on success.
+      reviewStatus: "copying",
     });
   }
 

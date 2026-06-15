@@ -11,6 +11,7 @@ import {
   getActiveWallets,
   insertWallet,
   setWalletActive,
+  setWalletAutoCopy,
   getWalletById,
   getRecentSignals,
   getCandidateSignals,
@@ -95,8 +96,28 @@ app.post("/wallets", async (req, reply) => {
     address,
     label: body.data.label,
     active: true,
+    autoCopy: true,
   });
   reply.code(201).send({ wallet });
+});
+
+const PatchWalletBody = z.object({
+  active: z.boolean().optional(),
+  autoCopy: z.boolean().optional(),
+}).refine((b) => b.active !== undefined || b.autoCopy !== undefined, {
+  message: "Provide at least one of active or autoCopy",
+});
+
+app.patch("/wallets/:id", async (req, reply) => {
+  const { id } = req.params as { id: string };
+  const body = PatchWalletBody.safeParse(req.body);
+  if (!body.success) return reply.code(400).send({ error: body.error.message });
+  const wallet = await getWalletById(db, id);
+  if (!wallet) return reply.code(404).send({ error: "Wallet not found" });
+  if (body.data.active !== undefined) await setWalletActive(db, id, body.data.active);
+  if (body.data.autoCopy !== undefined) await setWalletAutoCopy(db, id, body.data.autoCopy);
+  const updated = await getWalletById(db, id);
+  reply.send({ wallet: updated });
 });
 
 app.delete("/wallets/:id", async (req, reply) => {

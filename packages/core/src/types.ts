@@ -6,6 +6,7 @@ export interface TrackedWallet {
   address: string;
   label: string;
   active: boolean;
+  autoCopy: boolean;
   addedAt: Date;
 }
 

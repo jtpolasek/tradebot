@@ -4,6 +4,7 @@ import type { RawTxEvent } from "@tradebot/core";
 import { strategyA } from "./strategyA.js";
 import type { StrategyAClients } from "./strategyA.js";
 import type { TokenMetadataResolver } from "./tokenMetadata.js";
+import { TRANSFER_TOPIC } from "./venues.js";
 
 const require = createRequire(import.meta.url);
 const v2Fixture = require("../test/fixtures/uniswap-v2-swap.json");
@@ -18,6 +19,7 @@ const KNOWN_META: Record<string, { symbol: string; name: string; decimals: numbe
   "0x9506d37f70eb4c3d79c398d326c871abbf10521d": { symbol: "MOCK1", name: "Mock Token 1", decimals: 18 },
   "0x5998fb77b43a30b735ad0f1e6917cf3a30642c16": { symbol: "MOCK2", name: "Mock Token 2", decimals: 18 },
   "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48": { symbol: "USDC", name: "USD Coin", decimals: 6 },
+  "0xaebb159c997a36d6de9efe1da4bf8262060899b3": { symbol: "ROOK", name: "Robinhook", decimals: 18 },
   "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913": { symbol: "USDC", name: "USD Coin", decimals: 6 },
   "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf": { symbol: "cbBTC", name: "Coinbase Wrapped BTC", decimals: 8 },
 };
@@ -78,6 +80,14 @@ function firstSwapLogAddress(event: RawTxEvent): string {
   const swapLog = event.logs?.find((log) => log.topics[0]?.startsWith("0xd78ad95f") || log.topics[0]?.startsWith("0xc42079f9"));
   if (!swapLog) throw new Error("fixture missing swap log");
   return swapLog.address;
+}
+
+function paddedTopicAddress(address: string): string {
+  return address.replace("0x", "0x000000000000000000000000").toLowerCase();
+}
+
+function uint256Data(value: bigint): string {
+  return `0x${value.toString(16).padStart(64, "0")}`;
 }
 
 describe("strategyA", () => {
@@ -156,6 +166,48 @@ describe("strategyA", () => {
 
     // V4 hooks absorb Transfers — wallet address not in Transfer topics → null
     expect(result).toBeNull();
+  });
+
+  it("uses wallet Transfer amounts for Uniswap V4 token amounts", async () => {
+    const wallet = "0xe817be59f62f827c3e691c28bb0b7955cfb34204";
+    const router = "0x1111111111111111111111111111111111111111";
+    const usdc = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48";
+    const rook = "0xaebb159c997a36d6de9efe1da4bf8262060899b3";
+    const fixtureEvent = makeEvent(v4Fixture, "eth");
+    const swapLog = fixtureEvent.logs?.find((log) => log.topics[0]?.toLowerCase() !== TRANSFER_TOPIC);
+    if (!swapLog) throw new Error("fixture missing v4 swap log");
+    const event: RawTxEvent = {
+      chain: "eth",
+      source: "confirmed",
+      txHash: "0x29ca243cc75cef339b603053a96186bae1ae2dfd490bb6941f23ff0c9da6d010",
+      from: wallet,
+      to: router,
+      blockNumber: 1,
+      observedAt: Date.now(),
+      logs: [
+        swapLog,
+        {
+          address: usdc,
+          topics: [TRANSFER_TOPIC, paddedTopicAddress(wallet), paddedTopicAddress(router)],
+          data: uint256Data(2_300_000_000n),
+        },
+        {
+          address: rook,
+          topics: [TRANSFER_TOPIC, paddedTopicAddress(router), paddedTopicAddress(wallet)],
+          data: uint256Data(4191885454906961716550886n),
+        },
+      ],
+      status: "success",
+    };
+
+    const result = await strategyA(event, wallet, meta, "test-id");
+
+    expect(result).not.toBeNull();
+    expect(result!.venue).toBe("uniswap-v4");
+    expect(result!.tokenIn.address).toBe(usdc);
+    expect(result!.tokenOut.address).toBe(rook);
+    expect(result!.amountIn).toBe(2_300_000_000n);
+    expect(result!.amountOut).toBe(4191885454906961716550886n);
   });
 
   it("decodes an Aerodrome (Base) V3-style swap", async () => {

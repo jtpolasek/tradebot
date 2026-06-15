@@ -198,18 +198,16 @@ async function decodeV4Swap(
   });
 
   const { amount0, amount1 } = decoded.args as { amount0: bigint; amount1: bigint };
-
-  const token0IsIn = amount0 > 0n;
-  const amountIn = token0IsIn ? amount0 : amount1;
-  const amountOut = token0IsIn ? -amount1 : -amount0;
-  if (amountIn <= 0n || amountOut <= 0n) return null;
+  if (amount0 === 0n || amount1 === 0n) return null;
 
   // For V4, use Transfer logs from the receipt to identify tokens
-  const { tokenIn: tokenInAddr, tokenOut: tokenOutAddr } = resolveTokensFromTransfersV4(
+  const transferMatch = resolveTokensFromTransfersV4(
     event.logs ?? [],
     walletAddress.toLowerCase()
   );
+  const { tokenIn: tokenInAddr, tokenOut: tokenOutAddr, amountIn, amountOut } = transferMatch;
   if (!tokenInAddr || !tokenOutAddr) return null;
+  if (amountIn <= 0n || amountOut <= 0n) return null;
 
   const [metaIn, metaOut] = await Promise.all([
     meta.resolve(event.chain, tokenInAddr),
@@ -257,7 +255,7 @@ function resolveTokensFromTransfers(
 function resolveTokensFromTransfersV4(
   logs: Log[],
   walletAddress: string
-): { tokenIn: string | null; tokenOut: string | null } {
+): { tokenIn: string | null; tokenOut: string | null; amountIn: bigint; amountOut: bigint } {
   const padded = (addr: string) => addr.replace("0x", "0x000000000000000000000000").toLowerCase();
   const paddedWallet = padded(walletAddress);
 
@@ -269,7 +267,13 @@ function resolveTokensFromTransfersV4(
   return {
     tokenIn: outLog?.address.toLowerCase() ?? null,
     tokenOut: inLog?.address.toLowerCase() ?? null,
+    amountIn: outLog ? transferAmount(outLog) : 0n,
+    amountOut: inLog ? transferAmount(inLog) : 0n,
   };
+}
+
+function transferAmount(log: Log): bigint {
+  return log.data && log.data !== "0x" ? BigInt(log.data) : 0n;
 }
 
 async function verifyV2Pool(

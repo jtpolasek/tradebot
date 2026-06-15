@@ -2,7 +2,7 @@ import type { ChainId } from "@tradebot/core";
 import { createLogger } from "@tradebot/core";
 import type { Db } from "@tradebot/store";
 import { getOpenPositionTokens, insertPriceMark } from "@tradebot/store";
-import { getUsdPrice } from "./price.js";
+import { getUsdPriceResult } from "./price.js";
 
 const logger = createLogger("pricing:marks");
 
@@ -30,13 +30,13 @@ export function startMarksJob(
       for (const { chain, tokenAddress } of tokens) {
         if (stopped) return;
         try {
-          const price = await getUsdPrice(chain, tokenAddress, clients[chain]);
+          const price = await getUsdPriceResult(chain, tokenAddress, clients[chain]);
           if (price === null) {
             logger.warn({ chain, tokenAddress }, "No price for marks job — skipping");
             continue;
           }
-          await insertPriceMark(db, { chain, tokenAddress, ts, priceUsd: price, source: "pricing" });
-          logger.debug({ chain, tokenAddress, price }, "mark persisted");
+          await insertPriceMark(db, { chain, tokenAddress, ts, priceUsd: price.priceUsd, source: price.source });
+          logger.debug({ chain, tokenAddress, priceUsd: price.priceUsd, source: price.source }, "mark persisted");
         } catch (err) {
           logger.warn({ err, chain, tokenAddress }, "marks job failed for token");
         }

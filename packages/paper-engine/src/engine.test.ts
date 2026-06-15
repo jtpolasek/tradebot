@@ -28,11 +28,28 @@ if (!TEST_DB_URL.endsWith("_test")) throw new Error("TEST_DATABASE_URL must end 
 vi.mock("@tradebot/pricing", () => ({
   assertUsableZeroxQuote: vi.fn(),
   getLiquidityUsd: vi.fn().mockResolvedValue(1_000_000),
+  getLiquidityUsdResult: vi.fn().mockResolvedValue({
+    liquidityUsd: 1_000_000,
+    chain: "eth",
+    tokenAddress: "0xaaaa000000000000000000000000000000000001",
+    quoteTokenAddress: "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+    poolAddress: "0xpool",
+    venue: "uniswap-v3",
+    method: "quote-balance-x2",
+    warnings: [],
+  }),
   getUsdPrice: vi.fn().mockResolvedValue(10),
+  getUsdPriceResult: vi.fn().mockResolvedValue({
+    priceUsd: 10,
+    source: "v3-spot",
+    chain: "eth",
+    tokenAddress: "0xaaaa000000000000000000000000000000000001",
+    warnings: [],
+  }),
   getZeroxPrice: vi.fn(),
 }));
 
-import { getLiquidityUsd, getUsdPrice, getZeroxPrice } from "@tradebot/pricing";
+import { getLiquidityUsd, getLiquidityUsdResult, getUsdPrice, getUsdPriceResult, getZeroxPrice } from "@tradebot/pricing";
 
 const mockRpcClient = { readContract: vi.fn() };
 
@@ -76,6 +93,8 @@ function cfg(overrides: Record<string, unknown> = {}) {
     GAS_USD_ETH: 4,
     GAS_USD_BASE: 0.03,
     SIZING_MODE: "fixed" as const,
+    ALLOW_FALLBACK_PRICE_BUYS: false,
+    MAX_SPOT_TWAP_DIVERGENCE_BPS: 300,
     LOG_LEVEL: "error" as const,
     ...overrides,
   };
@@ -105,7 +124,32 @@ afterAll(async () => {
 
 beforeEach(() => {
   vi.mocked(getLiquidityUsd).mockResolvedValue(1_000_000);
+  vi.mocked(getLiquidityUsdResult).mockImplementation(async (chain, tokenAddress) => {
+    const liquidityUsd = await vi.mocked(getLiquidityUsd)(chain, tokenAddress, mockRpcClient);
+    if (liquidityUsd === null) return null;
+    return {
+      liquidityUsd,
+      chain,
+      tokenAddress,
+      quoteTokenAddress: USDC.address,
+      poolAddress: "0xpool",
+      venue: "uniswap-v3",
+      method: "quote-balance-x2",
+      warnings: [],
+    };
+  });
   vi.mocked(getUsdPrice).mockResolvedValue(10);
+  vi.mocked(getUsdPriceResult).mockImplementation(async (chain, tokenAddress) => {
+    const priceUsd = await vi.mocked(getUsdPrice)(chain, tokenAddress, mockRpcClient);
+    if (priceUsd === null) return null;
+    return {
+      priceUsd,
+      source: "v3-spot",
+      chain,
+      tokenAddress,
+      warnings: [],
+    };
+  });
   vi.mocked(getZeroxPrice).mockReset();
   return db.execute(sql`TRUNCATE settings CASCADE`);
 });
@@ -411,6 +455,76 @@ describe("PaperEngine integration", () => {
       buyToken: TOKEN_A.address,
       sellAmount: "100000000",
     }));
+  });
+
+  it("skips auto-buys when the only price source is fallback pricing", async () => {
+    const bus = new EventBus();
+    await db.execute(sql`TRUNCATE paper_fills CASCADE`);
+    await db.execute(sql`TRUNCATE trade_signals CASCADE`);
+    vi.mocked(getUsdPriceResult).mockResolvedValue({
+      priceUsd: 10,
+      source: "defillama",
+      chain: "eth",
+      tokenAddress: TOKEN_A.address,
+      warnings: ["fallback-price-source"],
+    });
+
+    const engine = new PaperEngine(db, bus, cfg() as never, mockRpcClient as never);
+    await engine.start();
+    bus.emit("trade-signal", makeSignal({ walletId, tokenOut: TOKEN_A, tokenIn: USDC }));
+    await new Promise<void>((r) => setTimeout(r, 300));
+    engine.stop();
+
+    const fill = (await getRecentFills(db, new Date(Date.now() - 60_000), 5))[0];
+    expect(fill?.decision).toBe("skipped");
+    expect(fill?.skipReason).toBe("fallback-price-source");
+  });
+
+  it("skips auto-buys when spot diverges too far from TWAP", async () => {
+    const bus = new EventBus();
+    await db.execute(sql`TRUNCATE paper_fills CASCADE`);
+    await db.execute(sql`TRUNCATE trade_signals CASCADE`);
+    vi.mocked(getUsdPriceResult).mockResolvedValue({
+      priceUsd: 10,
+      source: "v3-spot",
+      chain: "eth",
+      tokenAddress: TOKEN_A.address,
+      quoteTokenAddress: USDC.address,
+      poolAddress: "0xpool",
+      venue: "uniswap-v3",
+      twapPriceUsd: 9,
+      spotTwapDivergenceBps: 1111,
+      warnings: [],
+    });
+
+    const engine = new PaperEngine(db, bus, cfg() as never, mockRpcClient as never);
+    await engine.start();
+    bus.emit("trade-signal", makeSignal({ walletId, tokenOut: TOKEN_A, tokenIn: USDC }));
+    await new Promise<void>((r) => setTimeout(r, 300));
+    engine.stop();
+
+    const fill = (await getRecentFills(db, new Date(Date.now() - 60_000), 5))[0];
+    expect(fill?.decision).toBe("skipped");
+    expect(fill?.skipReason).toBe("spot-twap-divergence");
+  });
+
+  it("skips configured 0x buys when 0x reports no executable route", async () => {
+    const bus = new EventBus();
+    await db.execute(sql`TRUNCATE paper_fills CASCADE`);
+    await db.execute(sql`TRUNCATE positions CASCADE`);
+    await db.execute(sql`TRUNCATE portfolio_snapshots CASCADE`);
+    await db.execute(sql`TRUNCATE trade_signals CASCADE`);
+    vi.mocked(getZeroxPrice).mockRejectedValue(new Error("No usable 0x liquidity/route for this trade."));
+
+    const engine = new PaperEngine(db, bus, cfg({ ZEROX_API_KEY: "test" }) as never, mockRpcClient as never);
+    await engine.start();
+    bus.emit("trade-signal", makeSignal({ walletId, tokenOut: TOKEN_A, tokenIn: USDC }));
+    await new Promise<void>((r) => setTimeout(r, 300));
+    engine.stop();
+
+    const fill = (await getRecentFills(db, new Date(Date.now() - 60_000), 5))[0];
+    expect(fill?.decision).toBe("skipped");
+    expect(fill?.skipReason).toBe("no-executable-route");
   });
 
   it("decide returns skip for zero-weight leader", async () => {

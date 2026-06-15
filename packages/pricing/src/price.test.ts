@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { getUsdPrice, getLiquidityUsd, sqrtPriceX96ToPrice, clearCaches } from "./price.js";
+import { getUsdPrice, getUsdPriceResult, getLiquidityUsd, getLiquidityUsdResult, sqrtPriceX96ToPrice, tickToPrice, clearCaches } from "./price.js";
 import { NATIVE_TOKEN_PLACEHOLDER, WETH, QUOTE_ASSETS } from "@tradebot/core";
 
 const Q96 = 2 ** 96;
@@ -74,6 +74,12 @@ describe("sqrtPriceX96ToPrice", () => {
     const price = sqrtPriceX96ToPrice(sqrtPriceX96, 6, 18);
     expect(price).toBeCloseTo(0.0005, 4);
   });
+
+  it("converts ticks into decimal-adjusted token0/token1 prices", () => {
+    expect(tickToPrice(0, 18, 18)).toBeCloseTo(1, 10);
+    const price = tickToPrice(0, 18, 6);
+    expect(price).toBeCloseTo(1e12, 0);
+  });
 });
 
 // ─── getUsdPrice with mocked RPC ──────────────────────────────────────────────
@@ -91,6 +97,19 @@ describe("getUsdPrice", () => {
     expect(client.readContract).not.toHaveBeenCalled();
   });
 
+  it("returns stablecoin provenance", async () => {
+    const client = makeClient();
+    const price = await getUsdPriceResult("eth", ETH_USDC, client);
+
+    expect(price).toMatchObject({
+      priceUsd: 1.0,
+      source: "stablecoin",
+      chain: "eth",
+      tokenAddress: ETH_USDC,
+      warnings: [],
+    });
+  });
+
   it("returns Chainlink price for WETH", async () => {
     // Chainlink answer: 2500 USD with 8 decimal places
     const answer = BigInt(Math.round(2500 * 1e8));
@@ -99,6 +118,23 @@ describe("getUsdPrice", () => {
     });
     const price = await getUsdPrice("eth", ETH_WETH, client);
     expect(price).toBeCloseTo(2500, 0);
+  });
+
+  it("returns Chainlink provenance for WETH", async () => {
+    const answer = BigInt(Math.round(2500 * 1e8));
+    const client = makeClient({
+      [`${CHAINLINK_FEED_ETH}:latestRoundData`]: [0n, answer, 0n, 0n, 0n],
+    });
+
+    const price = await getUsdPriceResult("eth", ETH_WETH, client);
+
+    expect(price).toMatchObject({
+      priceUsd: expect.closeTo(2500, 0),
+      source: "chainlink",
+      chain: "eth",
+      tokenAddress: ETH_WETH,
+      warnings: [],
+    });
   });
 
   it("prices the native placeholder as chain WETH", async () => {
@@ -141,6 +177,7 @@ describe("getUsdPrice", () => {
         return (a === ETH_USDC || b === ETH_USDC) ? FAKE_POOL : NULL_ADDR;
       },
       [`${FAKE_POOL}:slot0`]: [sqrtPriceX96, 0, 0, 0, 0, 0, true],
+      [`${FAKE_POOL}:observe`]: [[-450n, 0n], [0n, 0n]],
       [`${FAKE_POOL}:liquidity`]: 1_000_000n,
       [`${FAKE_POOL}:token0`]: FAKE_TOKEN_LO,
       [`${FAKE_POOL}:token1`]: ETH_USDC,
@@ -151,6 +188,20 @@ describe("getUsdPrice", () => {
     const price = await getUsdPrice("eth", FAKE_TOKEN_LO, client);
     // USDC = $1.00, so USD price = 0.00025
     expect(price).toBeCloseTo(0.00025, 6);
+
+    const result = await getUsdPriceResult("eth", FAKE_TOKEN_LO, client);
+    expect(result).toMatchObject({
+      source: "v3-spot",
+      chain: "eth",
+      tokenAddress: FAKE_TOKEN_LO,
+      quoteTokenAddress: ETH_USDC,
+      poolAddress: FAKE_POOL,
+      venue: "uniswap-v3",
+      warnings: [],
+    });
+    expect(result?.priceUsd).toBeCloseTo(0.00025, 6);
+    expect(result?.twapPriceUsd).toBeGreaterThan(0);
+    expect(result?.spotTwapDivergenceBps).toBeGreaterThan(1000);
   });
 
   it("prices a non-quote token via V3 pool — token is token1 (FAKE_TOKEN_HI > WETH)", async () => {
@@ -193,6 +244,15 @@ describe("getUsdPrice", () => {
 
     const price = await getUsdPrice("eth", FAKE_TOKEN_HI, client);
     expect(price).toBeCloseTo(0.042, 4);
+
+    const result = await getUsdPriceResult("eth", FAKE_TOKEN_HI, client);
+    expect(result).toMatchObject({
+      priceUsd: expect.closeTo(0.042, 4),
+      source: "defillama",
+      chain: "eth",
+      tokenAddress: FAKE_TOKEN_HI,
+      warnings: ["fallback-price-source"],
+    });
   });
 
   it("prices a Base token through an Aerodrome CL pool when no Uniswap V3 pool exists", async () => {
@@ -221,6 +281,17 @@ describe("getUsdPrice", () => {
       address: BASE_AERODROME_FACTORY,
       functionName: "getPool",
     }));
+
+    const result = await getUsdPriceResult("base", FAKE_TOKEN_LO, client);
+    expect(result).toMatchObject({
+      source: "v3-spot",
+      chain: "base",
+      tokenAddress: FAKE_TOKEN_LO,
+      quoteTokenAddress: BASE_USDC,
+      poolAddress: FAKE_POOL,
+      venue: "aerodrome-cl",
+      warnings: ["twap-unavailable"],
+    });
   });
 });
 
@@ -251,6 +322,19 @@ describe("getLiquidityUsd", () => {
 
     const liq = await getLiquidityUsd("eth", FAKE_TOKEN_LO, client);
     expect(liq).toBeCloseTo(1_000_000, 0);
+
+    clearCaches();
+    const result = await getLiquidityUsdResult("eth", FAKE_TOKEN_LO, client);
+    expect(result).toMatchObject({
+      liquidityUsd: expect.closeTo(1_000_000, 0),
+      chain: "eth",
+      tokenAddress: FAKE_TOKEN_LO,
+      quoteTokenAddress: ETH_USDC,
+      poolAddress: FAKE_POOL,
+      venue: "uniswap-v3",
+      method: "quote-balance-x2",
+      warnings: [],
+    });
   });
 
   it("returns null when no pool found", async () => {

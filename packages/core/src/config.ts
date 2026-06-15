@@ -6,6 +6,14 @@ import { fileURLToPath } from "url";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 loadDotenv({ path: resolve(__dirname, "../../../.env") });
 
+const envBoolean = z.preprocess((value) => {
+  if (typeof value !== "string") return value;
+  const normalized = value.trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(normalized)) return true;
+  if (["0", "false", "no", "off"].includes(normalized)) return false;
+  return value;
+}, z.boolean());
+
 const schema = z.object({
   DATABASE_URL: z.string().url(),
   TEST_DATABASE_URL: z.string().url().optional(),
@@ -26,6 +34,8 @@ const schema = z.object({
   GAS_USD_ETH: z.coerce.number().nonnegative().default(4),
   GAS_USD_BASE: z.coerce.number().nonnegative().default(0.03),
   SIZING_MODE: z.enum(["fixed", "proportional"]).default("fixed"),
+  ALLOW_FALLBACK_PRICE_BUYS: envBoolean.default(false),
+  MAX_SPOT_TWAP_DIVERGENCE_BPS: z.coerce.number().nonnegative().default(300),
   LOG_LEVEL: z.enum(["trace", "debug", "info", "warn", "error", "fatal"]).default("info"),
 });
 

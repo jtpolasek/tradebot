@@ -78,6 +78,16 @@ const UNI_V3_POOL_ABI = [
   },
   {
     type: "function",
+    name: "observe",
+    inputs: [{ name: "secondsAgos", type: "uint32[]" }],
+    outputs: [
+      { name: "tickCumulatives", type: "int56[]" },
+      { name: "secondsPerLiquidityCumulativeX128s", type: "uint160[]" },
+    ],
+    stateMutability: "view",
+  },
+  {
+    type: "function",
     name: "token0",
     inputs: [],
     outputs: [{ name: "", type: "address" }],
@@ -112,6 +122,16 @@ const AERODROME_CL_POOL_ABI = [
     name: "liquidity",
     inputs: [],
     outputs: [{ name: "", type: "uint128" }],
+    stateMutability: "view",
+  },
+  {
+    type: "function",
+    name: "observe",
+    inputs: [{ name: "secondsAgos", type: "uint32[]" }],
+    outputs: [
+      { name: "tickCumulatives", type: "int56[]" },
+      { name: "secondsPerLiquidityCumulativeX128s", type: "uint160[]" },
+    ],
     stateMutability: "view",
   },
   {
@@ -182,7 +202,7 @@ type LlamaEntry = { price: number; fetchedAt: number };
 const llamaCache = new Map<string, LlamaEntry>();
 
 // Liquidity: 5-minute TTL
-type LiqEntry = { liquidityUsd: number; fetchedAt: number };
+type LiqEntry = LiquidityResult & { fetchedAt: number };
 const liqCache = new Map<string, LiqEntry>();
 
 // Pool discovery: static pool facts (address, tokens, decimals) are immutable, but the
@@ -190,6 +210,7 @@ const liqCache = new Map<string, LiqEntry>();
 // otherwise tokens with no V3 pool re-probe every factory/fee-tier on each lookup.
 type CachedPool = {
   address: string;
+  venue: "uniswap-v3" | "aerodrome-cl";
   token0: string;
   token1: string;
   decimals0: number;
@@ -207,6 +228,7 @@ const LLAMA_TTL_MS = 30_000;
 const LIQ_TTL_MS = 5 * 60_000;
 const POOL_TTL_MS = 10 * 60_000;
 const CHAINLINK_TTL_MS = 30_000;
+const TWAP_WINDOW_SECONDS = 300;
 
 export function clearCaches() {
   llamaCache.clear();
@@ -214,6 +236,32 @@ export function clearCaches() {
   poolCache.clear();
   chainlinkCache.clear();
 }
+
+export type PriceSource = "stablecoin" | "chainlink" | "v3-spot" | "defillama";
+
+export type PriceResult = {
+  priceUsd: number;
+  source: PriceSource;
+  chain: ChainId;
+  tokenAddress: string;
+  quoteTokenAddress?: string;
+  poolAddress?: string;
+  venue?: "uniswap-v3" | "aerodrome-cl";
+  twapPriceUsd?: number;
+  spotTwapDivergenceBps?: number;
+  warnings: string[];
+};
+
+export type LiquidityResult = {
+  liquidityUsd: number;
+  chain: ChainId;
+  tokenAddress: string;
+  quoteTokenAddress: string;
+  poolAddress: string;
+  venue: "uniswap-v3" | "aerodrome-cl";
+  method: "quote-balance-x2";
+  warnings: string[];
+};
 
 // ─── sqrtPriceX96 math ───────────────────────────────────────────────────────
 
@@ -233,6 +281,15 @@ export function sqrtPriceX96ToPrice(
   const ratio = bigintRatioToNumber(sqrtPriceX96, Q96);
   const rawPrice = ratio * ratio;
   return rawPrice * 10 ** (decimals0 - decimals1);
+}
+
+export function tickToPrice(tick: number, decimals0: number, decimals1: number): number {
+  return 1.0001 ** tick * 10 ** (decimals0 - decimals1);
+}
+
+function divergenceBps(left: number, right: number): number | null {
+  if (!Number.isFinite(left) || !Number.isFinite(right) || left <= 0 || right <= 0) return null;
+  return Math.round((Math.abs(left - right) / right) * 10_000);
 }
 
 // ─── Chainlink ───────────────────────────────────────────────────────────────
@@ -261,6 +318,7 @@ async function getChainlinkEthUsd(chain: ChainId, client: RpcClient): Promise<nu
 // ─── Uniswap V3 pool discovery ───────────────────────────────────────────────
 
 type V3VenueConfig = {
+  venue: "uniswap-v3" | "aerodrome-cl";
   factory: `0x${string}`;
   factoryAbi: typeof UNI_V3_FACTORY_ABI | typeof AERODROME_CL_FACTORY_ABI;
   poolAbi: typeof UNI_V3_POOL_ABI | typeof AERODROME_CL_POOL_ABI;
@@ -270,6 +328,7 @@ type V3VenueConfig = {
 function v3VenueConfigs(chain: ChainId): V3VenueConfig[] {
   const configs: V3VenueConfig[] = [
     {
+      venue: "uniswap-v3",
       factory: UNI_V3_FACTORIES[chain] as `0x${string}`,
       factoryAbi: UNI_V3_FACTORY_ABI,
       poolAbi: UNI_V3_POOL_ABI,
@@ -279,6 +338,7 @@ function v3VenueConfigs(chain: ChainId): V3VenueConfig[] {
 
   if (chain === "base") {
     configs.push({
+      venue: "aerodrome-cl",
       factory: AERODROME_CL_FACTORY_BASE as `0x${string}`,
       factoryAbi: AERODROME_CL_FACTORY_ABI,
       poolAbi: AERODROME_CL_POOL_ABI,
@@ -339,6 +399,7 @@ async function findDeepestV3Pool(
         if (!best || liquidityResult > best.liquidityVal) {
           best = {
             address: poolAddr.toLowerCase(),
+            venue: venue.venue,
             token0: t0,
             token1: t1,
             decimals0: dec0,
@@ -360,13 +421,13 @@ async function findDeepestV3Pool(
 
 // ─── V3 spot price ───────────────────────────────────────────────────────────
 
-async function getV3SpotPrice(
+async function getV3SpotPriceResult(
   chain: ChainId,
   token: string,
   quoteToken: string,
   client: RpcClient,
   quoteUsdPrice: number
-): Promise<number | null> {
+): Promise<PriceResult | null> {
   const pool = await findDeepestV3Pool(chain, token, quoteToken, client);
   if (!pool) return null;
 
@@ -400,7 +461,56 @@ async function getV3SpotPrice(
     priceInQuote = 1 / priceQuoteInToken;
   }
 
-  return priceInQuote * quoteUsdPrice;
+  const priceUsd = priceInQuote * quoteUsdPrice;
+  if (!Number.isFinite(priceUsd) || priceUsd <= 0) return null;
+  const twap = await getV3TwapPriceUsd(pool, tokenLc, quoteUsdPrice, client);
+  const warnings: string[] = [];
+  if (twap === null) warnings.push("twap-unavailable");
+  const spotTwapDivergenceBps = twap !== null ? divergenceBps(priceUsd, twap) ?? undefined : undefined;
+  return {
+    priceUsd,
+    source: "v3-spot",
+    chain,
+    tokenAddress: token.toLowerCase(),
+    quoteTokenAddress: quoteToken.toLowerCase(),
+    poolAddress: pool.address,
+    venue: pool.venue,
+    ...(twap !== null ? { twapPriceUsd: twap } : {}),
+    ...(spotTwapDivergenceBps !== undefined ? { spotTwapDivergenceBps } : {}),
+    warnings,
+  };
+}
+
+async function getV3TwapPriceUsd(
+  pool: CachedPool,
+  tokenLc: string,
+  quoteUsdPrice: number,
+  client: RpcClient
+): Promise<number | null> {
+  try {
+    const result = await client.readContract({
+      address: pool.address as `0x${string}`,
+      abi: pool.poolAbi,
+      functionName: "observe",
+      args: [[TWAP_WINDOW_SECONDS, 0]],
+    }) as [bigint[], bigint[]];
+    const tickCumulatives = result[0];
+    const start = tickCumulatives[0];
+    const end = tickCumulatives[1];
+    if (start === undefined || end === undefined) return null;
+    const averageTick = Number((end - start) / BigInt(TWAP_WINDOW_SECONDS));
+    if (!Number.isFinite(averageTick)) return null;
+
+    const tokenIsToken0 = pool.token0 === tokenLc;
+    if (tokenIsToken0) {
+      return tickToPrice(averageTick, pool.decimals0, pool.decimals1) * quoteUsdPrice;
+    }
+    const quoteInToken = tickToPrice(averageTick, pool.decimals0, pool.decimals1);
+    if (quoteInToken <= 0) return null;
+    return (1 / quoteInToken) * quoteUsdPrice;
+  } catch {
+    return null;
+  }
 }
 
 // ─── DefiLlama fallback ──────────────────────────────────────────────────────
@@ -432,6 +542,18 @@ async function getLlamaPrice(chain: ChainId, address: string): Promise<number | 
   }
 }
 
+async function getLlamaPriceResult(chain: ChainId, address: string): Promise<PriceResult | null> {
+  const price = await getLlamaPrice(chain, address);
+  if (price === null) return null;
+  return {
+    priceUsd: price,
+    source: "defillama",
+    chain,
+    tokenAddress: address.toLowerCase(),
+    warnings: ["fallback-price-source"],
+  };
+}
+
 // ─── Public API ──────────────────────────────────────────────────────────────
 
 /**
@@ -446,18 +568,30 @@ export async function getUsdPrice(
   address: string,
   client: RpcClient
 ): Promise<number | null> {
+  return (await getUsdPriceResult(chain, address, client))?.priceUsd ?? null;
+}
+
+export async function getUsdPriceResult(
+  chain: ChainId,
+  address: string,
+  client: RpcClient
+): Promise<PriceResult | null> {
   const addr = normalizePricedAddress(chain, address);
 
   // 1. Stablecoin
-  if (STABLECOINS[chain].has(addr)) return 1.0;
+  if (STABLECOINS[chain].has(addr)) {
+    return { priceUsd: 1.0, source: "stablecoin", chain, tokenAddress: addr, warnings: [] };
+  }
 
   // 2. WETH → Chainlink
   if (addr === WETH[chain]) {
     const price = await getChainlinkEthUsd(chain, client);
-    if (price !== null) return price;
+    if (price !== null) {
+      return { priceUsd: price, source: "chainlink", chain, tokenAddress: addr, warnings: [] };
+    }
     // Chainlink failed — fall through to DefiLlama
     logger.warn({ chain }, "Chainlink failed for WETH — falling back to DefiLlama");
-    return getLlamaPrice(chain, addr);
+    return getLlamaPriceResult(chain, addr);
   }
 
   // 3. V3 pool spot price — try each quote asset until one works
@@ -468,12 +602,12 @@ export async function getUsdPrice(
     const quoteUsdPrice = await getUsdPrice(chain, quoteAddr, client);
     if (quoteUsdPrice === null) continue;
 
-    const price = await getV3SpotPrice(chain, addr, quoteAddr, client, quoteUsdPrice);
-    if (price !== null && price > 0) return price;
+    const price = await getV3SpotPriceResult(chain, addr, quoteAddr, client, quoteUsdPrice);
+    if (price !== null && price.priceUsd > 0) return price;
   }
 
   // 4. DefiLlama fallback
-  return getLlamaPrice(chain, addr);
+  return getLlamaPriceResult(chain, addr);
 }
 
 /**
@@ -486,10 +620,21 @@ export async function getLiquidityUsd(
   address: string,
   client: RpcClient
 ): Promise<number | null> {
+  return (await getLiquidityUsdResult(chain, address, client))?.liquidityUsd ?? null;
+}
+
+export async function getLiquidityUsdResult(
+  chain: ChainId,
+  address: string,
+  client: RpcClient
+): Promise<LiquidityResult | null> {
   const addr = normalizePricedAddress(chain, address);
   const cacheKey = `${chain}:${addr}`;
   const cached = liqCache.get(cacheKey);
-  if (cached && Date.now() - cached.fetchedAt < LIQ_TTL_MS) return cached.liquidityUsd;
+  if (cached && Date.now() - cached.fetchedAt < LIQ_TTL_MS) {
+    const { fetchedAt: _fetchedAt, ...result } = cached;
+    return result;
+  }
 
   const quoteAssets = QUOTE_ASSETS[chain];
   for (const quoteAddr of quoteAssets) {
@@ -517,8 +662,18 @@ export async function getLiquidityUsd(
       const balanceHuman = fromBaseUnits(balanceRaw, quoteDecimals);
       const liquidityUsd = balanceHuman * quoteUsdPrice * 2;
 
-      liqCache.set(cacheKey, { liquidityUsd, fetchedAt: Date.now() });
-      return liquidityUsd;
+      const result: LiquidityResult = {
+        liquidityUsd,
+        chain,
+        tokenAddress: addr,
+        quoteTokenAddress: quoteAddr.toLowerCase(),
+        poolAddress: pool.address,
+        venue: pool.venue,
+        method: "quote-balance-x2",
+        warnings: [],
+      };
+      liqCache.set(cacheKey, { ...result, fetchedAt: Date.now() });
+      return result;
     } catch (err) {
       logger.warn({ err, chain, address: addr }, "getLiquidityUsd balance read failed");
     }

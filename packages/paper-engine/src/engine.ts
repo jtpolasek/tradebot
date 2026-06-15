@@ -22,7 +22,8 @@ import {
   getAllWallets,
   latestMark,
 } from "@tradebot/store";
-import { assertUsableZeroxQuote, getLiquidityUsd, getUsdPrice, getZeroxPrice } from "@tradebot/pricing";
+import { assertUsableZeroxQuote, getLiquidityUsd, getLiquidityUsdResult, getUsdPrice, getUsdPriceResult, getZeroxPrice } from "@tradebot/pricing";
+import type { PriceResult } from "@tradebot/pricing";
 import { applyTradeToState } from "./accounting.js";
 import type { AccountingPortfolio, AccountingPosition } from "./accounting.js";
 import { estimateSourceNotionalUsd } from "./sizing.js";
@@ -71,10 +72,14 @@ type ProvisionalEntry = {
 
 export type LiquidityTier = "major" | "mid" | "longtail";
 
-type RuntimeConfig = Pick<Config, "BASE_TRADE_PCT" | "MAX_TRADE_PCT" | "MIN_NOTIONAL_USD" | "MIN_LIQUIDITY_USD" | "SIZING_MODE">;
+type RuntimeConfig = Pick<Config, "BASE_TRADE_PCT" | "MAX_TRADE_PCT" | "MIN_NOTIONAL_USD" | "MIN_LIQUIDITY_USD" | "SIZING_MODE" | "ALLOW_FALLBACK_PRICE_BUYS" | "MAX_SPOT_TWAP_DIVERGENCE_BPS">;
 
 const RECENT_NOTIONAL_WINDOW = 20;
 const DEX_FEE_BPS = 30;
+
+type ZeroxFillQuote =
+  | { status: "quoted"; priceUsd: number; notionalUsd: number; dexFeeUsd: number }
+  | { status: "unavailable"; hardVetoReason?: "no-executable-route" };
 
 export class PaperEngine {
   private cashUsd: number;
@@ -116,6 +121,8 @@ export class PaperEngine {
       MIN_NOTIONAL_USD: cfg.MIN_NOTIONAL_USD,
       MIN_LIQUIDITY_USD: cfg.MIN_LIQUIDITY_USD,
       SIZING_MODE: cfg.SIZING_MODE,
+      ALLOW_FALLBACK_PRICE_BUYS: cfg.ALLOW_FALLBACK_PRICE_BUYS,
+      MAX_SPOT_TWAP_DIVERGENCE_BPS: cfg.MAX_SPOT_TWAP_DIVERGENCE_BPS,
     };
   }
 
@@ -224,6 +231,8 @@ export class PaperEngine {
       MIN_NOTIONAL_USD: numberSetting(settings, ["MIN_NOTIONAL_USD", "min_notional_usd"], this.cfg.MIN_NOTIONAL_USD),
       MIN_LIQUIDITY_USD: numberSetting(settings, ["MIN_LIQUIDITY_USD", "min_liquidity_usd"], this.cfg.MIN_LIQUIDITY_USD),
       SIZING_MODE: sizingModeSetting(settings, ["SIZING_MODE", "sizing_mode"], this.cfg.SIZING_MODE),
+      ALLOW_FALLBACK_PRICE_BUYS: booleanSetting(settings, ["ALLOW_FALLBACK_PRICE_BUYS", "allow_fallback_price_buys"], this.cfg.ALLOW_FALLBACK_PRICE_BUYS),
+      MAX_SPOT_TWAP_DIVERGENCE_BPS: numberSetting(settings, ["MAX_SPOT_TWAP_DIVERGENCE_BPS", "max_spot_twap_divergence_bps"], this.cfg.MAX_SPOT_TWAP_DIVERGENCE_BPS),
     };
     await this.refreshAutoCopyDisabled();
     await this.refreshNativePrices();
@@ -480,8 +489,11 @@ export class PaperEngine {
 
     // Get liquidity (needed for decide)
     let liquidityUsd: number | null = null;
+    let liquidityWarnings: string[] = [];
     try {
-      liquidityUsd = await getLiquidityUsd(signal.chain, token.address, this.rpcClients[signal.chain]);
+      const liquidity = await getLiquidityUsdResult(signal.chain, token.address, this.rpcClients[signal.chain]);
+      liquidityUsd = liquidity?.liquidityUsd ?? null;
+      liquidityWarnings = liquidity?.warnings ?? [];
     } catch {
       // proceed with null — will skip with no-liquidity-data
     }
@@ -515,12 +527,13 @@ export class PaperEngine {
     }
 
     // Get price
-    let priceUsd = 0;
+    let price: PriceResult | null = null;
     try {
-      priceUsd = (await getUsdPrice(signal.chain, token.address, this.rpcClients[signal.chain])) ?? 0;
+      price = await getUsdPriceResult(signal.chain, token.address, this.rpcClients[signal.chain]);
     } catch {
-      priceUsd = 0;
+      price = null;
     }
+    const priceUsd = price?.priceUsd ?? 0;
 
     if (!priceUsd) {
       const skipFill: PaperFill = {
@@ -545,7 +558,72 @@ export class PaperEngine {
       this.rememberLeaderHolding(signal);
       return;
     }
+
+    if (signal.side === "buy" && price?.source === "defillama" && !this.runtimeConfig.ALLOW_FALLBACK_PRICE_BUYS) {
+      const skipFill: PaperFill = {
+        id: fillId,
+        signalId: signal.id,
+        decidedAt,
+        decision: "skipped",
+        skipReason: "fallback-price-source",
+        side: signal.side,
+        token,
+        quoteToken,
+        qty: 0,
+        priceUsd: 0,
+        notionalUsd: 0,
+        feeUsd: 0,
+        slippageBps: 0,
+        latencyMs: decidedAt - signal.observedAt,
+        provisional: false,
+      };
+      await insertFill(this.db, skipFill);
+      this.bus.emit("paper-fill", skipFill);
+      this.rememberLeaderHolding(signal);
+      return;
+    }
+
+    if (
+      signal.side === "buy" &&
+      price?.spotTwapDivergenceBps !== undefined &&
+      price.spotTwapDivergenceBps > this.runtimeConfig.MAX_SPOT_TWAP_DIVERGENCE_BPS
+    ) {
+      const skipFill: PaperFill = {
+        id: fillId,
+        signalId: signal.id,
+        decidedAt,
+        decision: "skipped",
+        skipReason: "spot-twap-divergence",
+        side: signal.side,
+        token,
+        quoteToken,
+        qty: 0,
+        priceUsd: 0,
+        notionalUsd: 0,
+        feeUsd: 0,
+        slippageBps: 0,
+        latencyMs: decidedAt - signal.observedAt,
+        provisional: false,
+      };
+      await insertFill(this.db, skipFill);
+      this.bus.emit("paper-fill", skipFill);
+      this.rememberLeaderHolding(signal);
+      return;
+    }
     this.markPrices.set(markKey(signal.chain, token.address), priceUsd);
+    logger.debug(
+      {
+        chain: signal.chain,
+        tokenAddress: token.address,
+        priceSource: price?.source,
+        priceVenue: price?.venue,
+        pricePool: price?.poolAddress,
+        priceWarnings: price?.warnings ?? [],
+        liquidityUsd,
+        liquidityWarnings,
+      },
+      "price and liquidity selected for paper fill"
+    );
 
     // Slippage model
     const gasUsd = signal.chain === "eth" ? this.cfg.GAS_USD_ETH : this.cfg.GAS_USD_BASE;
@@ -578,9 +656,32 @@ export class PaperEngine {
         notionalUsd: decision.notionalUsd,
         qty: null,
       });
-      fillPrice = quoted?.priceUsd ?? priceUsd * (1 + slippageBps / 10_000);
-      notionalUsd = quoted?.notionalUsd ?? decision.notionalUsd;
-      zeroxFeeUsd = quoted?.dexFeeUsd ?? null;
+      if (quoted.status === "unavailable" && quoted.hardVetoReason) {
+        const skipFill: PaperFill = {
+          id: fillId,
+          signalId: signal.id,
+          decidedAt,
+          decision: "skipped",
+          skipReason: quoted.hardVetoReason,
+          side: signal.side,
+          token,
+          quoteToken,
+          qty: 0,
+          priceUsd: 0,
+          notionalUsd: 0,
+          feeUsd: 0,
+          slippageBps: 0,
+          latencyMs: decidedAt - signal.observedAt,
+          provisional: false,
+        };
+        await insertFill(this.db, skipFill);
+        this.bus.emit("paper-fill", skipFill);
+        this.rememberLeaderHolding(signal);
+        return;
+      }
+      fillPrice = quoted.status === "quoted" ? quoted.priceUsd : priceUsd * (1 + slippageBps / 10_000);
+      notionalUsd = quoted.status === "quoted" ? quoted.notionalUsd : decision.notionalUsd;
+      zeroxFeeUsd = quoted.status === "quoted" ? quoted.dexFeeUsd : null;
       qty = fillPrice > 0 ? notionalUsd / fillPrice : 0;
       const effectiveFeeUsd = zeroxFeeUsd !== null ? gasUsd + zeroxFeeUsd : feeUsd;
 
@@ -684,8 +785,8 @@ export class PaperEngine {
         notionalUsd: decision.notionalUsd,
         qty,
       });
-      fillPrice = quoted?.priceUsd ?? priceUsd * (1 - slippageBps / 10_000);
-      zeroxFeeUsd = quoted?.dexFeeUsd ?? null;
+      fillPrice = quoted.status === "quoted" ? quoted.priceUsd : priceUsd * (1 - slippageBps / 10_000);
+      zeroxFeeUsd = quoted.status === "quoted" ? quoted.dexFeeUsd : null;
       notionalUsd = qty * fillPrice;
       const effectiveFeeUsd = zeroxFeeUsd !== null ? gasUsd + zeroxFeeUsd : feeUsd;
       const sellProceeds = Math.max(0, notionalUsd - effectiveFeeUsd);
@@ -813,13 +914,13 @@ export class PaperEngine {
     quoteToken: TokenRef;
     notionalUsd: number;
     qty: number | null;
-  }): Promise<{ priceUsd: number; notionalUsd: number; dexFeeUsd: number } | null> {
-    if (!this.cfg.ZEROX_API_KEY) return null;
+  }): Promise<ZeroxFillQuote> {
+    if (!this.cfg.ZEROX_API_KEY) return { status: "unavailable" };
 
     try {
       if (input.side === "buy") {
         const quoteUsdPrice = await this.resolveQuoteUsdPrice(input.quoteToken);
-        if (quoteUsdPrice <= 0) return null;
+        if (quoteUsdPrice <= 0) return { status: "unavailable" };
         const quoteAmount = input.notionalUsd / quoteUsdPrice;
         const quote = await getZeroxPrice({
           chainId: CHAIN_IDS[input.token.chain],
@@ -830,13 +931,13 @@ export class PaperEngine {
         assertUsableZeroxQuote(quote, "buy");
         const tokenQty = rawToHumanNumber(BigInt(quote.buyAmount), input.token.decimals);
         const notionalUsd = rawToHumanNumber(BigInt(quote.sellAmount), input.quoteToken.decimals) * quoteUsdPrice;
-        if (tokenQty <= 0 || notionalUsd <= 0) return null;
-        return { priceUsd: notionalUsd / tokenQty, notionalUsd, dexFeeUsd: quote.dexFeeUsd };
+        if (tokenQty <= 0 || notionalUsd <= 0) return { status: "unavailable" };
+        return { status: "quoted", priceUsd: notionalUsd / tokenQty, notionalUsd, dexFeeUsd: quote.dexFeeUsd };
       }
 
-      if (input.qty === null || input.qty <= 0) return null;
+      if (input.qty === null || input.qty <= 0) return { status: "unavailable" };
       const quoteUsdPrice = await this.resolveQuoteUsdPrice(input.quoteToken);
-      if (quoteUsdPrice <= 0) return null;
+      if (quoteUsdPrice <= 0) return { status: "unavailable" };
       const quote = await getZeroxPrice({
         chainId: CHAIN_IDS[input.token.chain],
         sellToken: input.token.address,
@@ -847,11 +948,11 @@ export class PaperEngine {
       const soldQty = rawToHumanNumber(BigInt(quote.sellAmount), input.token.decimals);
       const quoteQty = rawToHumanNumber(BigInt(quote.buyAmount), input.quoteToken.decimals);
       const notionalUsd = quoteQty * quoteUsdPrice;
-      if (soldQty <= 0 || notionalUsd <= 0) return null;
-      return { priceUsd: notionalUsd / soldQty, notionalUsd, dexFeeUsd: quote.dexFeeUsd };
+      if (soldQty <= 0 || notionalUsd <= 0) return { status: "unavailable" };
+      return { status: "quoted", priceUsd: notionalUsd / soldQty, notionalUsd, dexFeeUsd: quote.dexFeeUsd };
     } catch (err) {
       logger.debug({ err, side: input.side, token: input.token.address, quoteToken: input.quoteToken.address }, "0x fill quote unavailable; falling back to spot pricing");
-      return null;
+      return isExplicitNoRouteError(err) ? { status: "unavailable", hardVetoReason: "no-executable-route" } : { status: "unavailable" };
     }
   }
 
@@ -1153,6 +1254,31 @@ function sizingModeSetting(settings: Record<string, unknown>, keys: string[], fa
     if (value === "fixed" || value === "proportional") return value;
   }
   return fallback;
+}
+
+function booleanSetting(settings: Record<string, unknown>, keys: string[], fallback: boolean): boolean {
+  for (const key of keys) {
+    const value = settings[key];
+    if (typeof value === "boolean") return value;
+    if (typeof value === "string") {
+      const normalized = value.trim().toLowerCase();
+      if (["1", "true", "yes", "on"].includes(normalized)) return true;
+      if (["0", "false", "no", "off"].includes(normalized)) return false;
+    }
+  }
+  return fallback;
+}
+
+function isExplicitNoRouteError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  const normalized = message.toLowerCase();
+  return (
+    normalized.includes("no usable 0x liquidity/route") ||
+    normalized.includes("no usable route") ||
+    normalized.includes("no route") ||
+    normalized.includes("no_route") ||
+    normalized.includes("insufficient_asset_liquidity")
+  );
 }
 
 function rawToHumanNumber(amount: bigint, decimals: number): number {

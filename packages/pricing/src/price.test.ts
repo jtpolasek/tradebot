@@ -20,6 +20,15 @@ const FAKE_TOKEN_LO = "0x1111111111111111111111111111111111111111";
 // 0xde... > all quote asset addresses → always token1 in pools with USDC/WETH
 const FAKE_TOKEN_HI = "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
 
+// Chainlink latestRoundData tuple [roundId, answer, startedAt, updatedAt, answeredInRound].
+// updatedAt defaults to "now" so the staleness gate accepts the round.
+function chainlinkRound(
+  answer: bigint,
+  updatedAtSec: number = Math.floor(Date.now() / 1000)
+): [bigint, bigint, bigint, bigint, bigint] {
+  return [0n, answer, 0n, BigInt(updatedAtSec), 0n];
+}
+
 // Args-aware mock: handler can be a plain value or a function called with (args)
 type Handler = ((args?: unknown[]) => unknown) | unknown;
 function makeClient(overrides: Record<string, Handler> = {}) {
@@ -114,7 +123,7 @@ describe("getUsdPrice", () => {
     // Chainlink answer: 2500 USD with 8 decimal places
     const answer = BigInt(Math.round(2500 * 1e8));
     const client = makeClient({
-      [`${CHAINLINK_FEED_ETH}:latestRoundData`]: [0n, answer, 0n, 0n, 0n],
+      [`${CHAINLINK_FEED_ETH}:latestRoundData`]: chainlinkRound(answer),
     });
     const price = await getUsdPrice("eth", ETH_WETH, client);
     expect(price).toBeCloseTo(2500, 0);
@@ -123,7 +132,7 @@ describe("getUsdPrice", () => {
   it("returns Chainlink provenance for WETH", async () => {
     const answer = BigInt(Math.round(2500 * 1e8));
     const client = makeClient({
-      [`${CHAINLINK_FEED_ETH}:latestRoundData`]: [0n, answer, 0n, 0n, 0n],
+      [`${CHAINLINK_FEED_ETH}:latestRoundData`]: chainlinkRound(answer),
     });
 
     const price = await getUsdPriceResult("eth", ETH_WETH, client);
@@ -140,7 +149,7 @@ describe("getUsdPrice", () => {
   it("prices the native placeholder as chain WETH", async () => {
     const answer = BigInt(Math.round(2600 * 1e8));
     const client = makeClient({
-      [`${CHAINLINK_FEED_BASE}:latestRoundData`]: [0n, answer, 0n, 0n, 0n],
+      [`${CHAINLINK_FEED_BASE}:latestRoundData`]: chainlinkRound(answer),
     });
 
     const price = await getUsdPrice("base", NATIVE_TOKEN_PLACEHOLDER, client);
@@ -160,6 +169,33 @@ describe("getUsdPrice", () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, status: 500 }));
     const price = await getUsdPrice("eth", ETH_WETH, client);
     expect(price).toBeNull();
+  });
+
+  it("accepts a fresh Chainlink round", async () => {
+    const answer = BigInt(Math.round(2500 * 1e8));
+    const updatedAt = Math.floor(Date.now() / 1000) - 60; // 1 minute old, well within the window
+    const client = makeClient({
+      [`${CHAINLINK_FEED_ETH}:latestRoundData`]: chainlinkRound(answer, updatedAt),
+    });
+    const price = await getUsdPrice("eth", ETH_WETH, client);
+    expect(price).toBeCloseTo(2500, 0);
+  });
+
+  it("rejects a stale Chainlink round and falls back to DefiLlama", async () => {
+    const answer = BigInt(Math.round(2500 * 1e8));
+    const updatedAt = Math.floor(Date.now() / 1000) - 7200; // 2 hours old (> 1h default window)
+    const client = makeClient({
+      [`${CHAINLINK_FEED_ETH}:latestRoundData`]: chainlinkRound(answer, updatedAt),
+    });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ coins: { [`ethereum:${ETH_WETH}`]: { price: 2490 } } }),
+    }));
+
+    const price = await getUsdPriceResult("eth", ETH_WETH, client);
+    // Stale Chainlink is treated as unavailable → DefiLlama fallback (which buys then veto).
+    expect(price?.source).toBe("defillama");
+    expect(price?.priceUsd).toBeCloseTo(2490, 0);
   });
 
   it("prices a non-quote token via V3 pool — token is token0 (FAKE_TOKEN_LO < USDC)", async () => {
@@ -213,7 +249,7 @@ describe("getUsdPrice", () => {
     const chainlinkAnswer = BigInt(Math.round(2500 * 1e8));
 
     const client = makeClient({
-      [`${CHAINLINK_FEED_ETH}:latestRoundData`]: [0n, chainlinkAnswer, 0n, 0n, 0n],
+      [`${CHAINLINK_FEED_ETH}:latestRoundData`]: chainlinkRound(chainlinkAnswer),
       // getPool: only return FAKE_POOL for WETH pairs
       [`${UNI_FACTORY}:getPool`]: (args?: unknown[]) => {
         const a = (args?.[0] as string)?.toLowerCase();

@@ -28,16 +28,15 @@ Buy decisions live mainly in `packages/paper-engine/src/engine.ts`.
 
 ## Priority Note (2026-06-15)
 
-After review, the remaining work is reordered by value:
+After review, the remaining work was reordered by value:
 
-1. **Item 6 (unify sell fill modeling) is the next priority.** It is framed as cleanup but is
-   really a correctness gap: exit-rule sells use a separate pricing/slippage path that never
-   calls 0x, so exit PnL is modeled differently from copied-sell PnL. For a bot whose only
-   output is PnL accuracy, two fill models is a latent bug, not just duplication.
-2. **Item 5 (deeper-pool selection) drops below item 6.** It is a precision nicety by
-   comparison, and it carries an internal inconsistency to resolve first (see its note).
-3. **New item 7 (Chainlink staleness gate)** is added — the missing companion to the V3 TWAP
-   gate.
+1. ~~**Item 6 (unify sell fill modeling).**~~ Done — exit sells now share the copied-sell
+   fee/slippage/0x/accounting model.
+2. ~~**New item 7 (Chainlink staleness gate).**~~ Done — the missing companion to the V3 TWAP gate.
+3. **Item 5 (deeper-pool selection) is the remaining functional item.** A precision nicety, and it
+   carries an internal inconsistency to resolve first (see its note).
+4. Lower priority: persist price/liquidity provenance in `paper_fills` (Open Decision resolved
+   "yes, via migration"), and bound the TTL-only pricing caches.
 
 ## Recommended Implementation Order
 
@@ -243,7 +242,7 @@ Implemented notes:
 
 ### 7. Add A Chainlink Staleness Gate
 
-Status: pending.
+Status: complete (2026-06-15).
 
 Problem:
 `getChainlinkEthUsd()` reads only `answer` from `latestRoundData` and ignores `updatedAt` /
@@ -267,6 +266,19 @@ Acceptance:
 - A Chainlink round with `updatedAt` older than the window is treated as unavailable.
 - WETH pricing then falls back to DefiLlama, so DefiLlama-only auto-buys remain vetoed by item 3.
 - Tests cover a fresh round (accepted) and a stale round (rejected → fallback).
+
+Implemented notes:
+
+- `getChainlinkEthUsd` now reads `updatedAt` (tuple index 3) and rejects rounds older than
+  `MAX_CHAINLINK_STALENESS_SEC` (default 3600). A stale round returns null, so the caller falls
+  through to DefiLlama exactly like a read failure.
+- The window is read from `process.env` in `price.ts` (consistent with how `zerox.ts`/
+  `uniswapQuote.ts` already read their keys) and added to the core config schema + `.env.example`
+  for validation and documentation.
+- `answeredInRound` is intentionally left unchecked — `updatedAt` staleness is the practical
+  guard; the round-completeness check can be added later if a feed proves flaky.
+- Added pricing tests for a fresh round (accepted) and a stale round (rejected → DefiLlama).
+  `pnpm build` and `pnpm test` green (23 pricing tests).
 
 ## Open Decisions
 

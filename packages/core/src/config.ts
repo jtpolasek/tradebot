@@ -36,6 +36,7 @@ const schema = z.object({
   SIZING_MODE: z.enum(["fixed", "proportional"]).default("fixed"),
   ALLOW_FALLBACK_PRICE_BUYS: envBoolean.default(false),
   MAX_SPOT_TWAP_DIVERGENCE_BPS: z.coerce.number().nonnegative().default(300),
+  MAX_CHAINLINK_STALENESS_SEC: z.coerce.number().positive().default(3600),
   LOG_LEVEL: z.enum(["trace", "debug", "info", "warn", "error", "fatal"]).default("info"),
 });
 

@@ -230,6 +230,16 @@ const POOL_TTL_MS = 10 * 60_000;
 const CHAINLINK_TTL_MS = 30_000;
 const TWAP_WINDOW_SECONDS = 300;
 
+// Reject Chainlink rounds whose last update is older than this, so a frozen feed can't drive
+// auto-buys. Read from env (set by the app's config) with a 1-hour default.
+const DEFAULT_CHAINLINK_STALENESS_SEC = 3600;
+function maxChainlinkStalenessSec(): number {
+  const raw = process.env["MAX_CHAINLINK_STALENESS_SEC"];
+  if (raw === undefined) return DEFAULT_CHAINLINK_STALENESS_SEC;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_CHAINLINK_STALENESS_SEC;
+}
+
 export function clearCaches() {
   llamaCache.clear();
   liqCache.clear();
@@ -306,6 +316,17 @@ async function getChainlinkEthUsd(chain: ChainId, client: RpcClient): Promise<nu
     }) as [bigint, bigint, bigint, bigint, bigint];
     const answer = result[1]; // int256 with 8 decimals
     if (answer <= 0n) return null;
+
+    // Staleness gate: reject a frozen feed (treated as unavailable → caller falls back to DefiLlama,
+    // which then hits the existing fallback-price-source buy veto).
+    const updatedAt = result[3]; // uint256 unix seconds of the round's last update
+    const ageSec = Math.floor(Date.now() / 1000) - Number(updatedAt);
+    const maxAgeSec = maxChainlinkStalenessSec();
+    if (ageSec > maxAgeSec) {
+      logger.warn({ chain, ageSec, maxAgeSec }, "Chainlink ETH/USD round is stale — treating as unavailable");
+      return null;
+    }
+
     const price = fromBaseUnits(answer, 8);
     chainlinkCache.set(chain, { price, fetchedAt: Date.now() });
     return price;

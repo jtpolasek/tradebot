@@ -2,7 +2,8 @@
 
 import { useEffect, useRef, useState } from "react";
 import { TokenLink } from "@/components/TokenLink";
-import { apiFetch, streamUrl, formatUsd, shortAddr, timeAgo } from "@/lib/api";
+import { TxLink } from "@/components/TxLink";
+import { apiFetch, streamUrl, formatUsd, timeAgo } from "@/lib/api";
 
 type SignalItem = {
   type: "trade-signal";
@@ -144,8 +145,8 @@ export default function FeedPage() {
                   <span style={{ fontWeight: 700 }}>
                     <TokenLink chain={entry.data.chain} token={entry.data.tokenIn} /> {"->"} <TokenLink chain={entry.data.chain} token={entry.data.tokenOut} />
                   </span>
-                  <div className="subtle mono" style={{ fontSize: "0.72rem", marginTop: 2 }}>
-                    tx: {shortAddr(entry.data.txHash)}
+                  <div className="subtle" style={{ fontSize: "0.72rem", marginTop: 2 }}>
+                    tx: <TxLink chain={entry.data.chain} txHash={entry.data.txHash} />
                   </div>
                 </div>
               ) : (

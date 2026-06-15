@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { TokenLink } from "@/components/TokenLink";
+import { TxLink } from "@/components/TxLink";
 import { apiFetch, shortAddr, timeAgo } from "@/lib/api";
 
 type Candidate = {
@@ -123,8 +124,8 @@ export default function CandidatesPage() {
                     <span style={{ fontWeight: 800 }}>
                       <TokenLink chain={candidate.chain} token={candidate.tokenIn} /> {"->"} <TokenLink chain={candidate.chain} token={candidate.tokenOut} />
                     </span>
-                    <span className="subtle mono" style={{ fontSize: "0.72rem" }}>
-                      tx: {shortAddr(candidate.txHash)} · leader: {shortAddr(candidate.walletId)}
+                    <span className="subtle" style={{ fontSize: "0.72rem" }}>
+                      tx: <TxLink chain={candidate.chain} txHash={candidate.txHash} /> · <span className="mono">leader: {shortAddr(candidate.walletId)}</span>
                     </span>
                     {candidate.reason && (
                       <span className="subtle" style={{ fontSize: "0.78rem" }}>

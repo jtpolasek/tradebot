@@ -59,11 +59,38 @@ export function tokenTitle(token: DisplayToken): string {
   return name || symbol || shortAddr(token.address);
 }
 
+function explorerBase(chain: string | undefined): string | null {
+  if (chain === "base") return "https://basescan.org";
+  if (chain === "eth") return "https://etherscan.io";
+  return null;
+}
+
 export function explorerContractUrl(chain: string | undefined, address: string): string | null {
   if (!/^0x[a-fA-F0-9]{40}$/.test(address)) return null;
-  if (chain === "base") return `https://basescan.org/token/${address}`;
-  if (chain === "eth") return `https://etherscan.io/token/${address}`;
-  return null;
+  const base = explorerBase(chain);
+  return base ? `${base}/token/${address}` : null;
+}
+
+export function explorerAddressUrl(chain: string | undefined, address: string): string | null {
+  if (!/^0x[a-fA-F0-9]{40}$/.test(address)) return null;
+  const base = explorerBase(chain);
+  return base ? `${base}/address/${address}` : null;
+}
+
+export function explorerTxUrl(chain: string | undefined, txHash: string): string | null {
+  if (!/^0x[a-fA-F0-9]{64}$/.test(txHash)) return null;
+  const base = explorerBase(chain);
+  return base ? `${base}/tx/${txHash}` : null;
+}
+
+export function gmgnWalletUrl(chain: string | undefined, address: string): string | null {
+  if (!/^0x[a-fA-F0-9]{40}$/.test(address)) return null;
+  if (chain !== "eth" && chain !== "base") return null;
+  return `https://gmgn.ai/${chain}/address/${address}`;
+}
+
+export function shortHash(hash: string): string {
+  return hash.slice(0, 10) + "…" + hash.slice(-6);
 }
 
 export function timeAgo(ts: string | number): string {

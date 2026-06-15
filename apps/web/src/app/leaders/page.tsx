@@ -2,7 +2,8 @@
 
 import { useEffect, useState } from "react";
 import { RefreshCw } from "lucide-react";
-import { apiFetch, formatUsd, formatPct, formatPctPoints, shortAddr, timeAgo } from "@/lib/api";
+import { WalletLink } from "@/components/WalletLink";
+import { apiFetch, formatUsd, formatPct, formatPctPoints, timeAgo } from "@/lib/api";
 
 type Wallet = { id: string; chain: string; address: string; label: string; active: boolean; addedAt: string };
 type StatRow = {
@@ -126,7 +127,11 @@ export default function LeadersPage() {
                     <tr key={l.wallet?.id ?? l.wallet?.address ?? `orphan-${i}`}>
                       <td>
                         <div style={{ fontWeight: 700, fontSize: "0.82rem" }}>{l.wallet?.label ?? "—"}</div>
-                        <div className="mono subtle">{l.wallet ? shortAddr(l.wallet.address) : "—"}</div>
+                        {l.wallet ? (
+                          <WalletLink chain={l.wallet.chain} address={l.wallet.address} />
+                        ) : (
+                          <div className="mono subtle">—</div>
+                        )}
                       </td>
                       <td><span className="pill">{l.wallet?.chain ?? "—"}</span></td>
                       <td className={scoreClass(s?.score ?? null)}>

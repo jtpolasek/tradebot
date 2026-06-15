@@ -2,7 +2,8 @@
 
 import { useEffect, useState, FormEvent } from "react";
 import { Plus, EyeOff, Eye } from "lucide-react";
-import { apiFetch, shortAddr, timeAgo } from "@/lib/api";
+import { WalletLink } from "@/components/WalletLink";
+import { apiFetch, timeAgo } from "@/lib/api";
 
 type Wallet = { id: string; chain: string; address: string; label: string; active: boolean; autoCopy: boolean; addedAt: string };
 type AdaptationEntry = { id: string; ts: string; rule: string; oldValue: string; newValue: string; evidenceJson?: unknown };
@@ -179,7 +180,7 @@ export default function SettingsPage() {
             <div key={w.id} className="card wallet-card" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
               <div>
                 <div style={{ fontWeight: 700 }}>{w.label}</div>
-                <div className="mono subtle">{shortAddr(w.address)}</div>
+                <WalletLink chain={w.chain} address={w.address} />
                 <div style={{ display: "flex", gap: 6, marginTop: 4 }}>
                   <span className="pill">{w.chain}</span>
                   <span className="pill">added {timeAgo(w.addedAt)}</span>
@@ -222,7 +223,7 @@ export default function SettingsPage() {
                 <div key={w.id} className="card wallet-card" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, opacity: 0.55 }}>
                   <div>
                     <div style={{ fontWeight: 700 }}>{w.label}</div>
-                    <div className="mono subtle">{shortAddr(w.address)}</div>
+                    <WalletLink chain={w.chain} address={w.address} />
                     <div style={{ display: "flex", gap: 6, marginTop: 4 }}>
                       <span className="pill">{w.chain}</span>
                       <span className="pill">added {timeAgo(w.addedAt)}</span>

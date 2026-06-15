@@ -407,6 +407,21 @@ Keep a `venues.ts` registry `{ chain, name, eventAbi, verify }`. Verify the emit
 
 ### Phase 7+ (DO NOT BUILD): Solana adapter, ML. Out of scope until the user explicitly asks.
 
+### Phase 8 — Hybrid GMGN visibility features (agreed 2026-06-12)
+
+Post-Phase-6 work, agreed with the user in a grill session and ported from the GMGN predecessor app to give the operator visibility and manual control. Terminology lives in `CONTEXT.md` (note: **"Candidate"** here means a *persisted, reviewable signal* — the GMGN sense — not merely a low-confidence decode). The key scoring decision is recorded in `docs/adr/0001-persist-candidates-outside-scoring.md`. Build the six parts **in order**; each ends with `pnpm build && pnpm test` green and a commit.
+
+**Vetoes now number five**, each emitting a distinct skip reason. Two are *correctness gates* (decode confidence → `low-confidence-decode`; staleness → `stale-signal`); three are *risk filters* (liquidity/blocklist, auto-mute, per-tier mutes). Part 3 adds a sixth, per-wallet gate (`auto-copy-off`). The user challenged the count and agreed each stays because each answers a different question.
+
+1. **Candidate persistence** — *complete (2026-06-12)*. First cap the reconnect backfill window and add an engine **staleness veto** (skip reason `stale-signal`, based on block timestamp) so a restart after the DB has been stopped for hours doesn't copy long-dead trades at the current price. Then add `decode_status`/`confidence`/`reason` to `trade_signals`, stop dropping ambiguous decodes (persist them as candidates), keep the engine from auto-copying candidates (`low-confidence-decode`), and make the scorer count `decoded` signals only. See the ADR.
+2. **Review queue** — *complete (2026-06-12)*. Port `candidateTrust`. `review_status` workflow on `trade_signals`; API to list/copy/dismiss candidates; a runner job that executes copy requests through the paper engine **at current decision time**; a `/candidates` dashboard page. Copy works with auto-copy off and is excluded from leader scoring; manual copies bypass the decode/staleness vetoes (explicit human approval).
+3. **Wallet toggles** — *complete (2026-06-15)*. Surface the existing `active` flag as a **Watching / Stop-watching** toggle (greyed, re-enablable — the old UI hid deactivated wallets and called it delete), and add a new per-wallet **Auto-copy** flag (default ON). Off = watched and scored but the engine opens no new positions from its signals (`auto-copy-off`); sells still flow through to exit; manual candidate copies bypass it. On = respects all vetoes. (`auto_copy` column + migration 0005; `PATCH /wallets/:id`.)
+4. **Portfolio analytics** — *pending*. Port `portfolioAnalytics` + MetricStrip: win rate, realized PnL, fee drag, avg hold, open exposure, skip rate; plus a PnL-by-token table. Manual copies count here.
+5. **Reprocess tool** — *pending*. Port `candidateReprocess` as a read-only `pnpm reprocess` diff over recordings (no DB writes).
+6. **Links/names** — *partially done (token links, 2026-06-12)*. Wallets → explorer + GMGN.ai; tokens → Dexscreener + explorer; tx → explorer; token names everywhere. Token symbol/name hydration and contract-address explorer links already shipped; wallet/tx links remain.
+
+**Explicitly skipped:** `importBundle` (would pollute scoring history) and `quoteAge`.
+
 ---
 
 ## 8. Porting guide — proven modules from the old app
@@ -463,5 +478,6 @@ Do NOT port: `db.ts`/`repositories.ts` (SQLite → replaced by Drizzle store), `
 | 4 | Paper engine + ported accounting/ledger/exits | 3 d |
 | 5 | Brain: scoring, weights, adaptive filters | 3 d |
 | 6 | API + dashboard (port old UI) | 3 d |
+| 8 | Hybrid GMGN visibility features (parts 1–6; see Phase 8) | — |
 
 Porting cuts the original 13-day estimate to roughly 9–10 days. The old app keeps running in parallel as the reference until the new system passes its soak test.

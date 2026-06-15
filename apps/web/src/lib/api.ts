@@ -7,12 +7,14 @@ export function streamUrl() {
 }
 
 export async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
+  const headers = new Headers(init?.headers);
+  if (init?.body !== undefined && !headers.has("Content-Type")) {
+    headers.set("Content-Type", "application/json");
+  }
+
   const res = await fetch(apiUrl(path), {
     ...init,
-    headers: {
-      "Content-Type": "application/json",
-      ...(init?.headers ?? {}),
-    },
+    headers,
     cache: "no-store",
   });
   const json = await res.json() as unknown;
@@ -52,7 +54,14 @@ export type DisplayToken = {
   name?: string;
 };
 
+export const NATIVE_TOKEN_PLACEHOLDER = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+
+export function isNativePlaceholder(address: string): boolean {
+  return address.toLowerCase() === NATIVE_TOKEN_PLACEHOLDER;
+}
+
 export function tokenTitle(token: DisplayToken): string {
+  if (isNativePlaceholder(token.address)) return token.symbol?.trim() || "ETH";
   const symbol = token.symbol?.trim();
   const name = token.name?.trim();
   if (name && symbol && name.toLowerCase() !== symbol.toLowerCase()) return `${name} (${symbol})`;
@@ -66,6 +75,7 @@ function explorerBase(chain: string | undefined): string | null {
 }
 
 export function explorerContractUrl(chain: string | undefined, address: string): string | null {
+  if (isNativePlaceholder(address)) return null;
   if (!/^0x[a-fA-F0-9]{40}$/.test(address)) return null;
   const base = explorerBase(chain);
   return base ? `${base}/token/${address}` : null;

@@ -1,6 +1,7 @@
 import { eq, and, gte, desc } from "drizzle-orm";
 import type { Db } from "../db.js";
 import { paperFills, tradeSignals } from "../schema.js";
+import { NATIVE_TOKEN_PLACEHOLDER } from "@tradebot/core";
 import type { PaperFill, TokenRef, ChainId } from "@tradebot/core";
 import { getToken } from "./tokens.js";
 
@@ -163,6 +164,9 @@ async function hydrateFill(db: Db, fill: StoredFill): Promise<StoredFill> {
 
 async function hydrateToken(db: Db, token: TokenRef): Promise<TokenRef> {
   if (!token.address) return token;
+  if (token.address.toLowerCase() === NATIVE_TOKEN_PLACEHOLDER) {
+    return { ...token, symbol: token.symbol || "ETH", name: token.name || "Ether", decimals: 18 };
+  }
   const row = await getToken(db, token.chain, token.address);
   if (!row) return token;
   return {

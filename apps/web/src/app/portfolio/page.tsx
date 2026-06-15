@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { RefreshCw } from "lucide-react";
 import { TokenLink } from "@/components/TokenLink";
+import { WalletLink } from "@/components/WalletLink";
 import { MetricStrip, type MetricItem } from "@/components/MetricStrip";
 import { apiFetch, formatUsd, timeAgo } from "@/lib/api";
 
@@ -34,6 +35,7 @@ type Analytics = {
 
 const pct = (n: number | null) => (n === null ? "—" : (n * 100).toFixed(1) + "%");
 const hours = (n: number | null) => (n === null ? "—" : n < 1 ? `${Math.round(n * 60)}m` : `${n.toFixed(1)}h`);
+const daysOpen = (openedAt: string) => Math.max(0, Math.floor((Date.now() - new Date(openedAt).getTime()) / 86_400_000));
 
 function analyticsMetrics(a: Analytics): MetricItem[] {
   return [
@@ -59,6 +61,7 @@ type PositionRow = {
   closedAt: string | null;
   realizedPnlUsd: number;
   sourceWalletId: string | null;
+  sourceWallet: { id: string; chain: string; address: string; label: string; active: boolean } | null;
   currentPriceUsd: number | null;
   token?: { chain?: string; address: string; symbol?: string; name?: string };
 };
@@ -250,6 +253,7 @@ export default function PortfolioPage() {
               <thead>
                 <tr>
                   <th>Token</th>
+                  <th>Wallet</th>
                   <th>Chain</th>
                   <th>Qty</th>
                   <th>Avg cost</th>
@@ -257,13 +261,22 @@ export default function PortfolioPage() {
                   <th>Value</th>
                   <th>Unrealized</th>
                   <th>Realized P&L</th>
-                  <th>Opened</th>
+                  <th>Status</th>
                 </tr>
               </thead>
               <tbody>
                 {positions.map((p) => {
                   const currentValue = p.currentPriceUsd !== null ? p.currentPriceUsd * p.qty : null;
                   const unrealized = p.currentPriceUsd !== null ? (p.currentPriceUsd - p.avgCostUsd) * p.qty : null;
+                  const openDays = daysOpen(p.openedAt);
+                  const statusClass = !p.sourceWallet ? "bad" : !p.sourceWallet.active || openDays >= 3 ? "warn" : "good";
+                  const statusText = !p.sourceWallet
+                    ? "missing wallet"
+                    : !p.sourceWallet.active
+                    ? "wallet inactive"
+                    : openDays >= 3
+                    ? `${openDays}d open`
+                    : "open";
                   return (
                     <tr key={p.id}>
                       <td>
@@ -271,6 +284,16 @@ export default function PortfolioPage() {
                           chain={p.chain}
                           token={p.token ?? { chain: p.chain, address: p.tokenAddress }}
                         />
+                      </td>
+                      <td>
+                        {p.sourceWallet ? (
+                          <div className="stack" style={{ gap: 2 }}>
+                            <span style={{ fontWeight: 700, fontSize: "0.78rem" }}>{p.sourceWallet.label}</span>
+                            <WalletLink chain={p.sourceWallet.chain} address={p.sourceWallet.address} />
+                          </div>
+                        ) : (
+                          <span className="subtle">—</span>
+                        )}
                       </td>
                       <td><span className="pill">{p.chain}</span></td>
                       <td>{p.qty.toFixed(4)}</td>
@@ -281,7 +304,12 @@ export default function PortfolioPage() {
                         {unrealized !== null ? formatUsd(unrealized) : "—"}
                       </td>
                       <td className={p.realizedPnlUsd >= 0 ? "good" : "bad"}>{formatUsd(p.realizedPnlUsd)}</td>
-                      <td>{timeAgo(p.openedAt)}</td>
+                      <td>
+                        <div className="stack" style={{ gap: 3 }}>
+                          <span className={`pill ${statusClass}`}>{statusText}</span>
+                          <span className="subtle">{timeAgo(p.openedAt)}</span>
+                        </div>
+                      </td>
                     </tr>
                   );
                 })}

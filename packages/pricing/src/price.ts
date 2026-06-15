@@ -1,5 +1,5 @@
 import type { ChainId } from "@tradebot/core";
-import { WETH, QUOTE_ASSETS, CHAINLINK_ETH_USD, bigintRatioToNumber, createLogger, fromBaseUnits } from "@tradebot/core";
+import { WETH, QUOTE_ASSETS, CHAINLINK_ETH_USD, NATIVE_TOKEN_PLACEHOLDER, bigintRatioToNumber, createLogger, fromBaseUnits } from "@tradebot/core";
 
 const logger = createLogger("pricing");
 
@@ -446,7 +446,7 @@ export async function getUsdPrice(
   address: string,
   client: RpcClient
 ): Promise<number | null> {
-  const addr = address.toLowerCase();
+  const addr = normalizePricedAddress(chain, address);
 
   // 1. Stablecoin
   if (STABLECOINS[chain].has(addr)) return 1.0;
@@ -486,7 +486,7 @@ export async function getLiquidityUsd(
   address: string,
   client: RpcClient
 ): Promise<number | null> {
-  const addr = address.toLowerCase();
+  const addr = normalizePricedAddress(chain, address);
   const cacheKey = `${chain}:${addr}`;
   const cached = liqCache.get(cacheKey);
   if (cached && Date.now() - cached.fetchedAt < LIQ_TTL_MS) return cached.liquidityUsd;
@@ -525,4 +525,9 @@ export async function getLiquidityUsd(
   }
 
   return null;
+}
+
+function normalizePricedAddress(chain: ChainId, address: string): string {
+  const addr = address.toLowerCase();
+  return addr === NATIVE_TOKEN_PLACEHOLDER ? WETH[chain] : addr;
 }

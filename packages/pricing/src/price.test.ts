@@ -1,12 +1,14 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { getUsdPrice, getLiquidityUsd, sqrtPriceX96ToPrice, clearCaches } from "./price.js";
-import { WETH, QUOTE_ASSETS } from "@tradebot/core";
+import { NATIVE_TOKEN_PLACEHOLDER, WETH, QUOTE_ASSETS } from "@tradebot/core";
 
 const Q96 = 2 ** 96;
 const ETH_USDC = QUOTE_ASSETS.eth[0]!; // 0xa0b86991c...
 const ETH_WETH = WETH.eth;             // 0xc02aaa39b...
 const BASE_USDC = QUOTE_ASSETS.base[0]!;
+const BASE_WETH = WETH.base;
 const CHAINLINK_FEED_ETH = "0x5f4ec3df9cbd43714fe2740f5e3616155c5b8419";
+const CHAINLINK_FEED_BASE = "0x71041dddad3595f9ced3dccfbe3d1f4b0a16bb70";
 const UNI_FACTORY = "0x1f98431c8ad98523631ae4a59f267346ea31f984";
 const BASE_UNI_FACTORY = "0x33128a8fc17869897dce68ed026d694621f6fdfd";
 const BASE_AERODROME_FACTORY = "0x5e7bb104d84c7cb9b682aac2f3d509f5f406809a";
@@ -97,6 +99,21 @@ describe("getUsdPrice", () => {
     });
     const price = await getUsdPrice("eth", ETH_WETH, client);
     expect(price).toBeCloseTo(2500, 0);
+  });
+
+  it("prices the native placeholder as chain WETH", async () => {
+    const answer = BigInt(Math.round(2600 * 1e8));
+    const client = makeClient({
+      [`${CHAINLINK_FEED_BASE}:latestRoundData`]: [0n, answer, 0n, 0n, 0n],
+    });
+
+    const price = await getUsdPrice("base", NATIVE_TOKEN_PLACEHOLDER, client);
+
+    expect(price).toBeCloseTo(2600, 0);
+    expect(client.readContract).toHaveBeenCalledWith(expect.objectContaining({
+      address: CHAINLINK_FEED_BASE,
+      functionName: "latestRoundData",
+    }));
   });
 
   it("falls back to DefiLlama when Chainlink fails, returns null when both fail", async () => {
@@ -240,5 +257,32 @@ describe("getLiquidityUsd", () => {
     const client = makeClient(); // all getPool → NULL_ADDR
     const liq = await getLiquidityUsd("eth", FAKE_TOKEN_HI, client);
     expect(liq).toBeNull();
+  });
+
+  it("uses WETH pools when liquidity is requested for the native placeholder", async () => {
+    const sqrtPriceX96 = BigInt(Math.round(Q96));
+    const client = makeClient({
+      [`${BASE_UNI_FACTORY}:getPool`]: (args?: unknown[]) => {
+        const a = (args?.[0] as string)?.toLowerCase();
+        const b = (args?.[1] as string)?.toLowerCase();
+        return (a === BASE_WETH || b === BASE_WETH) ? FAKE_POOL : NULL_ADDR;
+      },
+      [`${FAKE_POOL}:slot0`]: [sqrtPriceX96, 0, 0, 0, 0, 0, true],
+      [`${FAKE_POOL}:liquidity`]: 1_000_000n,
+      [`${FAKE_POOL}:token0`]: BASE_WETH,
+      [`${FAKE_POOL}:token1`]: BASE_USDC,
+      [`${BASE_WETH}:decimals`]: 18,
+      [`${BASE_USDC}:decimals`]: 6,
+      [`${BASE_USDC}:balanceOf`]: BigInt(250_000 * 1e6),
+    });
+
+    const liq = await getLiquidityUsd("base", NATIVE_TOKEN_PLACEHOLDER, client);
+
+    expect(liq).toBeCloseTo(500_000, 0);
+    expect(client.readContract).toHaveBeenCalledWith(expect.objectContaining({
+      address: BASE_UNI_FACTORY,
+      functionName: "getPool",
+      args: expect.arrayContaining([BASE_WETH]),
+    }));
   });
 });

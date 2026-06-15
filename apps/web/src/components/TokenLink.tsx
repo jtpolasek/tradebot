@@ -1,7 +1,7 @@
 "use client";
 
 import { ExternalLink } from "lucide-react";
-import { explorerContractUrl, shortAddr, tokenTitle, type DisplayToken } from "@/lib/api";
+import { explorerContractUrl, isNativePlaceholder, shortAddr, tokenTitle, type DisplayToken } from "@/lib/api";
 
 type TokenLinkProps = {
   chain: string;
@@ -11,10 +11,11 @@ type TokenLinkProps = {
 export function TokenLink({ chain, token }: TokenLinkProps) {
   const href = explorerContractUrl(token.chain ?? chain, token.address);
   const label = tokenTitle(token);
+  const isNative = isNativePlaceholder(token.address);
   const body = (
     <>
       <span className="token-name">{label}</span>
-      <span className="mono subtle token-address">{shortAddr(token.address)}</span>
+      {!isNative && <span className="mono subtle token-address">{shortAddr(token.address)}</span>}
       {href && <ExternalLink size={12} aria-hidden="true" />}
     </>
   );

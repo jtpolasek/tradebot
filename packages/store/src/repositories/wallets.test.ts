@@ -11,6 +11,7 @@ import { getLastBlock, upsertLastBlock } from "./chainState.js";
 import { closeDb, getDb } from "../db.js";
 import {
   insertSignal,
+  getSignalById,
   getRecentSignals,
   getCandidateSignals,
   getCopyRequestedCandidates,
@@ -217,6 +218,37 @@ describe("candidate review repositories", () => {
     expect(signal?.tokenOut.symbol).toBe("TEST");
     expect(signal?.tokenOut.name).toBe("Test Token");
   });
+
+  it("hydrates native placeholder signal tokens as ETH", async () => {
+    const wallet = await insertWallet(db as Parameters<typeof insertWallet>[0], {
+      chain: "base",
+      address: "0x7777777777777777777777777777777777777777",
+      label: "Native candidate",
+      active: true,
+    });
+    await insertSignal(db as Parameters<typeof insertSignal>[0], {
+      id: "77777777-7777-4777-8777-777777777777",
+      chain: "base",
+      walletId: wallet.id,
+      txHash: "0x7777777777777777777777777777777777777777777777777777777777777777",
+      source: "confirmed",
+      side: "buy",
+      tokenIn: { chain: "base", address: "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", symbol: "", decimals: 18 },
+      tokenOut: { chain: "base", address: "0x6faa000000000000000000000000000000001ba3", symbol: "SLAY", decimals: 18 },
+      amountIn: 1n,
+      amountOut: 1n,
+      venue: "balance-delta",
+      observedAt: Date.now(),
+      confirmedAt: Date.now(),
+      blockNumber: 1,
+      decodeStatus: "candidate",
+    });
+
+    const signal = await getSignalById(db as Parameters<typeof getSignalById>[0], "77777777-7777-4777-8777-777777777777");
+
+    expect(signal?.tokenIn.symbol).toBe("ETH");
+    expect(signal?.tokenIn.name).toBe("Ether");
+  });
 });
 
 describe("paperFills repository", () => {
@@ -279,6 +311,8 @@ describe("paperFills repository", () => {
     expect(fills[0]?.token.symbol).toBe("cbBTC");
     expect(fills[0]?.token.name).toBe("Coinbase Wrapped BTC");
     expect(fills[0]?.quoteToken.chain).toBe("base");
+    expect(fills[0]?.quoteToken.symbol).toBe("ETH");
+    expect(fills[0]?.quoteToken.name).toBe("Ether");
   });
 });
 

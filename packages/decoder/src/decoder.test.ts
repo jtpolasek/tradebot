@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { EventBus } from "@tradebot/core";
+import { EventBus, NATIVE_TOKEN_PLACEHOLDER } from "@tradebot/core";
 import type { TradeSignal, RawTxEvent } from "@tradebot/core";
 import { classifySide } from "./decoder.js";
 import { SignalDeduper } from "./deduper.js";
@@ -37,6 +37,10 @@ describe("classifySide", () => {
   it("treats native ETH placeholder (empty string) as a quote asset", () => {
     // tokenIn = native ETH (empty address), tokenOut = meme → buy
     expect(classifySide("eth", "", MEME1)).toBe("buy");
+  });
+
+  it("treats native ETH placeholder address as a Base buy quote asset", () => {
+    expect(classifySide("base", NATIVE_TOKEN_PLACEHOLDER, MEME1)).toBe("buy");
   });
 });
 

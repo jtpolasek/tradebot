@@ -200,8 +200,11 @@ app.get("/portfolio", async (_req, reply) => {
 
   const positionsWithMark = await Promise.all(
     positions.map(async (p) => {
-      const mark = await latestMark(db, p.chain, p.tokenAddress);
-      return { ...p, currentPriceUsd: mark?.priceUsd ?? null };
+      const [mark, sourceWallet] = await Promise.all([
+        latestMark(db, p.chain, p.tokenAddress),
+        p.sourceWalletId ? getWalletById(db, p.sourceWalletId) : Promise.resolve(null),
+      ]);
+      return { ...p, currentPriceUsd: mark?.priceUsd ?? null, sourceWallet };
     })
   );
 

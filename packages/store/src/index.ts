@@ -11,3 +11,4 @@ export * from "./repositories/portfolioSnapshots.js";
 export * from "./repositories/leaderStats.js";
 export * from "./repositories/adaptationLog.js";
 export * from "./repositories/settings.js";
+export * from "./repositories/analytics.js";

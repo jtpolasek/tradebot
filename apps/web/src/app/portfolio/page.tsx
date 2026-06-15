@@ -3,7 +3,51 @@
 import { useEffect, useRef, useState } from "react";
 import { RefreshCw } from "lucide-react";
 import { TokenLink } from "@/components/TokenLink";
+import { MetricStrip, type MetricItem } from "@/components/MetricStrip";
 import { apiFetch, formatUsd, timeAgo } from "@/lib/api";
+
+type TokenResult = {
+  chain: string;
+  tokenAddress: string;
+  symbol: string;
+  name?: string;
+  realizedPnlUsd: number;
+  closedTrades: number;
+};
+
+type Analytics = {
+  closedTrades: number;
+  winningTrades: number;
+  losingTrades: number;
+  winRate: number | null;
+  realizedPnlUsd: number;
+  totalFeesUsd: number;
+  totalNotionalUsd: number;
+  feeDrag: number | null;
+  averageHoldHours: number | null;
+  openExposureUsd: number;
+  copiedFills: number;
+  skippedFills: number;
+  skipRate: number | null;
+  byToken: TokenResult[];
+};
+
+const pct = (n: number | null) => (n === null ? "—" : (n * 100).toFixed(1) + "%");
+const hours = (n: number | null) => (n === null ? "—" : n < 1 ? `${Math.round(n * 60)}m` : `${n.toFixed(1)}h`);
+
+function analyticsMetrics(a: Analytics): MetricItem[] {
+  return [
+    { label: "Realized P&L", value: formatUsd(a.realizedPnlUsd), tone: a.realizedPnlUsd >= 0 ? "gain" : "loss" },
+    { label: "Win rate", value: a.winRate === null ? "—" : pct(a.winRate), tone: "muted" },
+    { label: "Closed", value: `${a.winningTrades}W / ${a.losingTrades}L`, tone: "muted" },
+    { label: "Avg hold", value: hours(a.averageHoldHours), tone: "muted" },
+    { label: "Open exposure", value: formatUsd(a.openExposureUsd), tone: "muted" },
+    { label: "Fee drag", value: pct(a.feeDrag), tone: a.feeDrag ? "loss" : "muted" },
+    { label: "Fees paid", value: formatUsd(a.totalFeesUsd), tone: "muted" },
+    { label: "Skip rate", value: pct(a.skipRate), tone: "muted" },
+    { label: "Copied", value: `${a.copiedFills}`, tone: "muted" },
+  ];
+}
 
 type PositionRow = {
   id: string;
@@ -36,6 +80,7 @@ type PortfolioData = {
 
 export default function PortfolioPage() {
   const [data, setData] = useState<PortfolioData | null>(null);
+  const [analytics, setAnalytics] = useState<Analytics | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
   const chartRef = useRef<HTMLDivElement>(null);
@@ -44,8 +89,12 @@ export default function PortfolioPage() {
 
   async function load() {
     try {
-      const d = await apiFetch<PortfolioData>("/portfolio");
+      const [d, a] = await Promise.all([
+        apiFetch<PortfolioData>("/portfolio"),
+        apiFetch<{ analytics: Analytics }>("/analytics"),
+      ]);
       setData(d);
+      setAnalytics(a.analytics);
       setError("");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load portfolio");
@@ -146,6 +195,41 @@ export default function PortfolioPage() {
         <div className="panel">
           <h2>Equity curve</h2>
           <div ref={chartRef} style={{ width: "100%", height: 200 }} />
+        </div>
+      )}
+
+      {analytics && (
+        <div className="panel">
+          <h2 style={{ marginBottom: 12 }}>Performance</h2>
+          <MetricStrip items={analyticsMetrics(analytics)} />
+        </div>
+      )}
+
+      {analytics && analytics.byToken.length > 0 && (
+        <div className="panel">
+          <h2 style={{ marginBottom: 10 }}>Realized P&L by token</h2>
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr><th>Token</th><th>Chain</th><th>Closed trades</th><th>Realized P&L</th></tr>
+              </thead>
+              <tbody>
+                {analytics.byToken.map((t) => (
+                  <tr key={`${t.chain}:${t.tokenAddress}`}>
+                    <td>
+                      <TokenLink
+                        chain={t.chain}
+                        token={{ chain: t.chain, address: t.tokenAddress, symbol: t.symbol, ...(t.name ? { name: t.name } : {}) }}
+                      />
+                    </td>
+                    <td><span className="pill">{t.chain}</span></td>
+                    <td>{t.closedTrades}</td>
+                    <td className={t.realizedPnlUsd >= 0 ? "good" : "bad"}>{formatUsd(t.realizedPnlUsd)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
       )}
 

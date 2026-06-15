@@ -69,6 +69,38 @@ export interface TokenRef {
   decimals: number;
 }
 
+/** Realized PnL rollup for a single token across the portfolio's positions. */
+export interface PortfolioAnalyticsTokenResult {
+  chain: ChainId;
+  tokenAddress: string;
+  symbol: string;
+  name?: string;
+  realizedPnlUsd: number;
+  closedTrades: number;
+}
+
+/**
+ * Aggregate portfolio performance. A "closed trade" is a position with a closedAt stamp;
+ * win/loss is judged on its realized PnL. Manual candidate copies flow through the normal
+ * fill/position path, so they are counted here like any other copy.
+ */
+export interface PortfolioAnalytics {
+  closedTrades: number;
+  winningTrades: number;
+  losingTrades: number;
+  winRate: number | null;        // winningTrades / closedTrades
+  realizedPnlUsd: number;        // summed across all positions
+  totalFeesUsd: number;          // gas + dex fees over copied fills
+  totalNotionalUsd: number;      // copied fill notional
+  feeDrag: number | null;        // totalFeesUsd / totalNotionalUsd
+  averageHoldHours: number | null;
+  openExposureUsd: number;       // cost basis of open positions
+  copiedFills: number;
+  skippedFills: number;
+  skipRate: number | null;       // skippedFills / (copied + skipped)
+  byToken: PortfolioAnalyticsTokenResult[];
+}
+
 export interface PaperFill {
   id: string;
   signalId: string;

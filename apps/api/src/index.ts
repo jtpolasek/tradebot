@@ -19,6 +19,7 @@ import {
   setCandidateReviewStatus,
   getRecentFills,
   getOpenPositions,
+  getPortfolioAnalytics,
   latestSnapshot,
   getRecentSnapshots,
   getAllLeaderStats,
@@ -205,6 +206,11 @@ app.get("/portfolio", async (_req, reply) => {
   );
 
   reply.send({ snapshot, positions: positionsWithMark, snapshots });
+});
+
+app.get("/analytics", async (_req, reply) => {
+  const analytics = await getPortfolioAnalytics(db);
+  reply.send({ analytics });
 });
 
 // ── Leaders ───────────────────────────────────────────────────────────────────

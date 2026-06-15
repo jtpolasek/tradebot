@@ -17,6 +17,8 @@ import {
   setCandidateReviewStatus,
 } from "./signals.js";
 import { insertFill, getRecentFills } from "./paperFills.js";
+import { upsertPosition, closePositionByKey } from "./positions.js";
+import { getPortfolioAnalytics } from "./analytics.js";
 import { upsertToken } from "./tokens.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -277,5 +279,83 @@ describe("paperFills repository", () => {
     expect(fills[0]?.token.symbol).toBe("cbBTC");
     expect(fills[0]?.token.name).toBe("Coinbase Wrapped BTC");
     expect(fills[0]?.quoteToken.chain).toBe("base");
+  });
+});
+
+describe("analytics repository", () => {
+  it("aggregates fills and positions into portfolio analytics", async () => {
+    const wallet = await insertWallet(db as Parameters<typeof insertWallet>[0], {
+      chain: "eth",
+      address: "0x9999999999999999999999999999999999999999",
+      label: "Analytics leader",
+      active: true,
+    });
+    const now = Date.now();
+    await insertSignal(db as Parameters<typeof insertSignal>[0], {
+      id: "33333333-3333-4333-8333-333333333333",
+      chain: "eth",
+      walletId: wallet.id,
+      txHash: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      source: "confirmed",
+      side: "buy",
+      tokenIn: { chain: "eth", address: "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", symbol: "USDC", decimals: 6 },
+      tokenOut: { chain: "eth", address: "0xaaaa000000000000000000000000000000000001", symbol: "AAA", decimals: 18 },
+      amountIn: 1n,
+      amountOut: 1n,
+      venue: "balance-delta",
+      observedAt: now,
+      confirmedAt: now,
+      blockNumber: 1,
+      decodeStatus: "decoded",
+    });
+
+    // One copied fill ($1000 notional, $30 fees) and one skipped fill.
+    await insertFill(db as Parameters<typeof insertFill>[0], {
+      id: "44444444-4444-4444-8444-444444444444",
+      signalId: "33333333-3333-4333-8333-333333333333",
+      decidedAt: now,
+      decision: "copied",
+      side: "buy",
+      token: { chain: "eth", address: "0xaaaa000000000000000000000000000000000001", symbol: "AAA", decimals: 18 },
+      quoteToken: { chain: "eth", address: "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", symbol: "USDC", decimals: 6 },
+      qty: 100, priceUsd: 10, notionalUsd: 1000, feeUsd: 30, slippageBps: 40, latencyMs: 10, provisional: false,
+    });
+    await insertFill(db as Parameters<typeof insertFill>[0], {
+      id: "55555555-5555-4555-8555-555555555555",
+      signalId: "33333333-3333-4333-8333-333333333333",
+      decidedAt: now,
+      decision: "skipped",
+      skipReason: "below-min-liquidity",
+      side: "buy",
+      token: { chain: "eth", address: "0xaaaa000000000000000000000000000000000001", symbol: "AAA", decimals: 18 },
+      quoteToken: { chain: "eth", address: "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", symbol: "USDC", decimals: 6 },
+      qty: 0, priceUsd: 0, notionalUsd: 0, feeUsd: 0, slippageBps: 0, latencyMs: 0, provisional: false,
+    });
+
+    // One open position (cost basis $50) and one closed winner (+$100).
+    await upsertPosition(db as Parameters<typeof upsertPosition>[0], {
+      chain: "eth", tokenAddress: "0xaaaa000000000000000000000000000000000001",
+      qty: 10, avgCostUsd: 5, realizedPnlUsd: 0, sourceWalletId: wallet.id,
+    });
+    await upsertPosition(db as Parameters<typeof upsertPosition>[0], {
+      chain: "eth", tokenAddress: "0xbbbb000000000000000000000000000000000002",
+      qty: 5, avgCostUsd: 4, realizedPnlUsd: 0, sourceWalletId: wallet.id,
+    });
+    await closePositionByKey(db as Parameters<typeof closePositionByKey>[0], {
+      chain: "eth", tokenAddress: "0xbbbb000000000000000000000000000000000002",
+      sourceWalletId: wallet.id, realizedPnlUsd: 100,
+    });
+
+    const a = await getPortfolioAnalytics(db as Parameters<typeof getPortfolioAnalytics>[0]);
+    expect(a.copiedFills).toBe(1);
+    expect(a.skippedFills).toBe(1);
+    expect(a.skipRate).toBeCloseTo(0.5, 10);
+    expect(a.totalFeesUsd).toBeCloseTo(30, 10);
+    expect(a.feeDrag).toBeCloseTo(0.03, 10);
+    expect(a.closedTrades).toBe(1);
+    expect(a.winningTrades).toBe(1);
+    expect(a.realizedPnlUsd).toBeCloseTo(100, 10);
+    expect(a.openExposureUsd).toBeCloseTo(50, 10);
+    expect(a.byToken[0]).toMatchObject({ tokenAddress: "0xbbbb000000000000000000000000000000000002", realizedPnlUsd: 100 });
   });
 });

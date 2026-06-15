@@ -114,6 +114,7 @@ p { margin-bottom: 0.7rem; }
 .metric-value { color: #f8fafc; font-variant-numeric: tabular-nums; font-size: 1.05rem; font-weight: 800; }
 .metric-value.gain { color: var(--gain); }
 .metric-value.loss { color: var(--loss); }
+.metric-value.muted { color: var(--subtle); }
 
 /* Table */
 .table-wrap { overflow-x: auto; }

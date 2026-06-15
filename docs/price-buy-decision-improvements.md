@@ -33,10 +33,10 @@ After review, the remaining work was reordered by value:
 1. ~~**Item 6 (unify sell fill modeling).**~~ Done — exit sells now share the copied-sell
    fee/slippage/0x/accounting model.
 2. ~~**New item 7 (Chainlink staleness gate).**~~ Done — the missing companion to the V3 TWAP gate.
-3. **Item 5 (deeper-pool selection) is the remaining functional item.** A precision nicety, and it
-   carries an internal inconsistency to resolve first (see its note).
-4. Lower priority: persist price/liquidity provenance in `paper_fills` (Open Decision resolved
-   "yes, via migration"), and bound the TTL-only pricing caches.
+3. ~~**Item 5 (deeper-pool selection + metric consistency).**~~ Done — `findBestMarket` selects the
+   deepest USD market across all quotes/venues/tiers; price and liquidity share it.
+4. Remaining (lower priority): persist price/liquidity provenance in `paper_fills` (Open Decision
+   resolved "yes, via migration"), and bound the TTL-only pricing caches.
 
 ## Recommended Implementation Order
 
@@ -168,7 +168,7 @@ Implemented notes:
 
 ### 5. Improve Liquidity Selection And Reporting
 
-Status: partially complete.
+Status: complete (2026-06-15).
 
 Problem:
 Liquidity is approximated as quote-token reserve times two and returns the first usable quote-asset pool. For concentrated liquidity this is only a rough proxy, and price/liquidity may not be from the same best market.
@@ -199,14 +199,25 @@ Acceptance:
 
 Implemented notes:
 
-- Added `LiquidityResult` metadata and engine logging.
-- Deeper-pool selection across all quote assets/venues is still pending.
-- Liquidity remains the current `quote-balance-x2` approximation.
-- **Metric inconsistency to fix first:** `findDeepestV3Pool` picks the "deepest" pool by the
-  pool's in-range `liquidity()` value (L), but `getLiquidityUsdResult` then reports liquidity as
-  `quote-balance × 2`. Selection and reporting use two different liquidity measures, so the pool
-  chosen as "deepest" is not necessarily the one with the largest reported USD liquidity. When
-  this item is done, selection and the reported metric should agree.
+- Added `LiquidityResult` metadata and engine logging (earlier).
+- Replaced `findDeepestV3Pool` (per-quote-pair, ranked by in-range `liquidity()` L) with
+  `findBestMarket(chain, token)`, which scans **every quote asset × venue × fee tier** and selects
+  the pool with the deepest **USD** liquidity (`quote-balance × quoteUsd × 2`) — the same metric
+  `getLiquidityUsd` reports. **Metric inconsistency resolved:** primary ranking is now the reported
+  USD metric; in-range L is kept only as a deterministic tiebreak when a candidate's quote balance
+  can't be read (so a pool with no readable balance is still usable for pricing, just ranked last).
+- **Price and liquidity now come from the same market.** `getUsdPriceResult` and
+  `getLiquidityUsdResult` both derive from `findBestMarket`, so they can never disagree on the pool.
+  The market (incl. a negative result) is cached per token for 5 min; price still re-reads `slot0`
+  fresh and TWAP per call.
+- Liquidity is still the `quote-balance-x2` approximation (the method label is unchanged); the
+  improvement is *which* pool that approximation is taken from.
+- Cost note: discovery now probes all quotes/venues/tiers (one `balanceOf` per candidate) instead
+  of the first working quote pair, so a cache-miss discovery is heavier. Bounded by the 5-min
+  market cache; caching token decimals could trim it further later.
+- Test added: "selects the deeper USD market across quote assets for both price and liquidity"
+  (USDC-shallow vs WETH-deep → both price and liquidity resolve to the WETH pool). `pnpm build` and
+  `pnpm test` green (24 pricing tests).
 
 ### 6. Unify Sell Fill Modeling
 

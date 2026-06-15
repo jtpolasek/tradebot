@@ -201,13 +201,6 @@ const NULL_ADDRESS = "0x0000000000000000000000000000000000000000";
 type LlamaEntry = { price: number; fetchedAt: number };
 const llamaCache = new Map<string, LlamaEntry>();
 
-// Liquidity: 5-minute TTL
-type LiqEntry = LiquidityResult & { fetchedAt: number };
-const liqCache = new Map<string, LiqEntry>();
-
-// Pool discovery: static pool facts (address, tokens, decimals) are immutable, but the
-// "deepest" pool choice can drift, so 10-minute TTL. Negative results are cached too —
-// otherwise tokens with no V3 pool re-probe every factory/fee-tier on each lookup.
 type CachedPool = {
   address: string;
   venue: "uniswap-v3" | "aerodrome-cl";
@@ -217,16 +210,30 @@ type CachedPool = {
   decimals1: number;
   poolAbi: typeof UNI_V3_POOL_ABI | typeof AERODROME_CL_POOL_ABI;
 };
-type PoolEntry = { pool: CachedPool | null; fetchedAt: number };
-const poolCache = new Map<string, PoolEntry>();
+
+// A token's best market: the (pool, quote asset) with the deepest USD liquidity across every quote
+// asset, venue, and fee tier. Both price and liquidity read from this same market so the two are
+// always consistent. `liquidityUsd` is null when the pool's quote balance couldn't be read (the
+// pool is still usable for pricing; it just ranks below any market with a known balance).
+type Market = {
+  pool: CachedPool;
+  quoteTokenAddress: string;
+  quoteUsdPrice: number;
+  liquidityUsd: number | null;
+};
+
+// Market discovery: the "deepest" choice can drift, and negative results are cached too —
+// otherwise tokens with no pool re-probe every factory/fee-tier on each lookup. 5-minute TTL keeps
+// reported liquidity reasonably fresh since price/liquidity both derive from it.
+type MarketEntry = { market: Market | null; fetchedAt: number };
+const marketCache = new Map<string, MarketEntry>();
 
 // Chainlink ETH/USD: 30s TTL — shared across every token priced against WETH in a tick
 type ChainlinkEntry = { price: number; fetchedAt: number };
 const chainlinkCache = new Map<ChainId, ChainlinkEntry>();
 
 const LLAMA_TTL_MS = 30_000;
-const LIQ_TTL_MS = 5 * 60_000;
-const POOL_TTL_MS = 10 * 60_000;
+const MARKET_TTL_MS = 5 * 60_000;
 const CHAINLINK_TTL_MS = 30_000;
 const TWAP_WINDOW_SECONDS = 300;
 
@@ -242,8 +249,7 @@ function maxChainlinkStalenessSec(): number {
 
 export function clearCaches() {
   llamaCache.clear();
-  liqCache.clear();
-  poolCache.clear();
+  marketCache.clear();
   chainlinkCache.clear();
 }
 
@@ -370,55 +376,58 @@ function v3VenueConfigs(chain: ChainId): V3VenueConfig[] {
   return configs;
 }
 
-async function findDeepestV3Pool(
-  chain: ChainId,
-  tokenA: string,
-  tokenB: string,
-  client: RpcClient
-): Promise<CachedPool | null> {
-  const cacheKey = `${chain}:${tokenA.toLowerCase()}:${tokenB.toLowerCase()}`;
-  const cached = poolCache.get(cacheKey);
-  if (cached && Date.now() - cached.fetchedAt < POOL_TTL_MS) return cached.pool;
+/**
+ * Finds a token's best market: the (pool, quote asset) with the deepest USD liquidity across every
+ * quote asset, venue, and fee tier. Liquidity is measured as quote-balance × quoteUsd × 2 — the same
+ * metric `getLiquidityUsd` reports — so price and liquidity always come from the same pool. The pool's
+ * in-range `liquidity()` (L) is kept only as a deterministic tiebreak when a candidate's USD balance
+ * can't be read. Result (including a negative) is cached per token.
+ */
+async function findBestMarket(chain: ChainId, token: string, client: RpcClient): Promise<Market | null> {
+  const cacheKey = `${chain}:${token.toLowerCase()}`;
+  const cached = marketCache.get(cacheKey);
+  if (cached && Date.now() - cached.fetchedAt < MARKET_TTL_MS) return cached.market;
 
-  const addrA = tokenA as `0x${string}`;
-  const addrB = tokenB as `0x${string}`;
+  const tokenLc = token.toLowerCase();
+  let best: { market: Market; liquidityVal: bigint } | null = null;
 
-  let best: (CachedPool & { liquidityVal: bigint }) | null = null;
+  for (const quoteAddr of QUOTE_ASSETS[chain]) {
+    if (quoteAddr === tokenLc) continue; // token IS this quote asset — priced directly elsewhere
 
-  for (const venue of v3VenueConfigs(chain)) {
-    for (const spacing of venue.spacings) {
-      try {
-        const poolAddr = await client.readContract({
-          address: venue.factory,
-          abi: venue.factoryAbi,
-          functionName: "getPool",
-          args: [addrA, addrB, spacing],
-        }) as string;
+    for (const venue of v3VenueConfigs(chain)) {
+      for (const spacing of venue.spacings) {
+        try {
+          const poolAddr = await client.readContract({
+            address: venue.factory,
+            abi: venue.factoryAbi,
+            functionName: "getPool",
+            args: [token as `0x${string}`, quoteAddr as `0x${string}`, spacing],
+          }) as string;
+          if (!poolAddr || poolAddr === NULL_ADDRESS) continue;
 
-        if (!poolAddr || poolAddr === NULL_ADDRESS) continue;
+          // Only price the quote asset once we know a pool exists, to avoid needless lookups.
+          const quoteUsdPrice = await getUsdPrice(chain, quoteAddr, client);
+          if (quoteUsdPrice === null) continue;
 
-        const pool = poolAddr as `0x${string}`;
+          const pool = poolAddr as `0x${string}`;
+          const [slot0Result, liquidityVal, token0Result, token1Result] = await Promise.all([
+            client.readContract({ address: pool, abi: venue.poolAbi, functionName: "slot0" }),
+            client.readContract({ address: pool, abi: venue.poolAbi, functionName: "liquidity" }),
+            client.readContract({ address: pool, abi: venue.poolAbi, functionName: "token0" }),
+            client.readContract({ address: pool, abi: venue.poolAbi, functionName: "token1" }),
+          ]) as [unknown[], bigint, string, string];
 
-        const [slot0Result, liquidityResult, token0Result, token1Result] = await Promise.all([
-          client.readContract({ address: pool, abi: venue.poolAbi, functionName: "slot0" }),
-          client.readContract({ address: pool, abi: venue.poolAbi, functionName: "liquidity" }),
-          client.readContract({ address: pool, abi: venue.poolAbi, functionName: "token0" }),
-          client.readContract({ address: pool, abi: venue.poolAbi, functionName: "token1" }),
-        ]) as [unknown[], bigint, string, string];
+          const sqrtPriceX96 = slot0Result[0] as bigint;
+          if (sqrtPriceX96 === 0n) continue;
 
-        const sqrtPriceX96 = slot0Result[0] as bigint;
-        if (sqrtPriceX96 === 0n) continue;
+          const t0 = (token0Result as string).toLowerCase();
+          const t1 = (token1Result as string).toLowerCase();
+          const [dec0, dec1] = await Promise.all([
+            client.readContract({ address: t0 as `0x${string}`, abi: ERC20_BALANCE_ABI, functionName: "decimals" }).catch(() => 18),
+            client.readContract({ address: t1 as `0x${string}`, abi: ERC20_BALANCE_ABI, functionName: "decimals" }).catch(() => 18),
+          ]) as [number, number];
 
-        const t0 = (token0Result as string).toLowerCase();
-        const t1 = (token1Result as string).toLowerCase();
-
-        const [dec0, dec1] = await Promise.all([
-          client.readContract({ address: t0 as `0x${string}`, abi: ERC20_BALANCE_ABI, functionName: "decimals" }).catch(() => 18),
-          client.readContract({ address: t1 as `0x${string}`, abi: ERC20_BALANCE_ABI, functionName: "decimals" }).catch(() => 18),
-        ]) as [number, number];
-
-        if (!best || liquidityResult > best.liquidityVal) {
-          best = {
+          const cachedPool: CachedPool = {
             address: poolAddr.toLowerCase(),
             venue: venue.venue,
             token0: t0,
@@ -426,32 +435,66 @@ async function findDeepestV3Pool(
             decimals0: dec0,
             decimals1: dec1,
             poolAbi: venue.poolAbi,
-            liquidityVal: liquidityResult,
           };
+
+          const liquidityUsd = await readPoolLiquidityUsd(cachedPool, quoteAddr.toLowerCase(), quoteUsdPrice, client);
+
+          // Rank by known USD liquidity; fall back to in-range L only to break ties (e.g. when no
+          // candidate's balance could be read).
+          const better =
+            best === null ||
+            (liquidityUsd ?? -1) > (best.market.liquidityUsd ?? -1) ||
+            ((liquidityUsd ?? -1) === (best.market.liquidityUsd ?? -1) && liquidityVal > best.liquidityVal);
+          if (better) {
+            best = {
+              market: { pool: cachedPool, quoteTokenAddress: quoteAddr.toLowerCase(), quoteUsdPrice, liquidityUsd },
+              liquidityVal,
+            };
+          }
+        } catch {
+          // pool not found or call failed — try next fee tier/tick spacing
         }
-      } catch {
-        // pool not found or call failed — try next fee tier/tick spacing
       }
     }
   }
 
-  const pool = best ? (({ liquidityVal: _dropped, ...info }) => info)(best) : null;
-  poolCache.set(cacheKey, { pool, fetchedAt: Date.now() });
-  return pool;
+  const market = best?.market ?? null;
+  marketCache.set(cacheKey, { market, fetchedAt: Date.now() });
+  return market;
+}
+
+/** USD value of a pool's quote-side reserves (quote balance × quoteUsd × 2). Null if unreadable. */
+async function readPoolLiquidityUsd(
+  pool: CachedPool,
+  quoteAddr: string,
+  quoteUsdPrice: number,
+  client: RpcClient
+): Promise<number | null> {
+  try {
+    const quoteIsToken0 = pool.token0 === quoteAddr;
+    const quoteDecimals = quoteIsToken0 ? pool.decimals0 : pool.decimals1;
+    const balanceRaw = await client.readContract({
+      address: quoteAddr as `0x${string}`,
+      abi: ERC20_BALANCE_ABI,
+      functionName: "balanceOf",
+      args: [pool.address as `0x${string}`],
+    }) as bigint;
+    return fromBaseUnits(balanceRaw, quoteDecimals) * quoteUsdPrice * 2;
+  } catch {
+    return null;
+  }
 }
 
 // ─── V3 spot price ───────────────────────────────────────────────────────────
 
-async function getV3SpotPriceResult(
+async function priceFromPool(
   chain: ChainId,
   token: string,
-  quoteToken: string,
-  client: RpcClient,
-  quoteUsdPrice: number
+  pool: CachedPool,
+  quoteTokenAddress: string,
+  quoteUsdPrice: number,
+  client: RpcClient
 ): Promise<PriceResult | null> {
-  const pool = await findDeepestV3Pool(chain, token, quoteToken, client);
-  if (!pool) return null;
-
   // Spot price must be fresh even when the pool itself came from cache
   let sqrtPriceX96: bigint;
   try {
@@ -493,7 +536,7 @@ async function getV3SpotPriceResult(
     source: "v3-spot",
     chain,
     tokenAddress: token.toLowerCase(),
-    quoteTokenAddress: quoteToken.toLowerCase(),
+    quoteTokenAddress: quoteTokenAddress,
     poolAddress: pool.address,
     venue: pool.venue,
     ...(twap !== null ? { twapPriceUsd: twap } : {}),
@@ -615,15 +658,10 @@ export async function getUsdPriceResult(
     return getLlamaPriceResult(chain, addr);
   }
 
-  // 3. V3 pool spot price — try each quote asset until one works
-  const quoteAssets = QUOTE_ASSETS[chain];
-  for (const quoteAddr of quoteAssets) {
-    if (quoteAddr === addr) continue; // token IS a quote asset, price it directly
-    // Get quote asset USD price (recursive, but quote assets are stablecoins or WETH — no infinite loop)
-    const quoteUsdPrice = await getUsdPrice(chain, quoteAddr, client);
-    if (quoteUsdPrice === null) continue;
-
-    const price = await getV3SpotPriceResult(chain, addr, quoteAddr, client, quoteUsdPrice);
+  // 3. V3/Aerodrome spot price from the token's deepest USD market (same market liquidity uses)
+  const market = await findBestMarket(chain, addr, client);
+  if (market) {
+    const price = await priceFromPool(chain, addr, market.pool, market.quoteTokenAddress, market.quoteUsdPrice, client);
     if (price !== null && price.priceUsd > 0) return price;
   }
 
@@ -632,9 +670,9 @@ export async function getUsdPriceResult(
 }
 
 /**
- * Returns the USD value of the quote-side reserves in the deepest V3 pool.
- * Approximation: quote reserve × quote USD price × 2 (assumes 50/50 pool).
- * Cache: 5 minutes.
+ * Returns the USD value of the quote-side reserves in the token's deepest USD market.
+ * Approximation: quote reserve × quote USD price × 2 (assumes 50/50 pool). Selected by the same
+ * `findBestMarket` that prices the token, so price and liquidity always agree on the pool.
  */
 export async function getLiquidityUsd(
   chain: ChainId,
@@ -650,57 +688,19 @@ export async function getLiquidityUsdResult(
   client: RpcClient
 ): Promise<LiquidityResult | null> {
   const addr = normalizePricedAddress(chain, address);
-  const cacheKey = `${chain}:${addr}`;
-  const cached = liqCache.get(cacheKey);
-  if (cached && Date.now() - cached.fetchedAt < LIQ_TTL_MS) {
-    const { fetchedAt: _fetchedAt, ...result } = cached;
-    return result;
-  }
+  const market = await findBestMarket(chain, addr, client);
+  if (!market || market.liquidityUsd === null) return null;
 
-  const quoteAssets = QUOTE_ASSETS[chain];
-  for (const quoteAddr of quoteAssets) {
-    if (quoteAddr === addr) continue;
-
-    const pool = await findDeepestV3Pool(chain, addr, quoteAddr, client);
-    if (!pool) continue;
-
-    const quoteUsdPrice = await getUsdPrice(chain, quoteAddr, client);
-    if (quoteUsdPrice === null) continue;
-
-    try {
-      // Get quote token balance in the pool
-      const quoteIsToken0 = pool.token0 === quoteAddr;
-      const quoteTokenAddr = (quoteIsToken0 ? pool.token0 : pool.token1) as `0x${string}`;
-      const quoteDecimals = quoteIsToken0 ? pool.decimals0 : pool.decimals1;
-
-      const balanceRaw = await client.readContract({
-        address: quoteTokenAddr,
-        abi: ERC20_BALANCE_ABI,
-        functionName: "balanceOf",
-        args: [pool.address as `0x${string}`],
-      }) as bigint;
-
-      const balanceHuman = fromBaseUnits(balanceRaw, quoteDecimals);
-      const liquidityUsd = balanceHuman * quoteUsdPrice * 2;
-
-      const result: LiquidityResult = {
-        liquidityUsd,
-        chain,
-        tokenAddress: addr,
-        quoteTokenAddress: quoteAddr.toLowerCase(),
-        poolAddress: pool.address,
-        venue: pool.venue,
-        method: "quote-balance-x2",
-        warnings: [],
-      };
-      liqCache.set(cacheKey, { ...result, fetchedAt: Date.now() });
-      return result;
-    } catch (err) {
-      logger.warn({ err, chain, address: addr }, "getLiquidityUsd balance read failed");
-    }
-  }
-
-  return null;
+  return {
+    liquidityUsd: market.liquidityUsd,
+    chain,
+    tokenAddress: addr,
+    quoteTokenAddress: market.quoteTokenAddress,
+    poolAddress: market.pool.address,
+    venue: market.pool.venue,
+    method: "quote-balance-x2",
+    warnings: [],
+  };
 }
 
 function normalizePricedAddress(chain: ChainId, address: string): string {

@@ -346,7 +346,12 @@ describe("getLiquidityUsd", () => {
     const sqrtPriceX96 = BigInt(Math.round(Q96)); // arbitrary, just needs to be non-zero
 
     const client = makeClient({
-      [`${UNI_FACTORY}:getPool`]: FAKE_POOL,
+      // Only a USDC pool exists; the WETH quote finds nothing (keeps the test offline).
+      [`${UNI_FACTORY}:getPool`]: (args?: unknown[]) => {
+        const a = (args?.[0] as string)?.toLowerCase();
+        const b = (args?.[1] as string)?.toLowerCase();
+        return (a === ETH_USDC || b === ETH_USDC) ? FAKE_POOL : NULL_ADDR;
+      },
       [`${FAKE_POOL}:slot0`]: [sqrtPriceX96, 0, 0, 0, 0, 0, true],
       [`${FAKE_POOL}:liquidity`]: 1_000_000n,
       [`${FAKE_POOL}:token0`]: FAKE_TOKEN_LO,
@@ -377,6 +382,53 @@ describe("getLiquidityUsd", () => {
     const client = makeClient(); // all getPool → NULL_ADDR
     const liq = await getLiquidityUsd("eth", FAKE_TOKEN_HI, client);
     expect(liq).toBeNull();
+  });
+
+  it("selects the deeper USD market across quote assets for both price and liquidity", async () => {
+    const POOL_USDC = "0xaaaa1111aaaa1111aaaa1111aaaa1111aaaa1111";
+    const POOL_WETH = "0xbbbb2222bbbb2222bbbb2222bbbb2222bbbb2222";
+    // USDC pool: shallow ($200k). WETH pool: deep ($5M at $2500/ETH) → must win.
+    const usdcSqrt = BigInt(Math.round(Math.sqrt(2.40 * 10 ** (6 - 18)) * Q96)); // $2.40 via USDC
+    const wethSqrt = BigInt(Math.round(Math.sqrt(0.001) * Q96)); // 0.001 WETH/token → $2.50 via WETH
+    const chainlinkAnswer = BigInt(Math.round(2500 * 1e8));
+
+    const client = makeClient({
+      [`${CHAINLINK_FEED_ETH}:latestRoundData`]: chainlinkRound(chainlinkAnswer),
+      [`${UNI_FACTORY}:getPool`]: (args?: unknown[]) => {
+        const a = (args?.[0] as string)?.toLowerCase();
+        const b = (args?.[1] as string)?.toLowerCase();
+        if (a === ETH_USDC || b === ETH_USDC) return POOL_USDC;
+        if (a === ETH_WETH || b === ETH_WETH) return POOL_WETH;
+        return NULL_ADDR;
+      },
+      [`${POOL_USDC}:slot0`]: [usdcSqrt, 0, 0, 0, 0, 0, true],
+      [`${POOL_USDC}:liquidity`]: 9_999_999n, // larger L, but USD balance is what should decide
+      [`${POOL_USDC}:token0`]: FAKE_TOKEN_LO,
+      [`${POOL_USDC}:token1`]: ETH_USDC,
+      [`${POOL_USDC}:observe`]: [[0n, 0n], [0n, 0n]],
+      [`${ETH_USDC}:balanceOf`]: BigInt(100_000 * 1e6), // $200k
+      [`${POOL_WETH}:slot0`]: [wethSqrt, 0, 0, 0, 0, 0, true],
+      [`${POOL_WETH}:liquidity`]: 1n,
+      [`${POOL_WETH}:token0`]: FAKE_TOKEN_LO,
+      [`${POOL_WETH}:token1`]: ETH_WETH,
+      [`${POOL_WETH}:observe`]: [[0n, 0n], [0n, 0n]],
+      [`${ETH_WETH}:balanceOf`]: BigInt(1000) * 10n ** 18n, // 1000 WETH → $5M
+      [`${FAKE_TOKEN_LO}:decimals`]: 18,
+      [`${ETH_USDC}:decimals`]: 6,
+      [`${ETH_WETH}:decimals`]: 18,
+    });
+
+    const liq = await getLiquidityUsdResult("eth", FAKE_TOKEN_LO, client);
+    expect(liq).toMatchObject({
+      poolAddress: POOL_WETH,
+      quoteTokenAddress: ETH_WETH,
+      venue: "uniswap-v3",
+    });
+    expect(liq?.liquidityUsd).toBeCloseTo(5_000_000, 0);
+
+    const price = await getUsdPriceResult("eth", FAKE_TOKEN_LO, client);
+    expect(price).toMatchObject({ poolAddress: POOL_WETH, quoteTokenAddress: ETH_WETH });
+    expect(price?.priceUsd).toBeCloseTo(2.5, 6); // from the WETH pool, not the USDC pool's $2.40
   });
 
   it("uses WETH pools when liquidity is requested for the native placeholder", async () => {

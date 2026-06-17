@@ -164,15 +164,18 @@ persisted → engine hints pricing → pricing values the V4 pool. New LOCAL tra
 evaluated against `MIN_LIQUIDITY_USD` instead of skipping `no-liquidity-data`. (Existing pre-fix
 rows still have null poolId; only new signals get it.)
 
-## Follow-up — V4 marks & exit-sell depth (deferred from Part 4)
+## Follow-up — V4 marks & exit-sell depth — **complete (2026-06-17)**
 
-Open V4 positions can't re-price because the marks job and exit sell don't have a poolId. To close:
-- Persist `poolId` (+ counter currency) on the **position** when a V4 buy opens it (positions schema
-  + `upsertPosition`), OR have `getOpenPositionTokens` join the opening `trade_signals` row to
-  recover poolId/counter.
-- Pass that hint into `getUsdPriceResult` in `marks.ts` and into `getLiquidityUsd` in
-  `executeExitSell`.
-- Test: an open V4 position gets a persisted mark; exit-sell slippage uses real V4 liquidity.
+Open V4 positions couldn't re-price because the marks job and exit sell had no poolId. Closed via
+the **lookup** option (not denormalising onto positions): `getV4MarketHintForToken(db, chain, token)`
+in `packages/store/src/repositories/signals.ts` recovers `{ poolId, counterCurrency }` from the most
+recent `trade_signals` row touching the token on either leg (poolId is a property of the token's V4
+pool, not a specific trade). `marks.ts` passes the hint into `getUsdPriceResult`; `executeExitSell`
+passes it into `getLiquidityUsd`. Added indexes `trade_signals_token_in_idx` /
+`trade_signals_token_out_idx` (migration 0008) so the per-tick marks lookup doesn't seq-scan the
+growing signals history. Tests: store helper recovers the hint from buy/sell signals and returns null
+for an unrelated token; engine test proves the exit sell passes the recovered hint to `getLiquidityUsd`.
+`pnpm build` and `pnpm test` green.
 
 ## Part 5 — Validation & docs
 

@@ -1,7 +1,7 @@
 import type { ChainId } from "@tradebot/core";
 import { createLogger } from "@tradebot/core";
 import type { Db } from "@tradebot/store";
-import { getOpenPositionTokens, insertPriceMark } from "@tradebot/store";
+import { getOpenPositionTokens, getV4MarketHintForToken, insertPriceMark } from "@tradebot/store";
 import { getUsdPriceResult } from "./price.js";
 
 const logger = createLogger("pricing:marks");
@@ -30,7 +30,10 @@ export function startMarksJob(
       for (const { chain, tokenAddress } of tokens) {
         if (stopped) return;
         try {
-          const price = await getUsdPriceResult(chain, tokenAddress, clients[chain]);
+          // V4-only tokens can't be discovered by pair; recover the poolId from a prior signal so
+          // the position re-prices instead of being skipped as unpriceable.
+          const hint = (await getV4MarketHintForToken(db, chain, tokenAddress)) ?? undefined;
+          const price = await getUsdPriceResult(chain, tokenAddress, clients[chain], hint);
           if (price === null) {
             logger.warn({ chain, tokenAddress }, "No price for marks job — skipping");
             continue;

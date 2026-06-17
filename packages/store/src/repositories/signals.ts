@@ -1,4 +1,4 @@
-import { eq, and, gte, desc, or, isNull, inArray } from "drizzle-orm";
+import { eq, and, gte, desc, or, isNull, isNotNull, inArray } from "drizzle-orm";
 import type { Db } from "../db.js";
 import { tradeSignals } from "../schema.js";
 import { NATIVE_TOKEN_PLACEHOLDER } from "@tradebot/core";
@@ -160,6 +160,36 @@ export async function setCandidateReviewStatus(
     .returning();
   const row = rows[0];
   return row ? hydrateSignal(db, rowToSignal(row)) : null;
+}
+
+/**
+ * Recover a Uniswap V4 market hint for a held token from any persisted signal that traded it.
+ * V4 pools can't be discovered on-chain by token pair, so downstream pricing paths that only have a
+ * token (the marks job, exit-sell depth) use this to re-read the pool by its observed poolId. The
+ * poolId is a property of the token's V4 pool, not of a specific trade, so the most recent signal
+ * touching the token on either leg is sufficient; the counter currency is the other leg. Returns
+ * null for non-V4 tokens (no signal carries a poolId).
+ */
+export async function getV4MarketHintForToken(
+  db: Db,
+  chain: ChainId,
+  tokenAddress: string
+): Promise<{ poolId: string; counterCurrency: string } | null> {
+  const addr = tokenAddress.toLowerCase();
+  const rows = await db
+    .select({ tokenIn: tradeSignals.tokenIn, tokenOut: tradeSignals.tokenOut, poolId: tradeSignals.poolId })
+    .from(tradeSignals)
+    .where(and(
+      eq(tradeSignals.chain, chain),
+      isNotNull(tradeSignals.poolId),
+      or(eq(tradeSignals.tokenIn, addr), eq(tradeSignals.tokenOut, addr)),
+    ))
+    .orderBy(desc(tradeSignals.observedAt))
+    .limit(1);
+  const row = rows[0];
+  if (!row || !row.poolId) return null;
+  const counterCurrency = row.tokenIn.toLowerCase() === addr ? row.tokenOut : row.tokenIn;
+  return { poolId: row.poolId, counterCurrency };
 }
 
 async function hydrateSignals(db: Db, signals: TradeSignal[]): Promise<TradeSignal[]> {

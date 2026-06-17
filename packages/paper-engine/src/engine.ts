@@ -21,6 +21,7 @@ import {
   getAllSettings,
   getAllWallets,
   latestMark,
+  getV4MarketHintForToken,
 } from "@tradebot/store";
 import { assertUsableZeroxQuote, getLiquidityUsd, getLiquidityUsdResult, getUsdPrice, getUsdPriceResult, getZeroxPrice } from "@tradebot/pricing";
 import type { PriceResult, MarketHint } from "@tradebot/pricing";
@@ -1077,7 +1078,10 @@ export class PaperEngine {
     const gasUsd = chain === "eth" ? this.cfg.GAS_USD_ETH : this.cfg.GAS_USD_BASE;
     let liquidityUsd: number | null = null;
     try {
-      liquidityUsd = await getLiquidityUsd(chain, token.address, this.rpcClients[chain]);
+      // Recover a V4 poolId so exit-sell depth uses real liquidity instead of the worst-case
+      // null-liquidity slippage penalty for V4-only tokens.
+      const hint = (await getV4MarketHintForToken(this.db, chain, token.address)) ?? undefined;
+      liquidityUsd = await getLiquidityUsd(chain, token.address, this.rpcClients[chain], hint);
     } catch {
       liquidityUsd = null;
     }

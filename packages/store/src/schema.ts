@@ -10,6 +10,7 @@ import {
   jsonb,
   unique,
   primaryKey,
+  index,
 } from "drizzle-orm/pg-core";
 
 const timestamptz = (name: string) => timestamp(name, { withTimezone: true, mode: "date" });
@@ -60,7 +61,14 @@ export const tradeSignals = pgTable("trade_signals", {
   // Uniswap V4 poolId (bytes32 hex) from the Swap event; null for non-V4 venues. Pricing reads it
   // back to value V4-only tokens, whose pools can't be discovered on-chain by token pair.
   poolId: text("pool_id"),
-}, (t) => [unique().on(t.chain, t.txHash, t.tokenIn, t.tokenOut, t.side)]);
+}, (t) => [
+  unique().on(t.chain, t.txHash, t.tokenIn, t.tokenOut, t.side),
+  // Support recovering a V4 poolId for a held token (marks job + exit-sell depth), which look up
+  // a signal by the traded token on either leg. Without these the lookup seq-scans the growing
+  // signals history every marks tick.
+  index("trade_signals_token_in_idx").on(t.tokenIn),
+  index("trade_signals_token_out_idx").on(t.tokenOut),
+]);
 
 export const paperFills = pgTable("paper_fills", {
   id: uuid("id").primaryKey().defaultRandom(),

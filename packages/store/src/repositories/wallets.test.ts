@@ -16,6 +16,7 @@ import {
   getCandidateSignals,
   getCopyRequestedCandidates,
   setCandidateReviewStatus,
+  getV4MarketHintForToken,
 } from "./signals.js";
 import { insertFill, getRecentFills } from "./paperFills.js";
 import { upsertPosition, closePositionByKey } from "./positions.js";
@@ -391,5 +392,60 @@ describe("analytics repository", () => {
     expect(a.realizedPnlUsd).toBeCloseTo(100, 10);
     expect(a.openExposureUsd).toBeCloseTo(50, 10);
     expect(a.byToken[0]).toMatchObject({ tokenAddress: "0xbbbb000000000000000000000000000000000002", realizedPnlUsd: 100 });
+  });
+});
+
+describe("getV4MarketHintForToken", () => {
+  const WETH = "0x4200000000000000000000000000000000000006";
+  const V4_TOKEN = "0xb4b4000000000000000000000000000000000004";
+  const POOL_ID = "0xabc1230000000000000000000000000000000000000000000000000000000000";
+
+  async function insertV4Signal(side: "buy" | "sell") {
+    const wallet = await insertWallet(db as Parameters<typeof insertWallet>[0], {
+      chain: "base",
+      address: `0x${Math.random().toString(16).slice(2).padEnd(40, "0").slice(0, 40)}`,
+      label: "V4 leader",
+      active: true,
+    });
+    const now = Date.now();
+    // On a buy the traded token is tokenOut and the counter (quote) is tokenIn; reversed on a sell.
+    const token = { chain: "base" as const, address: V4_TOKEN, symbol: "V4T", decimals: 18 };
+    const weth = { chain: "base" as const, address: WETH, symbol: "WETH", decimals: 18 };
+    await insertSignal(db as Parameters<typeof insertSignal>[0], {
+      id: randomUUID(),
+      chain: "base",
+      walletId: wallet.id,
+      txHash: `0x${randomUUID().replace(/-/g, "").padEnd(64, "0").slice(0, 64)}`,
+      source: "confirmed",
+      side,
+      tokenIn: side === "buy" ? weth : token,
+      tokenOut: side === "buy" ? token : weth,
+      amountIn: 1_000_000_000_000_000_000n,
+      amountOut: 1_000_000_000_000_000_000n,
+      venue: "uniswap-v4",
+      observedAt: now,
+      confirmedAt: now,
+      blockNumber: 1,
+      decodeStatus: "decoded",
+      poolId: POOL_ID,
+    });
+  }
+
+  it("recovers the poolId and counter currency from a V4 buy signal", async () => {
+    await insertV4Signal("buy");
+    const hint = await getV4MarketHintForToken(db as Parameters<typeof getV4MarketHintForToken>[0], "base", V4_TOKEN);
+    expect(hint).toEqual({ poolId: POOL_ID, counterCurrency: WETH });
+  });
+
+  it("recovers the hint from a V4 sell signal (counter on the other leg)", async () => {
+    await insertV4Signal("sell");
+    const hint = await getV4MarketHintForToken(db as Parameters<typeof getV4MarketHintForToken>[0], "base", V4_TOKEN);
+    expect(hint).toEqual({ poolId: POOL_ID, counterCurrency: WETH });
+  });
+
+  it("returns null for a token with no poolId-bearing signal", async () => {
+    await insertV4Signal("buy");
+    const hint = await getV4MarketHintForToken(db as Parameters<typeof getV4MarketHintForToken>[0], "base", "0xdead000000000000000000000000000000000000");
+    expect(hint).toBeNull();
   });
 });

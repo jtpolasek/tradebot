@@ -422,6 +422,15 @@ Post-Phase-6 work, agreed with the user in a grill session and ported from the G
 
 **Explicitly skipped:** `importBundle` (would pollute scoring history) and `quoteAge`.
 
+### Phase 9 — Pricing & buy-decision improvements (agreed 2026-06-15)
+
+Post-Phase-8 hardening of the pricing path and the buy-decision vetoes, driven by `docs/price-buy-decision-improvements.md`. Items are independent; build in any order, each ending with `pnpm build && pnpm test` green and a commit. Numbering follows the source doc (items 1–4 were resolved as Open Decisions, not code).
+
+5. **Liquidity selection** — *complete (2026-06-15)*. Replaced `findDeepestV3Pool` (per-quote-pair, ranked by in-range L) with `findBestMarket(chain, token)` that scans every quote asset × venue × fee tier and picks the deepest **USD** market (`quote-balance × quoteUsd × 2`); in-range L is now only a tiebreak. Price and liquidity now derive from the same pool (`getUsdPriceResult`/`getLiquidityUsdResult` both call `findBestMarket`; market cached per token 5 min), resolving the selection-vs-reporting metric inconsistency. Cost: one extra `balanceOf` per candidate on cache miss.
+6. **Unify sell fill modeling** — *complete (2026-06-15)*. Extracted shared `PaperEngine` helpers (`modeledSlippageBps`, `priceSellFill`, `applySellToState`) so buys, copied sells, and exit sells share one fee/slippage/0x/accounting model. `executeExitSell` now uses 0x when configured (hydrating real token decimals) and falls back to spot otherwise; exit sells now penalise null-liquidity impact like copied sells (was 0). Integration test "routes exit-rule sells through 0x".
+7. **Chainlink staleness gate** — *complete (2026-06-15)*. `getChainlinkEthUsd` reads `updatedAt` and rejects rounds older than `MAX_CHAINLINK_STALENESS_SEC` (default 3600, in core config + `.env.example`); a stale round returns null → DefiLlama fallback → existing fallback-price-source buy veto. Tests for fresh (accepted) and stale (rejected → fallback) rounds.
+8. **Uniswap V4 pricing** — *Parts 1–4 + P6 complete (2026-06-16)*. Design in `docs/uniswap-v4-pricing-plan.md` and `docs/adr/0002-price-uniswap-v4-via-decoded-poolid.md`. Root cause of LOCAL trades skipping with `no-liquidity-data`: pricing scanned only Uni V3 + Aerodrome CL, never the V4 singleton PoolManager (no on-chain pool discovery by pair). Fix prices a V4 pool by the **poolId observed in the leader's swap**. P1: decoder surfaces the V4 Swap `id` (poolId); `extractV4PoolId` captures it for any single-V4-swap tx so balance-delta signals carry it too. P2: `poolId` on `TradeSignal` + `trade_signals.pool_id` (migrations 0006/0007). P3: pricing reads V4 via **StateView** (`getSlot0`/`getLiquidity` by poolId), currencies from the swap pair, liquidity = virtual quote reserve (`method: "v4-virtual-reserves"`); optional `MarketHint` threaded through `getUsdPrice(Result)`/`getLiquidityUsd(Result)`; fixed a wrong Base V4 PoolManager constant in `venues.ts`. P4: engine passes `v4MarketHint(signal)` into buy-decision and `handleConfirmed`. Live-check tool `pnpm check-v4 <txHash>`. **Marks + exit-sell depth follow-up complete (2026-06-17):** `getV4MarketHintForToken` recovers `{poolId, counterCurrency}` from prior signals (indexed via migration 0008) so the marks job and `executeExitSell` re-price V4-only positions instead of skipping/penalising them. **Still deferred (with reason):** (a) full decoder→engine pipeline not yet re-checked on a fresh live LOCAL trade — needs a real trade post-deploy, pre-fix rows have null poolId; (b) bound the TTL-only pricing caches (`llamaCache`/`poolCache`) — low risk, TTL-bounded.
+
 ---
 
 ## 8. Porting guide — proven modules from the old app
@@ -479,5 +488,6 @@ Do NOT port: `db.ts`/`repositories.ts` (SQLite → replaced by Drizzle store), `
 | 5 | Brain: scoring, weights, adaptive filters | 3 d |
 | 6 | API + dashboard (port old UI) | 3 d |
 | 8 | Hybrid GMGN visibility features (parts 1–6; see Phase 8) | — |
+| 9 | Pricing & buy-decision improvements (items 5–8; see Phase 9) | — |
 
 Porting cuts the original 13-day estimate to roughly 9–10 days. The old app keeps running in parallel as the reference until the new system passes its soak test.

@@ -576,6 +576,37 @@ describe("PaperEngine integration", () => {
     }));
   });
 
+  it("uses a recovered V4 poolId for exit-sell depth", async () => {
+    const bus = new EventBus();
+    await db.execute(sql`TRUNCATE paper_fills CASCADE`);
+    await db.execute(sql`TRUNCATE positions CASCADE`);
+    await db.execute(sql`TRUNCATE portfolio_snapshots CASCADE`);
+    await db.execute(sql`TRUNCATE trade_signals CASCADE`);
+
+    const POOL_ID = "0xabc1230000000000000000000000000000000000000000000000000000000000";
+    await upsertToken(db, { chain: "eth", address: TOKEN_A.address, symbol: "TKNA", name: "Token A", decimals: 18, isBlocked: false });
+    // A prior V4 buy of TOKEN_A carries the poolId; the position itself does not, so the exit must
+    // recover the hint from the signal to read real V4 depth instead of the null-liquidity penalty.
+    await insertSignal(db, makeSignal({ walletId, tokenOut: TOKEN_A, tokenIn: USDC, venue: "uniswap-v4", poolId: POOL_ID }));
+    await upsertPosition(db, { chain: "eth", tokenAddress: TOKEN_A.address, qty: 10, avgCostUsd: 8, realizedPnlUsd: 0, sourceWalletId: walletId });
+
+    const engine = new PaperEngine(db, bus, cfg() as never, mockRpcClient as never);
+    await engine.start();
+    await engine.executeExitSell(
+      { chain: "eth", tokenAddress: TOKEN_A.address, qty: 10, avgCostUsd: 8, sourceWalletId: walletId },
+      "tp",
+      10,
+    );
+    engine.stop();
+
+    expect(getLiquidityUsd).toHaveBeenCalledWith(
+      "eth",
+      TOKEN_A.address,
+      expect.anything(),
+      { poolId: POOL_ID, counterCurrency: USDC.address },
+    );
+  });
+
   it("persists price provenance and liquidity on copied fills", async () => {
     const bus = new EventBus();
     await db.execute(sql`TRUNCATE paper_fills CASCADE`);

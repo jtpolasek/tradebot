@@ -35,8 +35,8 @@ After review, the remaining work was reordered by value:
 2. ~~**New item 7 (Chainlink staleness gate).**~~ Done — the missing companion to the V3 TWAP gate.
 3. ~~**Item 5 (deeper-pool selection + metric consistency).**~~ Done — `findBestMarket` selects the
    deepest USD market across all quotes/venues/tiers; price and liquidity share it.
-4. Remaining (lower priority): persist price/liquidity provenance in `paper_fills` (Open Decision
-   resolved "yes, via migration"), and bound the TTL-only pricing caches.
+4. ~~Persist price/liquidity provenance in `paper_fills`.~~ Done — columns are written on copy and
+   skip paths. Remaining (lower priority): bound the TTL-only pricing caches.
 
 ## Recommended Implementation Order
 
@@ -78,7 +78,8 @@ Implemented notes:
 - Added `getUsdPriceResult()` and `getLiquidityUsdResult()` while preserving numeric wrappers.
 - `price_marks.source` now records the actual price source.
 - Paper engine logs price/liquidity provenance before copied fills.
-- Fill-level provenance is not yet persisted because that requires a schema migration.
+- Fill-level provenance **is** persisted: `paper_fills.price_source` / `price_venue` /
+  `price_pool_address` / `liquidity_usd` are written on both copy and skip paths.
 
 ### 2. Treat 0x No-Route As A Buy Veto
 

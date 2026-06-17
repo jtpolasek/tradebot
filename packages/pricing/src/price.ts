@@ -150,6 +150,31 @@ const AERODROME_CL_POOL_ABI = [
   },
 ] as const;
 
+// Uniswap V4 StateView: off-chain read mirror of the singleton PoolManager's StateLibrary. Every
+// call is keyed by the bytes32 poolId we persist on the signal — V4 pools live in a singleton and
+// can't be discovered on-chain by token pair, so this is how we read a known V4 pool's state.
+const STATE_VIEW_ABI = [
+  {
+    type: "function",
+    name: "getSlot0",
+    inputs: [{ name: "poolId", type: "bytes32" }],
+    outputs: [
+      { name: "sqrtPriceX96", type: "uint160" },
+      { name: "tick", type: "int24" },
+      { name: "protocolFee", type: "uint24" },
+      { name: "lpFee", type: "uint24" },
+    ],
+    stateMutability: "view",
+  },
+  {
+    type: "function",
+    name: "getLiquidity",
+    inputs: [{ name: "poolId", type: "bytes32" }],
+    outputs: [{ name: "liquidity", type: "uint128" }],
+    stateMutability: "view",
+  },
+] as const;
+
 // Uniswap V3 pool balance of a token
 const ERC20_BALANCE_ABI = [
   {
@@ -177,6 +202,15 @@ const UNI_V3_FACTORIES: Record<ChainId, string> = {
 
 const AERODROME_CL_FACTORY_BASE = "0x5e7bb104d84c7cb9b682aac2f3d509f5f406809a";
 
+// Uniswap V4 StateView deployments. Verified on-chain 2026-06-16 (StateView.poolManager() returns
+// the chain's canonical PoolManager). See docs/uniswap-v4-pricing-plan.md.
+const STATE_VIEW: Record<ChainId, string> = {
+  eth: "0x7ffe42c4a5deea5b0fec41c94c136cf115597227",
+  base: "0xa3c0c9b65bad0b08107aa264b0f3db444b867a71",
+};
+
+const Q96 = 2n ** 96n;
+
 // Fee tiers to probe in priority order (deepest pool wins by liquidity)
 const V3_FEE_TIERS = [500, 3000, 10000] as const;
 const AERODROME_TICK_SPACINGS = [1, 50, 100, 200, 2000] as const;
@@ -201,14 +235,18 @@ const NULL_ADDRESS = "0x0000000000000000000000000000000000000000";
 type LlamaEntry = { price: number; fetchedAt: number };
 const llamaCache = new Map<string, LlamaEntry>();
 
+type Venue = "uniswap-v3" | "aerodrome-cl" | "uniswap-v4";
+
 type CachedPool = {
   address: string;
-  venue: "uniswap-v3" | "aerodrome-cl";
+  venue: Venue;
   token0: string;
   token1: string;
   decimals0: number;
   decimals1: number;
   poolAbi: typeof UNI_V3_POOL_ABI | typeof AERODROME_CL_POOL_ABI;
+  // Uniswap V4 only: the bytes32 poolId read via StateView. `address` mirrors it for reporting.
+  poolId?: string;
 };
 
 // A token's best market: the (pool, quote asset) with the deepest USD liquidity across every quote
@@ -237,6 +275,18 @@ const MARKET_TTL_MS = 5 * 60_000;
 const CHAINLINK_TTL_MS = 30_000;
 const TWAP_WINDOW_SECONDS = 300;
 
+// Per-token caches are TTL-only; cap their size so a long-running process tracking many tokens
+// can't grow them unbounded. Oldest entry is evicted first (Map preserves insertion order).
+const MAX_CACHE_ENTRIES = 5_000;
+function cappedSet<K, V>(map: Map<K, V>, key: K, value: V): void {
+  map.delete(key); // re-insert at the end so eviction is roughly least-recently-written
+  map.set(key, value);
+  if (map.size > MAX_CACHE_ENTRIES) {
+    const oldest = map.keys().next().value;
+    if (oldest !== undefined) map.delete(oldest);
+  }
+}
+
 // Reject Chainlink rounds whose last update is older than this, so a frozen feed can't drive
 // auto-buys. Read from env (set by the app's config) with a 1-hour default.
 const DEFAULT_CHAINLINK_STALENESS_SEC = 3600;
@@ -262,7 +312,7 @@ export type PriceResult = {
   tokenAddress: string;
   quoteTokenAddress?: string;
   poolAddress?: string;
-  venue?: "uniswap-v3" | "aerodrome-cl";
+  venue?: Venue;
   twapPriceUsd?: number;
   spotTwapDivergenceBps?: number;
   warnings: string[];
@@ -274,8 +324,8 @@ export type LiquidityResult = {
   tokenAddress: string;
   quoteTokenAddress: string;
   poolAddress: string;
-  venue: "uniswap-v3" | "aerodrome-cl";
-  method: "quote-balance-x2";
+  venue: Venue;
+  method: "quote-balance-x2" | "v4-virtual-reserves";
   warnings: string[];
 };
 
@@ -376,18 +426,42 @@ function v3VenueConfigs(chain: ChainId): V3VenueConfig[] {
   return configs;
 }
 
+/** Optional hint to price/measure a Uniswap V4 pool by the poolId observed in the decoded swap. */
+export type MarketHint = { poolId?: string; counterCurrency?: string };
+
 /**
  * Finds a token's best market: the (pool, quote asset) with the deepest USD liquidity across every
- * quote asset, venue, and fee tier. Liquidity is measured as quote-balance × quoteUsd × 2 — the same
- * metric `getLiquidityUsd` reports — so price and liquidity always come from the same pool. The pool's
- * in-range `liquidity()` (L) is kept only as a deterministic tiebreak when a candidate's USD balance
- * can't be read. Result (including a negative) is cached per token.
+ * quote asset, venue, and fee tier. When a `hint` carries a Uniswap V4 poolId + counter currency
+ * (from the decoded swap), the V4 pool is read via StateView and compared too — so a V4-only token
+ * becomes priceable and a token with both keeps the real deepest market. Result (including a
+ * negative) is cached per token.
  */
-async function findBestMarket(chain: ChainId, token: string, client: RpcClient): Promise<Market | null> {
+async function findBestMarket(
+  chain: ChainId,
+  token: string,
+  client: RpcClient,
+  hint?: MarketHint
+): Promise<Market | null> {
   const cacheKey = `${chain}:${token.toLowerCase()}`;
   const cached = marketCache.get(cacheKey);
-  if (cached && Date.now() - cached.fetchedAt < MARKET_TTL_MS) return cached.market;
+  const wantV4 = !!(hint?.poolId && hint?.counterCurrency && STATE_VIEW[chain]);
+  if (cached && Date.now() - cached.fetchedAt < MARKET_TTL_MS) {
+    // Reuse the cache unless we hold a V4 hint the cached market doesn't already reflect.
+    if (!wantV4 || cached.market?.pool.poolId === hint!.poolId) return cached.market;
+  }
 
+  let best = await scanV23Market(chain, token, client);
+  if (wantV4) {
+    const v4 = await readV4Market(chain, hint!.poolId!, token, hint!.counterCurrency!, client);
+    if (v4 && (best === null || (v4.liquidityUsd ?? -1) > (best.liquidityUsd ?? -1))) best = v4;
+  }
+
+  marketCache.set(cacheKey, { market: best, fetchedAt: Date.now() });
+  return best;
+}
+
+/** Deepest USD market across Uniswap V3 + Aerodrome CL quote assets / fee tiers. Null if none. */
+async function scanV23Market(chain: ChainId, token: string, client: RpcClient): Promise<Market | null> {
   const tokenLc = token.toLowerCase();
   let best: { market: Market; liquidityVal: bigint } | null = null;
 
@@ -458,9 +532,95 @@ async function findBestMarket(chain: ChainId, token: string, client: RpcClient):
     }
   }
 
-  const market = best?.market ?? null;
-  marketCache.set(cacheKey, { market, fetchedAt: Date.now() });
-  return market;
+  return best?.market ?? null;
+}
+
+/**
+ * Reads a known Uniswap V4 pool (by poolId, via StateView) and builds a Market. Currency ordering
+ * and decimals come from the swap's known token pair (token + counter currency) — V4 exposes no
+ * reverse poolId→PoolKey lookup, but we don't need one. Price derives from `getSlot0`'s sqrtPrice;
+ * liquidity from `getLiquidity`'s in-range L. Null if the pool is uninitialized or unreadable.
+ */
+async function readV4Market(
+  chain: ChainId,
+  poolId: string,
+  token: string,
+  counterCurrency: string,
+  client: RpcClient
+): Promise<Market | null> {
+  const stateView = STATE_VIEW[chain];
+  if (!stateView) return null;
+  try {
+    const quoteUsdPrice = await getUsdPrice(chain, counterCurrency, client);
+    if (quoteUsdPrice === null) return null;
+
+    const tokenLc = token.toLowerCase();
+    // V4 native ETH is currency address(0); map the placeholder so currency ordering matches the
+    // on-chain PoolKey. (USD pricing of the counter still routes through getUsdPrice above.)
+    const counterLc =
+      counterCurrency.toLowerCase() === NATIVE_TOKEN_PLACEHOLDER ? NULL_ADDRESS : counterCurrency.toLowerCase();
+    if (counterLc === tokenLc) return null;
+
+    // Currencies are ordered by address ascending, same as V3.
+    const tokenIsCurrency0 = tokenLc < counterLc;
+    const [c0, c1] = tokenIsCurrency0 ? [tokenLc, counterLc] : [counterLc, tokenLc];
+
+    const decimalsOf = async (addr: string): Promise<number> =>
+      addr === NULL_ADDRESS
+        ? 18
+        : ((await client.readContract({
+            address: addr as `0x${string}`,
+            abi: ERC20_BALANCE_ABI,
+            functionName: "decimals",
+          }).catch(() => 18)) as number);
+
+    const [dec0, dec1, slot0Result, liquidityVal] = await Promise.all([
+      decimalsOf(c0),
+      decimalsOf(c1),
+      client.readContract({ address: stateView as `0x${string}`, abi: STATE_VIEW_ABI, functionName: "getSlot0", args: [poolId as `0x${string}`] }),
+      client.readContract({ address: stateView as `0x${string}`, abi: STATE_VIEW_ABI, functionName: "getLiquidity", args: [poolId as `0x${string}`] }),
+    ]) as [number, number, unknown[], bigint];
+
+    const sqrtPriceX96 = slot0Result[0] as bigint;
+    if (sqrtPriceX96 === 0n) return null;
+
+    const pool: CachedPool = {
+      address: poolId.toLowerCase(),
+      venue: "uniswap-v4",
+      token0: c0,
+      token1: c1,
+      decimals0: dec0,
+      decimals1: dec1,
+      poolAbi: UNI_V3_POOL_ABI, // unused for V4 (state is read via StateView); kept to satisfy the type
+      poolId: poolId.toLowerCase(),
+    };
+
+    const liquidityUsd = v4LiquidityUsd(liquidityVal, sqrtPriceX96, pool, counterLc, quoteUsdPrice);
+    return { pool, quoteTokenAddress: counterLc, quoteUsdPrice, liquidityUsd };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * USD value of a V4 pool's quote-side reserves, approximated from in-range liquidity L and the
+ * current sqrtPrice as the "virtual reserves" at price (amount = L·√P or L/√P), valued in USD and
+ * doubled — the V4 analogue of the V3 `quote-balance × 2` metric. An approximation (it assumes the
+ * active range spans the price); tagged `method: "v4-virtual-reserves"` so the difference is visible.
+ */
+function v4LiquidityUsd(
+  liquidity: bigint,
+  sqrtPriceX96: bigint,
+  pool: CachedPool,
+  quoteAddr: string,
+  quoteUsdPrice: number
+): number | null {
+  if (liquidity <= 0n || sqrtPriceX96 <= 0n) return null;
+  const quoteIsCurrency0 = pool.token0 === quoteAddr;
+  const quoteDecimals = quoteIsCurrency0 ? pool.decimals0 : pool.decimals1;
+  // currency1 virtual reserve = L·√P = L·sqrtPriceX96/2^96; currency0 = L/√P = L·2^96/sqrtPriceX96.
+  const quoteRaw = quoteIsCurrency0 ? (liquidity * Q96) / sqrtPriceX96 : (liquidity * sqrtPriceX96) / Q96;
+  return fromBaseUnits(quoteRaw, quoteDecimals) * quoteUsdPrice * 2;
 }
 
 /** USD value of a pool's quote-side reserves (quote balance × quoteUsd × 2). Null if unreadable. */
@@ -495,14 +655,23 @@ async function priceFromPool(
   quoteUsdPrice: number,
   client: RpcClient
 ): Promise<PriceResult | null> {
-  // Spot price must be fresh even when the pool itself came from cache
+  // Spot price must be fresh even when the pool itself came from cache. V4 reads via StateView by
+  // poolId (singleton, no per-pool slot0); V3/Aerodrome read slot0 on the pool contract.
+  const isV4 = pool.venue === "uniswap-v4";
   let sqrtPriceX96: bigint;
   try {
-    const slot0 = await client.readContract({
-      address: pool.address as `0x${string}`,
-      abi: pool.poolAbi,
-      functionName: "slot0",
-    }) as unknown[];
+    const slot0 = isV4
+      ? await client.readContract({
+          address: STATE_VIEW[chain] as `0x${string}`,
+          abi: STATE_VIEW_ABI,
+          functionName: "getSlot0",
+          args: [pool.poolId as `0x${string}`],
+        }) as unknown[]
+      : await client.readContract({
+          address: pool.address as `0x${string}`,
+          abi: pool.poolAbi,
+          functionName: "slot0",
+        }) as unknown[];
     sqrtPriceX96 = slot0[0] as bigint;
   } catch (err) {
     logger.warn({ err, chain, pool: pool.address }, "slot0 read failed");
@@ -527,7 +696,8 @@ async function priceFromPool(
 
   const priceUsd = priceInQuote * quoteUsdPrice;
   if (!Number.isFinite(priceUsd) || priceUsd <= 0) return null;
-  const twap = await getV3TwapPriceUsd(pool, tokenLc, quoteUsdPrice, client);
+  // V4 has no on-chain TWAP oracle reachable here (depends on the pool's hooks) — skip it.
+  const twap = isV4 ? null : await getV3TwapPriceUsd(pool, tokenLc, quoteUsdPrice, client);
   const warnings: string[] = [];
   if (twap === null) warnings.push("twap-unavailable");
   const spotTwapDivergenceBps = twap !== null ? divergenceBps(priceUsd, twap) ?? undefined : undefined;
@@ -630,15 +800,17 @@ async function getLlamaPriceResult(chain: ChainId, address: string): Promise<Pri
 export async function getUsdPrice(
   chain: ChainId,
   address: string,
-  client: RpcClient
+  client: RpcClient,
+  hint?: MarketHint
 ): Promise<number | null> {
-  return (await getUsdPriceResult(chain, address, client))?.priceUsd ?? null;
+  return (await getUsdPriceResult(chain, address, client, hint))?.priceUsd ?? null;
 }
 
 export async function getUsdPriceResult(
   chain: ChainId,
   address: string,
-  client: RpcClient
+  client: RpcClient,
+  hint?: MarketHint
 ): Promise<PriceResult | null> {
   const addr = normalizePricedAddress(chain, address);
 
@@ -658,8 +830,9 @@ export async function getUsdPriceResult(
     return getLlamaPriceResult(chain, addr);
   }
 
-  // 3. V3/Aerodrome spot price from the token's deepest USD market (same market liquidity uses)
-  const market = await findBestMarket(chain, addr, client);
+  // 3. Spot price from the token's deepest USD market (same market liquidity uses). A V4 hint lets
+  // a V4-only token be priced via StateView.
+  const market = await findBestMarket(chain, addr, client, hint);
   if (market) {
     const price = await priceFromPool(chain, addr, market.pool, market.quoteTokenAddress, market.quoteUsdPrice, client);
     if (price !== null && price.priceUsd > 0) return price;
@@ -671,24 +844,27 @@ export async function getUsdPriceResult(
 
 /**
  * Returns the USD value of the quote-side reserves in the token's deepest USD market.
- * Approximation: quote reserve × quote USD price × 2 (assumes 50/50 pool). Selected by the same
- * `findBestMarket` that prices the token, so price and liquidity always agree on the pool.
+ * V3/Aerodrome: quote reserve × quote USD × 2 (assumes 50/50 pool). V4 (via a poolId hint): the
+ * virtual quote reserve implied by in-range L × quote USD × 2. Selected by the same `findBestMarket`
+ * that prices the token, so price and liquidity always agree on the pool.
  */
 export async function getLiquidityUsd(
   chain: ChainId,
   address: string,
-  client: RpcClient
+  client: RpcClient,
+  hint?: MarketHint
 ): Promise<number | null> {
-  return (await getLiquidityUsdResult(chain, address, client))?.liquidityUsd ?? null;
+  return (await getLiquidityUsdResult(chain, address, client, hint))?.liquidityUsd ?? null;
 }
 
 export async function getLiquidityUsdResult(
   chain: ChainId,
   address: string,
-  client: RpcClient
+  client: RpcClient,
+  hint?: MarketHint
 ): Promise<LiquidityResult | null> {
   const addr = normalizePricedAddress(chain, address);
-  const market = await findBestMarket(chain, addr, client);
+  const market = await findBestMarket(chain, addr, client, hint);
   if (!market || market.liquidityUsd === null) return null;
 
   return {
@@ -698,7 +874,7 @@ export async function getLiquidityUsdResult(
     quoteTokenAddress: market.quoteTokenAddress,
     poolAddress: market.pool.address,
     venue: market.pool.venue,
-    method: "quote-balance-x2",
+    method: market.pool.venue === "uniswap-v4" ? "v4-virtual-reserves" : "quote-balance-x2",
     warnings: [],
   };
 }

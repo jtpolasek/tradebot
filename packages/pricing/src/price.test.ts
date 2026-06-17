@@ -458,3 +458,53 @@ describe("getLiquidityUsd", () => {
     }));
   });
 });
+
+describe("Uniswap V4 pricing via poolId hint", () => {
+  const STATE_VIEW_BASE = "0xa3c0c9b65bad0b08107aa264b0f3db444b867a71";
+  const POOL_ID = "0x" + "ab".repeat(32); // 32-byte poolId
+  // Pool TOKEN_HI / WETH on Base. TOKEN_HI > WETH → WETH = currency0 (quote), token = currency1.
+  // ETH = $2000; encode price so the token is worth $0.001 (token0 WETH priced at 2,000,000 token1).
+  const sqrtPriceX96 = BigInt(Math.round(Math.sqrt(2_000_000) * Q96));
+  const L = 10n ** 22n;
+  const hint = { poolId: POOL_ID, counterCurrency: BASE_WETH };
+
+  function v4Client() {
+    return makeClient({
+      [`${CHAINLINK_FEED_BASE}:latestRoundData`]: chainlinkRound(2000n * 10n ** 8n),
+      [`${STATE_VIEW_BASE}:getSlot0`]: [sqrtPriceX96, 0, 0, 0],
+      [`${STATE_VIEW_BASE}:getLiquidity`]: L,
+      [`${BASE_WETH}:decimals`]: 18,
+      [`${FAKE_TOKEN_HI}:decimals`]: 18,
+    });
+  }
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    clearCaches();
+  });
+
+  it("prices a V4-only token from StateView getSlot0", async () => {
+    const res = await getUsdPriceResult("base", FAKE_TOKEN_HI, v4Client(), hint);
+    expect(res?.priceUsd).toBeCloseTo(0.001, 6);
+    expect(res?.venue).toBe("uniswap-v4");
+    expect(res?.poolAddress).toBe(POOL_ID);
+    expect(res?.warnings).toContain("twap-unavailable"); // V4 has no TWAP read here
+  });
+
+  it("measures V4 liquidity as the virtual quote reserve from in-range L", async () => {
+    const res = await getLiquidityUsdResult("base", FAKE_TOKEN_HI, v4Client(), hint);
+    // quote (WETH) is currency0 → virtual reserve = L / √P; √P = sqrt(2_000_000).
+    const wethHuman = Number(L) / Math.sqrt(2_000_000) / 1e18;
+    const expectedLiq = wethHuman * 2000 * 2;
+    expect(res?.venue).toBe("uniswap-v4");
+    expect(res?.method).toBe("v4-virtual-reserves");
+    expect(res?.poolAddress).toBe(POOL_ID);
+    expect(Math.abs((res!.liquidityUsd - expectedLiq) / expectedLiq)).toBeLessThan(1e-4);
+  });
+
+  it("returns null (no-liquidity-data) for the same token without a poolId hint", async () => {
+    // No V3/Aerodrome pool exists and no hint → the V4 pool is invisible, as before the fix.
+    const res = await getLiquidityUsdResult("base", FAKE_TOKEN_HI, v4Client());
+    expect(res).toBeNull();
+  });
+});

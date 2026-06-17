@@ -316,6 +316,44 @@ describe("Decoder class", () => {
     expect(signals[0]!.walletId).toBe(WALLET_ID); // carries the DB UUID, never the raw address
   });
 
+  it("captures the V4 poolId on a balance-delta buy when strategyA bails (native-ETH-funded)", async () => {
+    const { Decoder } = await import("./decoder.js");
+    const bus = new EventBus();
+    const decoder = new Decoder({ bus, db: {} as never, wallets: [{ address: WALLET, id: WALLET_ID, chain: "eth" }], rpcUrls: { eth: "http://0.0.0.0:1", base: "http://0.0.0.0:1" } });
+    decoder.start();
+
+    const signals: TradeSignal[] = [];
+    bus.on("trade-signal", (s) => signals.push(s));
+
+    const ROUTER = "0xcccccccccccccccccccccccccccccccccccccccc";
+    const MEME   = "0x4444444444444444444444444444444444444444";
+    const padded = (addr: string) => `0x000000000000000000000000${addr.slice(2)}`;
+    const TRANSFER = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+    const V4_SWAP_TOPIC = "0x40e9cecb9f5f1f1c5b9c97dec2917b7ee92e57ba5563708daca94dd84ad7112f";
+    const POOL_ID = "0x" + "ef".repeat(32);
+
+    // Native-ETH buy: wallet pays raw ETH (no Transfer log) and receives MEME — only one
+    // wallet-referenced transfer, so strategyA's V4 path can't map both sides and bails. The tx
+    // still has exactly one V4 Swap log, so the poolId must be captured on the balance-delta signal.
+    const logs = [
+      { address: ROUTER, topics: [V4_SWAP_TOPIC, POOL_ID, padded(ROUTER)], data: "0x" + "0".repeat(384) },
+      { address: MEME, topics: [TRANSFER, padded(ROUTER), padded(WALLET)], data: "0x000000000000000000000000000000000000000000003635c9adc5dea00000" },
+    ];
+
+    const event: RawTxEvent = {
+      chain: "eth", source: "confirmed", txHash: "0x444", from: WALLET, to: ROUTER,
+      blockNumber: 4, observedAt: Date.now(), status: "success", valueWei: 1_000_000_000_000_000_000n, logs,
+    };
+
+    bus.emit("raw-tx", event);
+    await tick();
+
+    expect(signals).toHaveLength(1);
+    expect(signals[0]!.venue).toBe("balance-delta"); // strategyA bailed
+    expect(signals[0]!.side).toBe("buy");
+    expect(signals[0]!.poolId).toBe(POOL_ID); // …but the V4 poolId is still captured
+  });
+
   it("emits sell and buy signals when both Strategy B tokens are non-quote assets", async () => {
     const { Decoder } = await import("./decoder.js");
     const bus = new EventBus();

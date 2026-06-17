@@ -43,6 +43,20 @@
       "when": 1781537680183,
       "tag": "0005_cold_abomination",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1781560059481,
+      "tag": "0006_fat_hellfire_club",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1781650111727,
+      "tag": "0007_aromatic_mariko_yashida",
+      "breakpoints": true
     }
   ]
 }

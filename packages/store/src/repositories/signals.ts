@@ -28,6 +28,7 @@ export async function insertSignal(db: Db, signal: TradeSignal): Promise<string>
     confidence: signal.confidence != null ? String(signal.confidence) : undefined,
     reason: signal.reason ?? undefined,
     reviewStatus: signal.reviewStatus ?? (signal.decodeStatus === "candidate" ? "pending" : undefined),
+    poolId: signal.poolId ?? undefined,
   }).onConflictDoNothing().returning({ id: tradeSignals.id });
 
   const inserted = rows[0];
@@ -72,6 +73,7 @@ export async function upsertSignal(db: Db, signal: TradeSignal): Promise<void> {
     confidence: signal.confidence != null ? String(signal.confidence) : undefined,
     reason: signal.reason ?? undefined,
     reviewStatus: signal.reviewStatus ?? (signal.decodeStatus === "candidate" ? "pending" : undefined),
+    poolId: signal.poolId ?? undefined,
   }).onConflictDoUpdate({
     target: [tradeSignals.chain, tradeSignals.txHash, tradeSignals.tokenIn, tradeSignals.tokenOut, tradeSignals.side],
     set: {
@@ -84,6 +86,8 @@ export async function upsertSignal(db: Db, signal: TradeSignal): Promise<void> {
       confidence: signal.confidence != null ? String(signal.confidence) : undefined,
       reason: signal.reason ?? undefined,
       reviewStatus: signal.reviewStatus ?? (signal.decodeStatus === "candidate" ? "pending" : undefined),
+      // Backfill poolId when a mempool signal (no poolId) is confirmed via a V4 strategyA decode.
+      poolId: signal.poolId ?? undefined,
     },
   });
 }
@@ -205,6 +209,7 @@ function rowToSignal(row: typeof tradeSignals.$inferSelect): TradeSignal {
     confidence: row.confidence != null ? Number(row.confidence) : null,
     reason: row.reason ?? null,
     reviewStatus: parseReviewStatus(row.reviewStatus),
+    poolId: row.poolId ?? null,
   };
 }
 

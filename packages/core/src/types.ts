@@ -59,6 +59,12 @@ export interface TradeSignal {
   reason?: string | null;
   /** Review workflow status for candidate signals. Decoded signals leave this null/undefined. */
   reviewStatus?: "pending" | "copy-requested" | "copying" | "copied" | "copy-failed" | "dismissed" | null;
+  /**
+   * Uniswap V4 poolId (the `bytes32 indexed id` from the Swap event), lowercase hex. V4 pools live
+   * in a singleton PoolManager and can't be discovered on-chain by token pair, so pricing reads this
+   * back to value V4-only tokens via StateView. Null/undefined for every non-V4 venue.
+   */
+  poolId?: string | null;
 }
 
 export interface TokenRef {
@@ -117,4 +123,10 @@ export interface PaperFill {
   slippageBps: number;
   latencyMs: number;
   provisional: boolean;
+  // Provenance of the reference (gating) spot price and the liquidity used for the decision.
+  // Populated on copied fills; null on skips and rule-driven exits.
+  priceSource?: string;
+  priceVenue?: string;
+  pricePoolAddress?: string;
+  liquidityUsd?: number;
 }

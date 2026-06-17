@@ -23,7 +23,7 @@ import {
   latestMark,
 } from "@tradebot/store";
 import { assertUsableZeroxQuote, getLiquidityUsd, getLiquidityUsdResult, getUsdPrice, getUsdPriceResult, getZeroxPrice } from "@tradebot/pricing";
-import type { PriceResult } from "@tradebot/pricing";
+import type { PriceResult, MarketHint } from "@tradebot/pricing";
 import { applyTradeToState } from "./accounting.js";
 import type { AccountingPortfolio, AccountingPosition } from "./accounting.js";
 import { estimateSourceNotionalUsd } from "./sizing.js";
@@ -487,11 +487,13 @@ export class PaperEngine {
       return;
     }
 
-    // Get liquidity (needed for decide)
+    // Get liquidity (needed for decide). A V4 swap carries a poolId hint so a V4-only token can be
+    // measured via StateView instead of skipping with no-liquidity-data.
+    const marketHint = v4MarketHint(signal);
     let liquidityUsd: number | null = null;
     let liquidityWarnings: string[] = [];
     try {
-      const liquidity = await getLiquidityUsdResult(signal.chain, token.address, this.rpcClients[signal.chain]);
+      const liquidity = await getLiquidityUsdResult(signal.chain, token.address, this.rpcClients[signal.chain], marketHint);
       liquidityUsd = liquidity?.liquidityUsd ?? null;
       liquidityWarnings = liquidity?.warnings ?? [];
     } catch {
@@ -529,7 +531,7 @@ export class PaperEngine {
     // Get price
     let price: PriceResult | null = null;
     try {
-      price = await getUsdPriceResult(signal.chain, token.address, this.rpcClients[signal.chain]);
+      price = await getUsdPriceResult(signal.chain, token.address, this.rpcClients[signal.chain], marketHint);
     } catch {
       price = null;
     }
@@ -810,6 +812,10 @@ export class PaperEngine {
       slippageBps,
       latencyMs: decidedAt - signal.observedAt,
       provisional,
+      ...(price?.source !== undefined ? { priceSource: price.source } : {}),
+      ...(price?.venue !== undefined ? { priceVenue: price.venue } : {}),
+      ...(price?.poolAddress !== undefined ? { pricePoolAddress: price.poolAddress } : {}),
+      ...(liquidityUsd !== null ? { liquidityUsd } : {}),
     };
 
     await insertFill(this.db, fill);
@@ -1131,7 +1137,7 @@ export class PaperEngine {
     const token: TokenRef = confirmed.side === "buy" ? confirmed.tokenOut : confirmed.tokenIn;
     let newPrice = 0;
     try {
-      newPrice = (await getUsdPrice(confirmed.chain, token.address, this.rpcClients[confirmed.chain])) ?? 0;
+      newPrice = (await getUsdPrice(confirmed.chain, token.address, this.rpcClients[confirmed.chain], v4MarketHint(confirmed))) ?? 0;
     } catch { /* keep 0 */ }
 
     // Re-price failed — keep the provisional fill at its mempool estimate rather than
@@ -1254,6 +1260,16 @@ function posKey(chain: ChainId, tokenAddress: string, walletId: string | null): 
 
 function markKey(chain: ChainId, tokenAddress: string): string {
   return `${chain}:${tokenAddress.toLowerCase()}`;
+}
+
+/**
+ * Pricing hint for a Uniswap V4 swap: the decoded poolId + the swap's quote side (the counter
+ * currency). Lets pricing value a V4-only token via StateView. Undefined for non-V4 signals.
+ */
+function v4MarketHint(signal: TradeSignal): MarketHint | undefined {
+  if (!signal.poolId) return undefined;
+  const counter = signal.side === "buy" ? signal.tokenIn : signal.tokenOut;
+  return { poolId: signal.poolId, counterCurrency: counter.address };
 }
 
 function leaderHoldingKey(chain: ChainId, tokenAddress: string, walletId: string): string {

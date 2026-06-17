@@ -15,6 +15,12 @@ type ReadContractClient = {
 
 export type StrategyAClients = Partial<Record<ChainId, ReadContractClient>>;
 
+/** Fields Strategy A derives from a single swap. `poolId` is set for Uniswap V4 only. */
+type DecodedSwap = Pick<
+  TradeSignal,
+  "tokenIn" | "tokenOut" | "amountIn" | "amountOut" | "venue" | "poolId"
+>;
+
 const V2_FACTORY_ABI = parseAbi(["function getPair(address tokenA, address tokenB) view returns (address pair)"]);
 const V3_FACTORY_ABI = parseAbi(["function getPool(address tokenA, address tokenB, uint24 fee) view returns (address pool)"]);
 const AERODROME_CL_FACTORY_ABI = parseAbi(["function getPool(address tokenA, address tokenB, int24 tickSpacing) view returns (address pool)"]);
@@ -30,7 +36,7 @@ export async function strategyA(
   meta: TokenMetadataResolver,
   _signalId: string,
   clients: StrategyAClients = {}
-): Promise<Pick<TradeSignal, "tokenIn" | "tokenOut" | "amountIn" | "amountOut" | "venue"> | null> {
+): Promise<DecodedSwap | null> {
   if (!event.logs || event.logs.length === 0) return null;
 
   const swapLogs = event.logs.filter((log) => {
@@ -82,7 +88,7 @@ async function decodeV2Swap(
   walletAddress: string,
   meta: TokenMetadataResolver,
   clients: StrategyAClients
-): Promise<Pick<TradeSignal, "tokenIn" | "tokenOut" | "amountIn" | "amountOut" | "venue"> | null> {
+): Promise<DecodedSwap | null> {
   const decoded = decodeEventLog({
     abi: [VENUE_ABIS.UNISWAP_V2_SWAP],
     data: swapLog.data as `0x${string}`,
@@ -140,7 +146,7 @@ async function decodeV3Swap(
   walletAddress: string,
   meta: TokenMetadataResolver,
   clients: StrategyAClients
-): Promise<Pick<TradeSignal, "tokenIn" | "tokenOut" | "amountIn" | "amountOut" | "venue"> | null> {
+): Promise<DecodedSwap | null> {
   const decoded = decodeEventLog({
     abi: [VENUE_ABIS.UNISWAP_V3_SWAP],
     data: swapLog.data as `0x${string}`,
@@ -189,7 +195,7 @@ async function decodeV4Swap(
   event: RawTxEvent,
   walletAddress: string,
   meta: TokenMetadataResolver
-): Promise<Pick<TradeSignal, "tokenIn" | "tokenOut" | "amountIn" | "amountOut" | "venue"> | null> {
+): Promise<DecodedSwap | null> {
   const decoded = decodeEventLog({
     abi: [VENUE_ABIS.UNISWAP_V4_SWAP],
     data: swapLog.data as `0x${string}`,
@@ -197,8 +203,12 @@ async function decodeV4Swap(
     strict: false,
   });
 
-  const { amount0, amount1 } = decoded.args as { amount0: bigint; amount1: bigint };
+  const { amount0, amount1, id } = decoded.args as { amount0: bigint; amount1: bigint; id?: string };
   if (amount0 === 0n || amount1 === 0n) return null;
+
+  // The poolId is the Swap event's indexed `bytes32 id` (topics[1]); pricing reads it back to value
+  // this V4-only token via StateView, since V4 pools can't be discovered on-chain by token pair.
+  const poolId = (typeof id === "string" ? id : swapLog.topics[1])?.toLowerCase() ?? null;
 
   // For V4, use Transfer logs from the receipt to identify tokens
   const transferMatch = resolveTokensFromTransfersV4(
@@ -220,6 +230,7 @@ async function decodeV4Swap(
     amountIn,
     amountOut,
     venue: "uniswap-v4",
+    poolId,
   };
 }
 

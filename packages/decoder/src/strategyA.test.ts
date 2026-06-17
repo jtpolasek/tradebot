@@ -208,6 +208,8 @@ describe("strategyA", () => {
     expect(result!.tokenOut.address).toBe(rook);
     expect(result!.amountIn).toBe(2_300_000_000n);
     expect(result!.amountOut).toBe(4191885454906961716550886n);
+    // poolId is the Swap event's indexed bytes32 id (topics[1]); pricing reads it back for V4.
+    expect(result!.poolId).toBe("0xe500210c7ea6bfd9f69dce044b09ef384ec2b34832f132baec3b418208e3a657");
   });
 
   it("decodes an Aerodrome (Base) V3-style swap", async () => {

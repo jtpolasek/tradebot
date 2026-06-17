@@ -57,6 +57,9 @@ export const tradeSignals = pgTable("trade_signals", {
   confidence: numeric("confidence"),
   reason: text("reason"),
   reviewStatus: text("review_status"),
+  // Uniswap V4 poolId (bytes32 hex) from the Swap event; null for non-V4 venues. Pricing reads it
+  // back to value V4-only tokens, whose pools can't be discovered on-chain by token pair.
+  poolId: text("pool_id"),
 }, (t) => [unique().on(t.chain, t.txHash, t.tokenIn, t.tokenOut, t.side)]);
 
 export const paperFills = pgTable("paper_fills", {
@@ -76,6 +79,10 @@ export const paperFills = pgTable("paper_fills", {
   latencyMs: integer("latency_ms").notNull(),
   provisional: boolean("provisional").notNull().default(false),
   voided: boolean("voided").notNull().default(false),
+  priceSource: text("price_source"),
+  priceVenue: text("price_venue"),
+  pricePoolAddress: text("price_pool_address"),
+  liquidityUsd: numeric("liquidity_usd"),
 });
 
 export const positions = pgTable("positions", {

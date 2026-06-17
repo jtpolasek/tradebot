@@ -1,0 +1,1 @@
+ALTER TABLE "trade_signals" ADD COLUMN "pool_id" text;

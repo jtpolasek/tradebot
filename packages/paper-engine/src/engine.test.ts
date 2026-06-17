@@ -576,6 +576,39 @@ describe("PaperEngine integration", () => {
     }));
   });
 
+  it("persists price provenance and liquidity on copied fills", async () => {
+    const bus = new EventBus();
+    await db.execute(sql`TRUNCATE paper_fills CASCADE`);
+    await db.execute(sql`TRUNCATE positions CASCADE`);
+    await db.execute(sql`TRUNCATE portfolio_snapshots CASCADE`);
+    await db.execute(sql`TRUNCATE trade_signals CASCADE`);
+
+    vi.mocked(getLiquidityUsd).mockResolvedValue(1_000_000);
+    vi.mocked(getUsdPriceResult).mockResolvedValue({
+      priceUsd: 10,
+      source: "v3-spot",
+      chain: "eth",
+      tokenAddress: TOKEN_A.address,
+      quoteTokenAddress: USDC.address,
+      poolAddress: "0xpool",
+      venue: "uniswap-v3",
+      warnings: [],
+    });
+
+    const engine = new PaperEngine(db, bus, cfg() as never, mockRpcClient as never);
+    await engine.start();
+    bus.emit("trade-signal", makeSignal({ walletId, tokenOut: TOKEN_A, tokenIn: USDC }));
+    await new Promise<void>((r) => setTimeout(r, 200));
+    engine.stop();
+
+    const fill = (await getRecentFills(db, new Date(Date.now() - 60_000), 5))[0];
+    expect(fill?.decision).toBe("copied");
+    expect(fill?.priceSource).toBe("v3-spot");
+    expect(fill?.priceVenue).toBe("uniswap-v3");
+    expect(fill?.pricePoolAddress).toBe("0xpool");
+    expect(fill?.liquidityUsd).toBeCloseTo(1_000_000, 0);
+  });
+
   it("decide returns skip for zero-weight leader", async () => {
     const zeroWeights = { getWeight: () => 0 };
     const bus = new EventBus();
@@ -858,5 +891,56 @@ describe("PaperEngine integration", () => {
 
     const signal = makeSignal({ walletId, tokenOut: TOKEN_A, tokenIn: USDC });
     expect(engine.decide(signal, 100_000)).toEqual({ action: "skip", reason: "leader-tier-muted" });
+  });
+
+  it("forwards a V4 signal's poolId as a pricing hint so a V4-only token is not skipped", async () => {
+    const bus = new EventBus();
+    await db.execute(sql`TRUNCATE paper_fills CASCADE`);
+    await db.execute(sql`TRUNCATE positions CASCADE`);
+    await db.execute(sql`TRUNCATE portfolio_snapshots CASCADE`);
+    await db.execute(sql`TRUNCATE trade_signals CASCADE`);
+
+    const V4_TOKEN: TokenRef = { chain: "eth", address: "0xc92b000000000000000000000000000000008ba3", symbol: "LOCAL", decimals: 18 };
+    const POOL_ID = "0x" + "cd".repeat(32);
+
+    // Model the real fix: liquidity is readable ONLY when the poolId hint is supplied — a V4-only
+    // token is invisible to the V2/V3 scan and would otherwise skip with no-liquidity-data.
+    vi.mocked(getLiquidityUsdResult).mockImplementation(async (chain, tokenAddress, _client, hint) => {
+      if (!hint?.poolId) return null;
+      return {
+        liquidityUsd: 1_000_000, chain, tokenAddress, quoteTokenAddress: USDC.address,
+        poolAddress: hint.poolId, venue: "uniswap-v4", method: "v4-virtual-reserves", warnings: [],
+      };
+    });
+    vi.mocked(getUsdPriceResult).mockImplementation(async (chain, tokenAddress, _client, hint) => ({
+      priceUsd: hint?.poolId ? 0.001 : 10, source: "v3-spot", chain, tokenAddress,
+      venue: hint?.poolId ? "uniswap-v4" : "uniswap-v3", warnings: [],
+    }));
+
+    const engine = new PaperEngine(db, bus, cfg() as never, mockRpcClient as never);
+    await engine.start();
+
+    // V4 buy WITH a poolId → hint flows → token is priceable → copied.
+    const v4Sig = makeSignal({ walletId, side: "buy", tokenIn: USDC, tokenOut: V4_TOKEN, venue: "uniswap-v4", poolId: POOL_ID });
+    bus.emit("trade-signal", v4Sig);
+    await new Promise<void>((r) => setTimeout(r, 250));
+
+    // Same token WITHOUT a poolId → no hint → invisible → skipped no-liquidity-data (the old bug).
+    const noHintSig = makeSignal({ walletId, side: "buy", tokenIn: USDC, tokenOut: V4_TOKEN });
+    bus.emit("trade-signal", noHintSig);
+    await new Promise<void>((r) => setTimeout(r, 250));
+    engine.stop();
+
+    // The engine forwarded the poolId + swap's counter currency (the quote side, USDC).
+    expect(vi.mocked(getLiquidityUsdResult)).toHaveBeenCalledWith(
+      "eth", V4_TOKEN.address, expect.anything(), { poolId: POOL_ID, counterCurrency: USDC.address }
+    );
+
+    const fills = await getRecentFills(db, new Date(Date.now() - 60_000), 10);
+    const v4Fill = fills.find((f) => f.signalId === v4Sig.id);
+    const noHintFill = fills.find((f) => f.signalId === noHintSig.id);
+    expect(v4Fill?.decision).toBe("copied");
+    expect(noHintFill?.decision).toBe("skipped");
+    expect(noHintFill?.skipReason).toBe("no-liquidity-data");
   });
 });

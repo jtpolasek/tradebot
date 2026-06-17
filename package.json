@@ -11,7 +11,8 @@
     "db:up:test": "docker compose --profile test up -d db-test",
     "db:migrate": "node --import tsx/esm packages/store/src/migrate.ts",
     "verify:ledger": "node --import tsx/esm scripts/verify-ledger.ts",
-    "reprocess": "node --import tsx/esm scripts/reprocess.ts"
+    "reprocess": "node --import tsx/esm scripts/reprocess.ts",
+    "check-v4": "node --import tsx/esm packages/pricing/scripts/check-v4.ts"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

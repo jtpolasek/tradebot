@@ -25,6 +25,10 @@ export async function insertFill(db: Db, fill: PaperFill): Promise<void> {
     latencyMs: fill.latencyMs,
     provisional: fill.provisional,
     voided: false,
+    ...(fill.priceSource !== undefined ? { priceSource: fill.priceSource } : {}),
+    ...(fill.priceVenue !== undefined ? { priceVenue: fill.priceVenue } : {}),
+    ...(fill.pricePoolAddress !== undefined ? { pricePoolAddress: fill.pricePoolAddress } : {}),
+    ...(fill.liquidityUsd !== undefined ? { liquidityUsd: String(fill.liquidityUsd) } : {}),
   });
 }
 
@@ -151,6 +155,10 @@ function rowToFill(row: typeof paperFills.$inferSelect, chain: ChainId): StoredF
     latencyMs: row.latencyMs,
     provisional: row.provisional,
     voided: row.voided,
+    ...(row.priceSource !== null ? { priceSource: row.priceSource } : {}),
+    ...(row.priceVenue !== null ? { priceVenue: row.priceVenue } : {}),
+    ...(row.pricePoolAddress !== null ? { pricePoolAddress: row.pricePoolAddress } : {}),
+    ...(row.liquidityUsd !== null ? { liquidityUsd: Number(row.liquidityUsd) } : {}),
   };
 }
 

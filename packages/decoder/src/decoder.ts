@@ -15,7 +15,7 @@ import { strategyA } from "./strategyA.js";
 import { strategyC } from "./strategyC.js";
 import { analyzePairs } from "./balanceDelta.js";
 import { SignalDeduper } from "./deduper.js";
-import { TRANSFER_TOPIC, WETH_WITHDRAWAL_TOPIC } from "./venues.js";
+import { TRANSFER_TOPIC, WETH_WITHDRAWAL_TOPIC, VENUE_TOPIC_MAP } from "./venues.js";
 import type { NormalizedTransfer, BalanceDeltaResult } from "./types.js";
 import type { StrategyAClients } from "./strategyA.js";
 
@@ -291,11 +291,16 @@ export class Decoder {
     _wallet: string,
     walletId: string,
     parts: Pick<TradeSignal, "tokenIn" | "tokenOut" | "amountIn" | "amountOut" | "venue"> &
-      Partial<Pick<TradeSignal, "decodeStatus" | "confidence" | "reason">>
+      Partial<Pick<TradeSignal, "decodeStatus" | "confidence" | "reason" | "poolId">>
   ): TradeSignal[] {
     const { tokenIn, tokenOut, amountIn, amountOut, venue } = parts;
     const side = classifySide(event.chain, tokenIn.address, tokenOut.address);
     if (!side) return []; // stable rotation — skip
+
+    // Capture the V4 poolId for any single-V4-swap tx, even when strategyA bailed and the trade was
+    // recovered via balance-delta (e.g. native-ETH-funded buys, where strategyA can't map both
+    // sides). Pricing reads it back to value V4-only tokens. strategyA's own poolId wins if present.
+    const poolId = parts.poolId ?? extractV4PoolId(event);
 
     const makeSignal = (signalSide: "buy" | "sell"): TradeSignal => ({
       id: crypto.randomUUID(),
@@ -316,6 +321,7 @@ export class Decoder {
       decodeStatus: parts.decodeStatus ?? "decoded",
       confidence: parts.confidence ?? null,
       reason: parts.reason ?? null,
+      poolId: poolId ?? null,
     });
 
     return side === "both" ? [makeSignal("sell"), makeSignal("buy")] : [makeSignal(side)];
@@ -352,6 +358,21 @@ export class Decoder {
 }
 
 type Side = "buy" | "sell" | "both" | null;
+
+/**
+ * The Uniswap V4 poolId (the Swap event's indexed `bytes32 id`) when the tx contains exactly one V4
+ * Swap log. Multiple V4 swaps (multi-hop / aggregator split) are ambiguous → undefined, matching
+ * strategyA's single-swap rule. Mempool events carry no logs, so this is a no-op there.
+ */
+function extractV4PoolId(event: RawTxEvent): string | undefined {
+  if (!event.logs) return undefined;
+  const v4Logs = event.logs.filter((l) => {
+    const t0 = l.topics[0]?.toLowerCase();
+    return t0 !== undefined && VENUE_TOPIC_MAP[t0] === "UNISWAP_V4_SWAP";
+  });
+  if (v4Logs.length !== 1) return undefined;
+  return v4Logs[0]!.topics[1]?.toLowerCase();
+}
 
 export function classifySide(chain: ChainId, tokenInAddr: string, tokenOutAddr: string): Side {
   const inIsQuote = isQuoteAsset(chain, tokenInAddr) || tokenInAddr === "";

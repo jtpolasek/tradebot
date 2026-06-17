@@ -45,6 +45,8 @@ export const KNOWN_FACTORIES: Record<ChainId, { v2?: string; v3?: string; aerodr
     v2: "0x8909dc15e40173ff4699343b6eb8132c65e18ec6",
     v3: "0x33128a8fc17869897dce68ed026d694621f6fdfd",
     aerodromeCl: "0x5e7bb104d84c7cb9b682aac2f3d509f5f406809a",
-    v4PoolManager: "0x498581ff718922c3f8e6a244b8e9b1a0f10e6b44",
+    // Verified on-chain 2026-06-16 via StateView.poolManager(); the previous value
+    // (…b8e9b1a0f10e6b44) was wrong. Currently unread, but Part 3 V4 pricing depends on it.
+    v4PoolManager: "0x498581ff718922c3f8e6a244956af099b2652b2b",
   },
 };

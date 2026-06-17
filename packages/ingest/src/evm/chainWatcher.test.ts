@@ -381,6 +381,53 @@ describe("ChainWatcher teardown", () => {
   });
 });
 
+describe("ChainWatcher getHealth", () => {
+  function makeWatcher() {
+    return new ChainWatcher({
+      chain: "eth",
+      primaryWsUrl: "wss://primary",
+      fallbackWsUrl: "wss://fallback",
+      db: makeMockDb(),
+      bus: new EventBus(),
+      recorder: makeRecorder(),
+    });
+  }
+
+  it("starts in reconnecting with no failures and reflects emitted events", () => {
+    const watcher = makeWatcher();
+    const before = watcher.getHealth();
+    expect(before.chain).toBe("eth");
+    expect(before.connectionState).toBe("reconnecting");
+    expect(before.connectFailures).toBe(0);
+    expect(before.usingFallback).toBe(false);
+    expect(before.lastEventAt).toBe(0);
+
+    (watcher as unknown as { emitAndRecord(e: RawTxEvent): void }).emitAndRecord({
+      chain: "eth", source: "confirmed", txHash: "0xabc", from: "0x1", to: null, blockNumber: 1, observedAt: Date.now(),
+    });
+    expect(watcher.getHealth().lastEventAt).toBeGreaterThan(0);
+  });
+
+  it("counts a connection failure and flips to the fallback flag", () => {
+    const watcher = makeWatcher();
+    const internals = watcher as unknown as { connectFailures: number; onConnectionFailure(): void };
+    // Mirror what runLoop does on a thrown connect attempt.
+    internals.connectFailures++;
+    internals.onConnectionFailure();
+    const health = watcher.getHealth();
+    expect(health.connectFailures).toBe(1);
+    expect(health.usingFallback).toBe(true);
+  });
+
+  it("reports backfill count from the internal counter", async () => {
+    const watcher = makeWatcher();
+    (watcher as unknown as { client: { getLogs: ReturnType<typeof vi.fn> } }).client = { getLogs: vi.fn().mockResolvedValue([]) };
+    (watcher as unknown as { wallets: string[] }).wallets = ["0xaaaa"];
+    await (watcher as unknown as { backfillGap(f: number, t: number): Promise<void> }).backfillGap(1, 1);
+    expect(watcher.getHealth().backfillCount).toBe(1);
+  });
+});
+
 describe("ChainWatcher emit", () => {
   it("emits raw-tx events on the bus", async () => {
     const bus = new EventBus();

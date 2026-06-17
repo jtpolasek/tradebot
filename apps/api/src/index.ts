@@ -2,7 +2,7 @@ import Fastify from "fastify";
 import wsPlugin from "@fastify/websocket";
 import { z } from "zod";
 import { BrainWeightProvider, runScorerJob } from "@tradebot/brain";
-import { config, normalizeAddressInput } from "@tradebot/core";
+import { config, normalizeAddressInput, deriveHealth, type HealthInput, type HealthThresholds } from "@tradebot/core";
 import { createPublicClient, webSocket } from "viem";
 import { mainnet, base as baseChain } from "viem/chains";
 import {
@@ -28,6 +28,8 @@ import {
   setSetting,
   deleteSetting,
   latestMark,
+  getRunnerHealth,
+  getChainStatesUpdatedAt,
 } from "@tradebot/store";
 import { apiConfig } from "./config.js";
 
@@ -52,6 +54,8 @@ await app.register(wsPlugin);
 
 app.addHook("preHandler", async (req, reply) => {
   if (req.method === "OPTIONS") return;
+  // /health is an unauthenticated liveness probe for uptime monitors / load balancers.
+  if (req.url.split("?")[0] === "/health") return;
   if (req.headers["x-api-key"] !== apiConfig.API_KEY) {
     return reply.code(401).send({ error: "Unauthorized" });
   }
@@ -296,6 +300,39 @@ app.delete("/settings/:key", async (req, reply) => {
   const { key } = req.params as { key: string };
   await deleteSetting(db, key);
   reply.send({ ok: true });
+});
+
+// ── Health & metrics ───────────────────────────────────────────────────────────
+
+const healthThresholds: HealthThresholds = {
+  heartbeatStaleSec: config.HEARTBEAT_STALE_SEC,
+  chainStaleSecByChain: { eth: config.CHAIN_STALE_SEC_ETH, base: config.CHAIN_STALE_SEC_BASE },
+  rssSoftLimitBytes: config.RSS_SOFT_LIMIT_MB * 1024 * 1024,
+};
+
+async function gatherHealthInput(): Promise<HealthInput> {
+  try {
+    const [heartbeat, chainStateUpdatedAt] = await Promise.all([
+      getRunnerHealth(db),
+      getChainStatesUpdatedAt(db),
+    ]);
+    return { dbReachable: true, heartbeat, chainStateUpdatedAt };
+  } catch {
+    return { dbReachable: false, heartbeat: null, chainStateUpdatedAt: {} };
+  }
+}
+
+// Unauthenticated shallow liveness probe (see auth preHandler exemption above).
+app.get("/health", async (_req, reply) => {
+  const report = deriveHealth(await gatherHealthInput(), Date.now(), healthThresholds);
+  reply.code(report.status === "down" ? 503 : 200).send({ status: report.status });
+});
+
+// Authenticated detail: full rollup plus the raw inputs it was derived from.
+app.get("/metrics", async (_req, reply) => {
+  const input = await gatherHealthInput();
+  const report = deriveHealth(input, Date.now(), healthThresholds);
+  reply.send({ status: report.status, checks: report.checks, input });
 });
 
 // ── WebSocket stream ──────────────────────────────────────────────────────────

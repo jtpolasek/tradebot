@@ -1,7 +1,7 @@
 import { createPublicClient, webSocket, parseAbi } from "viem";
 import { mainnet, base } from "viem/chains";
 import WebSocket from "ws";
-import { createLogger, type ChainId, type RawTxEvent, type EventBus } from "@tradebot/core";
+import { createLogger, type ChainId, type RawTxEvent, type EventBus, type ChainWatcherHealth, type ConnectionState } from "@tradebot/core";
 import { getActiveWallets, upsertLastBlock, getLastBlock, type Db } from "@tradebot/store";
 import { LruSet } from "../dedupe.js";
 import { backoffMs, sleep } from "../backoff.js";
@@ -113,6 +113,8 @@ export class ChainWatcher {
   private lastEventTs = 0;
   private usingFallback = false;
   private primaryDownSince: number | null = null;
+  private connectionState: ConnectionState = "reconnecting";
+  private connectFailures = 0;
 
   _backfillCallCount = 0;
 
@@ -198,6 +200,8 @@ export class ChainWatcher {
       } catch (err) {
         // Tear down the failed connection's watchers/sockets before retrying so they don't leak.
         this.teardown();
+        this.connectionState = "reconnecting";
+        this.connectFailures++;
         if (this.stopped) break;
         this.onConnectionFailure();
         const delay = backoffMs(attempt++, 1_000, 30_000);
@@ -258,6 +262,10 @@ export class ChainWatcher {
       this.subscribeConfirmedLogs(onError);
       this.subscribeNewHeads(onError);
       this.subscribeMempoolPending();
+
+      // Subscriptions are live at this point; report the steady state. usingFallback distinguishes
+      // the primary endpoint from a QuickNode failover.
+      this.connectionState = this.usingFallback ? "fallback" : "connected";
 
       this.cleanupFns.push(() => resolve());
     });
@@ -531,6 +539,19 @@ export class ChainWatcher {
     this.lastEventTs = Date.now();
     this.bus.emit("raw-tx", event);
     void this.recorder.record(event);
+  }
+
+  /** Snapshot of this watcher's connection health for the runner heartbeat. */
+  getHealth(): ChainWatcherHealth {
+    return {
+      chain: this.chain,
+      connectionState: this.connectionState,
+      usingFallback: this.usingFallback,
+      lastEventAt: this.lastEventTs,
+      connectFailures: this.connectFailures,
+      backfillCount: this._backfillCallCount,
+      walletCount: this.wallets.length,
+    };
   }
 }
 

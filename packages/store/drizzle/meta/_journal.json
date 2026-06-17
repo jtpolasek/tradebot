@@ -64,6 +64,13 @@
       "when": 1781729095629,
       "tag": "0008_tricky_grim_reaper",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1781730415379,
+      "tag": "0009_tan_spencer_smythe",
+      "breakpoints": true
     }
   ]
 }

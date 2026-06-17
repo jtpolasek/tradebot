@@ -156,3 +156,12 @@ export const settings = pgTable("settings", {
   value: jsonb("value").notNull(),
   updatedAt: timestamptz("updated_at").notNull().defaultNow(),
 });
+
+// Single-row operational heartbeat written by the runner (~every 10s) and read by apps/api's
+// /health and /metrics. jsonb payload (non-money telemetry) so the shape can evolve without a
+// migration; a stale row is itself the "runner is down" signal.
+export const runnerHealth = pgTable("runner_health", {
+  id: text("id").primaryKey().default("runner"),
+  ts: timestamptz("ts").notNull(),
+  payload: jsonb("payload").notNull(),
+});

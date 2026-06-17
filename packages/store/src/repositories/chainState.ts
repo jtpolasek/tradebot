@@ -8,6 +8,16 @@ export async function getLastBlock(db: Db, chain: ChainId): Promise<number | nul
   return rows[0]?.lastBlock ?? null;
 }
 
+/** Epoch ms of each chain's last `chain_state` update; chains with no row are absent. */
+export async function getChainStatesUpdatedAt(db: Db): Promise<Partial<Record<ChainId, number>>> {
+  const rows = await db.select().from(chainState);
+  const out: Partial<Record<ChainId, number>> = {};
+  for (const row of rows) {
+    out[row.chain as ChainId] = row.updatedAt.getTime();
+  }
+  return out;
+}
+
 export async function upsertLastBlock(db: Db, chain: ChainId, block: number): Promise<void> {
   await db
     .insert(chainState)

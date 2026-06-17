@@ -37,6 +37,11 @@ const schema = z.object({
   ALLOW_FALLBACK_PRICE_BUYS: envBoolean.default(false),
   MAX_SPOT_TWAP_DIVERGENCE_BPS: z.coerce.number().nonnegative().default(300),
   MAX_CHAINLINK_STALENESS_SEC: z.coerce.number().positive().default(3600),
+  HEARTBEAT_INTERVAL_MS: z.coerce.number().positive().default(10_000),
+  HEARTBEAT_STALE_SEC: z.coerce.number().positive().default(30),
+  CHAIN_STALE_SEC_ETH: z.coerce.number().positive().default(60),
+  CHAIN_STALE_SEC_BASE: z.coerce.number().positive().default(30),
+  RSS_SOFT_LIMIT_MB: z.coerce.number().positive().default(1536),
   LOG_LEVEL: z.enum(["trace", "debug", "info", "warn", "error", "fatal"]).default("info"),
 });
 

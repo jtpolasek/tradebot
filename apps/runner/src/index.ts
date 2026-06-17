@@ -9,6 +9,7 @@ import {
   getCopyRequestedCandidates,
   setCandidateReviewStatus,
   getLatestFillForSignal,
+  upsertRunnerHealth,
 } from "@tradebot/store";
 import { ChainWatcher, Recorder, deserializeEvent } from "@tradebot/ingest";
 import { Decoder } from "@tradebot/decoder";
@@ -138,6 +139,8 @@ async function main() {
     await watcher.start();
   }
 
+  const heartbeatJob = startHeartbeatJob(db, watchers);
+
   logger.info("Runner ready — watching ETH and Base.");
 
   async function shutdown() {
@@ -147,6 +150,7 @@ async function main() {
     candidateCopyJob.stop();
     marksJob.stop();
     scorerJob.stop();
+    heartbeatJob.stop();
     decoder.stop();
     for (const watcher of watchers) watcher.stop();
     await closeDb();
@@ -185,6 +189,28 @@ function startCandidateCopyJob(db: ReturnType<typeof getDb>, engine: PaperEngine
 
   run();
   const timer = setInterval(run, 5_000);
+  return { stop: () => clearInterval(timer) };
+}
+
+function startHeartbeatJob(db: ReturnType<typeof getDb>, watchers: ChainWatcher[]): { stop: () => void } {
+  const version = process.env["GIT_SHA"];
+  const run = () => {
+    const mem = process.memoryUsage();
+    const payload = {
+      pid: process.pid,
+      uptimeSec: Math.round(process.uptime()),
+      rssBytes: mem.rss,
+      heapUsedBytes: mem.heapUsed,
+      ...(version ? { version } : {}),
+      chains: watchers.map((w) => w.getHealth()),
+    };
+    logger.info({ rssMb: Math.round(mem.rss / (1024 * 1024)), chains: payload.chains }, "heartbeat");
+    void upsertRunnerHealth(db, payload).catch((err: unknown) => logger.warn({ err }, "heartbeat write failed"));
+  };
+
+  run();
+  const timer = setInterval(run, config.HEARTBEAT_INTERVAL_MS);
+  timer.unref?.();
   return { stop: () => clearInterval(timer) };
 }
 

@@ -975,3 +975,216 @@ describe("PaperEngine integration", () => {
     expect(noHintFill?.skipReason).toBe("no-liquidity-data");
   });
 });
+
+const WETH_ETH: TokenRef = { chain: "eth", address: "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2", symbol: "WETH", decimals: 18 };
+
+describe("PaperEngine mempool fast path", () => {
+  // Deterministic equity = PAPER_STARTING_CASH (10_000): no loaded snapshot or open positions.
+  async function resetLedger(): Promise<void> {
+    await db.execute(sql`TRUNCATE portfolio_snapshots CASCADE`);
+    await db.execute(sql`TRUNCATE positions CASCADE`);
+    await db.execute(sql`TRUNCATE price_marks CASCADE`);
+  }
+
+  it("commits a USDC-quoted provisional buy at the leader's implied price without token discovery", async () => {
+    await resetLedger();
+    const bus = new EventBus();
+    const engine = new PaperEngine(db, bus, cfg() as never, mockRpcClient as never);
+    await engine.start();
+
+    // Only the quote side is priced on the fast path (USDC ≈ $1); the token side is never read.
+    vi.mocked(getUsdPrice).mockImplementation(async (_chain, addr) => (addr === USDC.address ? 1 : 10));
+    const liqCalls = vi.mocked(getLiquidityUsdResult).mock.calls.length;
+    const priceResultCalls = vi.mocked(getUsdPriceResult).mock.calls.length;
+    const zeroxCalls = vi.mocked(getZeroxPrice).mock.calls.length;
+
+    // Leader pays 500 USDC for 50 TOKEN_A → implied $10/token.
+    const sig = makeSignal({
+      walletId,
+      source: "mempool",
+      tokenIn: USDC,
+      tokenOut: TOKEN_A,
+      amountIn: 500n * 10n ** 6n,
+      amountOut: 50n * 10n ** 18n,
+    });
+    bus.emit("trade-signal", sig);
+    await new Promise<void>((r) => setTimeout(r, 300));
+    engine.stop();
+
+    const fill = (await getRecentFills(db, new Date(Date.now() - 60_000), 5)).find((f) => f.signalId === sig.id);
+    expect(fill?.decision).toBe("copied");
+    expect(fill?.provisional).toBe(true);
+    expect(fill?.priceSource).toBe("leader-implied");
+    expect(fill?.priceUsd).toBeCloseTo(10, 6);
+    // notional = equity 10_000 * BASE_TRADE_PCT 0.01 = 100 → qty = 100 / 10.
+    expect(fill?.qty).toBeCloseTo(10, 6);
+
+    // No liquidity fan-out, spot read, or 0x quote happened on the hot path.
+    expect(vi.mocked(getLiquidityUsdResult).mock.calls.length).toBe(liqCalls);
+    expect(vi.mocked(getUsdPriceResult).mock.calls.length).toBe(priceResultCalls);
+    expect(vi.mocked(getZeroxPrice).mock.calls.length).toBe(zeroxCalls);
+  });
+
+  it("values a WETH-quoted provisional buy via the quote price", async () => {
+    await resetLedger();
+    const bus = new EventBus();
+    const engine = new PaperEngine(db, bus, cfg() as never, mockRpcClient as never);
+    await engine.start();
+
+    vi.mocked(getUsdPrice).mockImplementation(async (_chain, addr) => (addr === WETH_ETH.address ? 2000 : 10));
+    // Leader pays 0.05 WETH for 100 TOKEN_A → implied (0.05 * 2000) / 100 = $1/token.
+    const sig = makeSignal({
+      walletId,
+      source: "mempool",
+      tokenIn: WETH_ETH,
+      tokenOut: TOKEN_A,
+      amountIn: 5n * 10n ** 16n,
+      amountOut: 100n * 10n ** 18n,
+    });
+    bus.emit("trade-signal", sig);
+    await new Promise<void>((r) => setTimeout(r, 300));
+    engine.stop();
+
+    const fill = (await getRecentFills(db, new Date(Date.now() - 60_000), 5)).find((f) => f.signalId === sig.id);
+    expect(fill?.decision).toBe("copied");
+    expect(fill?.priceSource).toBe("leader-implied");
+    expect(fill?.priceUsd).toBeCloseTo(1, 6);
+    // notional 100 at $1 → qty 100.
+    expect(fill?.qty).toBeCloseTo(100, 4);
+  });
+
+  it("re-prices a provisional fill to the discovered price on confirm", async () => {
+    await resetLedger();
+    const bus = new EventBus();
+    const engine = new PaperEngine(db, bus, cfg() as never, mockRpcClient as never);
+    await engine.start();
+
+    vi.mocked(getUsdPrice).mockImplementation(async (_chain, addr) => (addr === USDC.address ? 1 : 10));
+    const sig = makeSignal({
+      walletId,
+      source: "mempool",
+      tokenIn: USDC,
+      tokenOut: TOKEN_A,
+      amountIn: 500n * 10n ** 6n,
+      amountOut: 50n * 10n ** 18n,
+    });
+    bus.emit("trade-signal", sig);
+    await new Promise<void>((r) => setTimeout(r, 300));
+
+    // Confirm reveals a discovered spot of $12; the fill is re-priced and de-provisioned.
+    vi.mocked(getUsdPrice).mockResolvedValue(12);
+    bus.emit("signal-confirmed", { signalId: sig.id, confirmed: { ...sig, source: "confirmed", confirmedAt: Date.now() } });
+    await new Promise<void>((r) => setTimeout(r, 300));
+    engine.stop();
+
+    const fill = (await getRecentFills(db, new Date(Date.now() - 60_000), 5)).find((f) => f.signalId === sig.id);
+    expect(fill?.decision).toBe("copied");
+    expect(fill?.provisional).toBe(false);
+    expect(fill?.priceUsd).toBeCloseTo(12, 6);
+  });
+
+  it("voids a provisional fill when confirm-time liquidity is below the minimum", async () => {
+    await resetLedger();
+    const bus = new EventBus();
+    const engine = new PaperEngine(db, bus, cfg() as never, mockRpcClient as never);
+    await engine.start();
+
+    const cashBefore = engine.getCashUsd();
+    vi.mocked(getUsdPrice).mockImplementation(async (_chain, addr) => (addr === USDC.address ? 1 : 10));
+    const sig = makeSignal({
+      walletId,
+      source: "mempool",
+      tokenIn: USDC,
+      tokenOut: TOKEN_A,
+      amountIn: 500n * 10n ** 6n,
+      amountOut: 50n * 10n ** 18n,
+    });
+    bus.emit("trade-signal", sig);
+    await new Promise<void>((r) => setTimeout(r, 300));
+    expect(engine.getCashUsd()).toBeLessThan(cashBefore); // provisional spent cash
+
+    // Confirm reveals thin liquidity below MIN_LIQUIDITY_USD (150k) → reverse the provisional.
+    vi.mocked(getLiquidityUsd).mockResolvedValue(100_000);
+    bus.emit("signal-confirmed", { signalId: sig.id, confirmed: { ...sig, source: "confirmed", confirmedAt: Date.now() } });
+    await new Promise<void>((r) => setTimeout(r, 300));
+    engine.stop();
+
+    // Cash restored exactly and no open position remains.
+    expect(engine.getCashUsd()).toBeCloseTo(cashBefore, 6);
+    const positions = await getOpenPositions(db);
+    expect(positions.find((p) => p.tokenAddress === TOKEN_A.address && p.sourceWalletId === walletId)).toBeUndefined();
+  });
+
+  it("skips a mempool buy with insufficient-balance on the fast path", async () => {
+    await db.execute(sql`TRUNCATE portfolio_snapshots CASCADE`);
+    await db.execute(sql`TRUNCATE positions CASCADE`);
+    const bus = new EventBus();
+    const engine = new PaperEngine(db, bus, cfg({ PAPER_STARTING_CASH_USD: 40 }) as never, mockRpcClient as never);
+    await engine.start();
+
+    vi.mocked(getUsdPrice).mockImplementation(async (_chain, addr) => (addr === USDC.address ? 1 : 10));
+    const sig = makeSignal({
+      walletId,
+      source: "mempool",
+      tokenIn: USDC,
+      tokenOut: TOKEN_A,
+      amountIn: 500n * 10n ** 6n,
+      amountOut: 50n * 10n ** 18n,
+    });
+    bus.emit("trade-signal", sig);
+    await new Promise<void>((r) => setTimeout(r, 300));
+    engine.stop();
+
+    // $40 equity → notional clamps up to MIN_NOTIONAL 50 but cash 40 < 50 → insufficient-balance.
+    const fill = (await getRecentFills(db, new Date(Date.now() - 60_000), 5)).find((f) => f.signalId === sig.id);
+    expect(fill?.decision).toBe("skipped");
+    expect(fill?.skipReason).toBe("insufficient-balance");
+  });
+
+  it("skips a mempool buy with no-price-data when the quote side cannot be priced", async () => {
+    await resetLedger();
+    const bus = new EventBus();
+    const engine = new PaperEngine(db, bus, cfg() as never, mockRpcClient as never);
+    await engine.start();
+
+    // Quote price unavailable → implied price is 0 → no-price-data.
+    vi.mocked(getUsdPrice).mockResolvedValue(null as never);
+    const sig = makeSignal({
+      walletId,
+      source: "mempool",
+      tokenIn: USDC,
+      tokenOut: TOKEN_A,
+      amountIn: 500n * 10n ** 6n,
+      amountOut: 50n * 10n ** 18n,
+    });
+    bus.emit("trade-signal", sig);
+    await new Promise<void>((r) => setTimeout(r, 300));
+    engine.stop();
+
+    const fill = (await getRecentFills(db, new Date(Date.now() - 60_000), 5)).find((f) => f.signalId === sig.id);
+    expect(fill?.decision).toBe("skipped");
+    expect(fill?.skipReason).toBe("no-price-data");
+  });
+
+  it("keeps confirmed buys on the heavyweight discovery path (regression)", async () => {
+    await resetLedger();
+    const bus = new EventBus();
+    const engine = new PaperEngine(db, bus, cfg() as never, mockRpcClient as never);
+    await engine.start();
+
+    const priceResultCalls = vi.mocked(getUsdPriceResult).mock.calls.length;
+    const liqCalls = vi.mocked(getLiquidityUsdResult).mock.calls.length;
+    const sig = makeSignal({ walletId, source: "confirmed", tokenIn: USDC, tokenOut: TOKEN_A });
+    bus.emit("trade-signal", sig);
+    await new Promise<void>((r) => setTimeout(r, 300));
+    engine.stop();
+
+    const fill = (await getRecentFills(db, new Date(Date.now() - 60_000), 5)).find((f) => f.signalId === sig.id);
+    expect(fill?.decision).toBe("copied");
+    expect(fill?.provisional).toBe(false);
+    expect(fill?.priceSource).toBe("v3-spot");
+    // The confirmed path still performs liquidity + spot discovery.
+    expect(vi.mocked(getLiquidityUsdResult).mock.calls.length).toBeGreaterThan(liqCalls);
+    expect(vi.mocked(getUsdPriceResult).mock.calls.length).toBeGreaterThan(priceResultCalls);
+  });
+});

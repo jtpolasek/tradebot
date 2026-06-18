@@ -262,32 +262,12 @@ export class PaperEngine {
   }
 
   decide(signal: TradeSignal, liquidityUsd: number | null): { action: "copy"; notionalUsd: number } | { action: "skip"; reason: string } {
-    const weight = this.weights.getWeight(signal.walletId);
-    if (weight === 0) return { action: "skip", reason: "leader-weight-zero" };
+    if (this.weights.getWeight(signal.walletId) === 0) return { action: "skip", reason: "leader-weight-zero" };
 
-    if (liquidityUsd === null) return { action: "skip", reason: "no-liquidity-data" };
-    const mutedTiers = this.weights.getMutedLiquidityTiers?.(signal.walletId);
-    if (mutedTiers?.has(classifyLiquidityTier(liquidityUsd))) return { action: "skip", reason: "leader-tier-muted" };
-    if (liquidityUsd < this.runtimeConfig.MIN_LIQUIDITY_USD) return { action: "skip", reason: "below-min-liquidity" };
+    const veto = this.liquidityVeto(signal, liquidityUsd);
+    if (veto) return { action: "skip", reason: veto };
 
-    const eq = this.equity();
-    let notional = eq * this.runtimeConfig.BASE_TRADE_PCT * weight;
-    if (this.runtimeConfig.SIZING_MODE === "proportional") {
-      notional *= this.proportionalScale(signal);
-    }
-    notional = Math.max(notional, this.runtimeConfig.MIN_NOTIONAL_USD);
-    notional = Math.min(notional, eq * this.runtimeConfig.MAX_TRADE_PCT);
-
-    if (signal.side === "buy") {
-      notional = Math.min(notional, this.cashUsd);
-      if (notional < this.runtimeConfig.MIN_NOTIONAL_USD) {
-        return {
-          action: "skip",
-          reason: this.cashUsd < this.runtimeConfig.MIN_NOTIONAL_USD ? "insufficient-balance" : "below-min-notional",
-        };
-      }
-      return { action: "copy", notionalUsd: notional };
-    }
+    if (signal.side === "buy") return this.sizeBuy(signal);
 
     // Sell
     const token = signal.side === "sell" ? signal.tokenIn : signal.tokenOut;
@@ -299,6 +279,44 @@ export class PaperEngine {
     const sellQty = fraction * pos.qty;
 
     return { action: "copy", notionalUsd: sellQty * pos.avgCostUsd };
+  }
+
+  /**
+   * Liquidity-dependent risk gate, pulled out of decide() so the mempool fast path can defer it to
+   * the confirm step. Returns a skip reason or null. Weight is checked separately by the caller.
+   */
+  private liquidityVeto(signal: TradeSignal, liquidityUsd: number | null): string | null {
+    if (liquidityUsd === null) return "no-liquidity-data";
+    const mutedTiers = this.weights.getMutedLiquidityTiers?.(signal.walletId);
+    if (mutedTiers?.has(classifyLiquidityTier(liquidityUsd))) return "leader-tier-muted";
+    if (liquidityUsd < this.runtimeConfig.MIN_LIQUIDITY_USD) return "below-min-liquidity";
+    return null;
+  }
+
+  /**
+   * Pure buy sizing — equity × BASE_TRADE_PCT × weight, proportional scaling, MIN/MAX clamps, and
+   * the cash cap — with no liquidity dependency. Shared by decide() (confirmed buys) and the mempool
+   * fast path (handleProvisionalBuy), which sizes before any token-side discovery.
+   */
+  private sizeBuy(signal: TradeSignal): { action: "copy"; notionalUsd: number } | { action: "skip"; reason: string } {
+    const weight = this.weights.getWeight(signal.walletId);
+    if (weight === 0) return { action: "skip", reason: "leader-weight-zero" };
+
+    const eq = this.equity();
+    let notional = eq * this.runtimeConfig.BASE_TRADE_PCT * weight;
+    if (this.runtimeConfig.SIZING_MODE === "proportional") {
+      notional *= this.proportionalScale(signal);
+    }
+    notional = Math.max(notional, this.runtimeConfig.MIN_NOTIONAL_USD);
+    notional = Math.min(notional, eq * this.runtimeConfig.MAX_TRADE_PCT);
+    notional = Math.min(notional, this.cashUsd);
+    if (notional < this.runtimeConfig.MIN_NOTIONAL_USD) {
+      return {
+        action: "skip",
+        reason: this.cashUsd < this.runtimeConfig.MIN_NOTIONAL_USD ? "insufficient-balance" : "below-min-notional",
+      };
+    }
+    return { action: "copy", notionalUsd: notional };
   }
 
   private estimateSignalSourceNotionalUsd(signal: TradeSignal): number | null {
@@ -365,6 +383,41 @@ export class PaperEngine {
     }
   }
 
+  /**
+   * Record a skipped decision: insert + emit a zero-quantity skip fill and (by default) update the
+   * leader-holding estimate. Factored out of handleSignal's many skip branches. Pass
+   * rememberHolding:false for low-confidence candidates whose side/token may be wrong.
+   */
+  private async recordSkip(
+    signal: TradeSignal,
+    reason: string,
+    token: TokenRef,
+    quoteToken: TokenRef,
+    opts: { rememberHolding?: boolean } = {},
+  ): Promise<void> {
+    const decidedAt = Date.now();
+    const fill: PaperFill = {
+      id: randomUUID(),
+      signalId: signal.id,
+      decidedAt,
+      decision: "skipped",
+      skipReason: reason,
+      side: signal.side,
+      token,
+      quoteToken,
+      qty: 0,
+      priceUsd: 0,
+      notionalUsd: 0,
+      feeUsd: 0,
+      slippageBps: 0,
+      latencyMs: decidedAt - signal.observedAt,
+      provisional: false,
+    };
+    await insertFill(this.db, fill);
+    this.bus.emit("paper-fill", fill);
+    if (opts.rememberHolding !== false) this.rememberLeaderHolding(signal);
+  }
+
   private async handleSignal(signal: TradeSignal): Promise<void> {
     const storedSignalId = await insertSignal(this.db, signal);
     if (storedSignalId !== signal.id) {
@@ -376,59 +429,17 @@ export class PaperEngine {
 
     // Decode-confidence veto: the engine acts on confidently decoded signals only. Candidates are
     // persisted (above) for the human review queue but never auto-copied, since a wrong side/token
-    // guess would spend paper money on the decoder's uncertainty.
+    // guess would spend paper money on the decoder's uncertainty. Deliberately not updating leader
+    // holdings: a candidate's side/token may be wrong, so it must not feed the holding estimate.
     if (signal.decodeStatus === "candidate") {
-      const decidedAt = Date.now();
-      const fill: PaperFill = {
-        id: randomUUID(),
-        signalId: signal.id,
-        decidedAt,
-        decision: "skipped",
-        skipReason: "low-confidence-decode",
-        side: signal.side,
-        token,
-        quoteToken,
-        qty: 0,
-        priceUsd: 0,
-        notionalUsd: 0,
-        feeUsd: 0,
-        slippageBps: 0,
-        latencyMs: decidedAt - signal.observedAt,
-        provisional: false,
-      };
-      await insertFill(this.db, fill);
-      this.bus.emit("paper-fill", fill);
-      // Deliberately not updating leader holdings: a candidate's side/token may be wrong, so it
-      // must not feed the holding estimate that sizes real sells.
-      return;
+      return this.recordSkip(signal, "low-confidence-decode", token, quoteToken, { rememberHolding: false });
     }
 
     // Staleness veto: a backfilled trade stamps observedAt at processing time, so latency math
     // can't catch it. The block timestamp reveals the true age — skip copying long-dead trades
     // at the current price (correctness gate, distinct from the risk filters in decide()).
     if (isStaleSignal(signal, Date.now(), this.cfg.MAX_SIGNAL_AGE_SEC * 1000)) {
-      const decidedAt = Date.now();
-      const fill: PaperFill = {
-        id: randomUUID(),
-        signalId: signal.id,
-        decidedAt,
-        decision: "skipped",
-        skipReason: "stale-signal",
-        side: signal.side,
-        token,
-        quoteToken,
-        qty: 0,
-        priceUsd: 0,
-        notionalUsd: 0,
-        feeUsd: 0,
-        slippageBps: 0,
-        latencyMs: decidedAt - signal.observedAt,
-        provisional: false,
-      };
-      await insertFill(this.db, fill);
-      this.bus.emit("paper-fill", fill);
-      this.rememberLeaderHolding(signal);
-      return;
+      return this.recordSkip(signal, "stale-signal", token, quoteToken);
     }
 
     const [tokenRow, quoteTokenRow] = await Promise.all([
@@ -436,56 +447,22 @@ export class PaperEngine {
       getToken(this.db, quoteToken.chain, quoteToken.address),
     ]);
     if (tokenRow?.isBlocked || quoteTokenRow?.isBlocked) {
-      const decidedAt = Date.now();
-      const fill: PaperFill = {
-        id: randomUUID(),
-        signalId: signal.id,
-        decidedAt,
-        decision: "skipped",
-        skipReason: "token-blocklist",
-        side: signal.side,
-        token,
-        quoteToken,
-        qty: 0,
-        priceUsd: 0,
-        notionalUsd: 0,
-        feeUsd: 0,
-        slippageBps: 0,
-        latencyMs: decidedAt - signal.observedAt,
-        provisional: false,
-      };
-      await insertFill(this.db, fill);
-      this.bus.emit("paper-fill", fill);
-      this.rememberLeaderHolding(signal);
-      return;
+      return this.recordSkip(signal, "token-blocklist", token, quoteToken);
     }
 
     // Auto-copy veto: a wallet with auto-copy off is still watched and scored, but the engine opens
     // no new positions from it. Sells still flow through so existing positions can be exited, and a
     // manual candidate copy (reviewStatus 'copying') is an explicit human approval that bypasses this.
     if (signal.side === "buy" && signal.reviewStatus !== "copying" && this.autoCopyDisabled.has(signal.walletId)) {
-      const decidedAt = Date.now();
-      const fill: PaperFill = {
-        id: randomUUID(),
-        signalId: signal.id,
-        decidedAt,
-        decision: "skipped",
-        skipReason: "auto-copy-off",
-        side: signal.side,
-        token,
-        quoteToken,
-        qty: 0,
-        priceUsd: 0,
-        notionalUsd: 0,
-        feeUsd: 0,
-        slippageBps: 0,
-        latencyMs: decidedAt - signal.observedAt,
-        provisional: false,
-      };
-      await insertFill(this.db, fill);
-      this.bus.emit("paper-fill", fill);
-      this.rememberLeaderHolding(signal);
-      return;
+      return this.recordSkip(signal, "auto-copy-off", token, quoteToken);
+    }
+
+    // Mempool fast path: a copy-trader's edge is acting on the pre-block signal. Commit a provisional
+    // buy at the leader's implied price (cheap quote→USD only) and defer the expensive liquidity/price
+    // discovery + risk vetoes to handleConfirmed, which can void. Sells and confirmed buys keep the
+    // heavyweight path below.
+    if (signal.source === "mempool" && signal.side === "buy") {
+      return this.handleProvisionalBuy(signal, token, quoteToken);
     }
 
     // Get liquidity (needed for decide). A V4 swap carries a poolId hint so a V4-only token can be
@@ -506,27 +483,7 @@ export class PaperEngine {
     const fillId = randomUUID();
 
     if (decision.action === "skip") {
-      const fill: PaperFill = {
-        id: fillId,
-        signalId: signal.id,
-        decidedAt,
-        decision: "skipped",
-        skipReason: decision.reason,
-        side: signal.side,
-        token,
-        quoteToken,
-        qty: 0,
-        priceUsd: 0,
-        notionalUsd: 0,
-        feeUsd: 0,
-        slippageBps: 0,
-        latencyMs: decidedAt - signal.observedAt,
-        provisional: false,
-      };
-      await insertFill(this.db, fill);
-      this.bus.emit("paper-fill", fill);
-      this.rememberLeaderHolding(signal);
-      return;
+      return this.recordSkip(signal, decision.reason, token, quoteToken);
     }
 
     // Get price
@@ -539,51 +496,11 @@ export class PaperEngine {
     const priceUsd = price?.priceUsd ?? 0;
 
     if (!priceUsd) {
-      const skipFill: PaperFill = {
-        id: fillId,
-        signalId: signal.id,
-        decidedAt,
-        decision: "skipped",
-        skipReason: "no-price-data",
-        side: signal.side,
-        token,
-        quoteToken,
-        qty: 0,
-        priceUsd: 0,
-        notionalUsd: 0,
-        feeUsd: 0,
-        slippageBps: 0,
-        latencyMs: decidedAt - signal.observedAt,
-        provisional: false,
-      };
-      await insertFill(this.db, skipFill);
-      this.bus.emit("paper-fill", skipFill);
-      this.rememberLeaderHolding(signal);
-      return;
+      return this.recordSkip(signal, "no-price-data", token, quoteToken);
     }
 
     if (signal.side === "buy" && price?.source === "defillama" && !this.runtimeConfig.ALLOW_FALLBACK_PRICE_BUYS) {
-      const skipFill: PaperFill = {
-        id: fillId,
-        signalId: signal.id,
-        decidedAt,
-        decision: "skipped",
-        skipReason: "fallback-price-source",
-        side: signal.side,
-        token,
-        quoteToken,
-        qty: 0,
-        priceUsd: 0,
-        notionalUsd: 0,
-        feeUsd: 0,
-        slippageBps: 0,
-        latencyMs: decidedAt - signal.observedAt,
-        provisional: false,
-      };
-      await insertFill(this.db, skipFill);
-      this.bus.emit("paper-fill", skipFill);
-      this.rememberLeaderHolding(signal);
-      return;
+      return this.recordSkip(signal, "fallback-price-source", token, quoteToken);
     }
 
     if (
@@ -591,27 +508,7 @@ export class PaperEngine {
       price?.spotTwapDivergenceBps !== undefined &&
       price.spotTwapDivergenceBps > this.runtimeConfig.MAX_SPOT_TWAP_DIVERGENCE_BPS
     ) {
-      const skipFill: PaperFill = {
-        id: fillId,
-        signalId: signal.id,
-        decidedAt,
-        decision: "skipped",
-        skipReason: "spot-twap-divergence",
-        side: signal.side,
-        token,
-        quoteToken,
-        qty: 0,
-        priceUsd: 0,
-        notionalUsd: 0,
-        feeUsd: 0,
-        slippageBps: 0,
-        latencyMs: decidedAt - signal.observedAt,
-        provisional: false,
-      };
-      await insertFill(this.db, skipFill);
-      this.bus.emit("paper-fill", skipFill);
-      this.rememberLeaderHolding(signal);
-      return;
+      return this.recordSkip(signal, "spot-twap-divergence", token, quoteToken);
     }
     this.markPrices.set(markKey(signal.chain, token.address), priceUsd);
     logger.debug(
@@ -656,27 +553,7 @@ export class PaperEngine {
         qty: null,
       });
       if (quoted.status === "unavailable" && quoted.hardVetoReason) {
-        const skipFill: PaperFill = {
-          id: fillId,
-          signalId: signal.id,
-          decidedAt,
-          decision: "skipped",
-          skipReason: quoted.hardVetoReason,
-          side: signal.side,
-          token,
-          quoteToken,
-          qty: 0,
-          priceUsd: 0,
-          notionalUsd: 0,
-          feeUsd: 0,
-          slippageBps: 0,
-          latencyMs: decidedAt - signal.observedAt,
-          provisional: false,
-        };
-        await insertFill(this.db, skipFill);
-        this.bus.emit("paper-fill", skipFill);
-        this.rememberLeaderHolding(signal);
-        return;
+        return this.recordSkip(signal, quoted.hardVetoReason, token, quoteToken);
       }
       fillPrice = quoted.status === "quoted" ? quoted.priceUsd : priceUsd * (1 + slippageBps / 10_000);
       notionalUsd = quoted.status === "quoted" ? quoted.notionalUsd : decision.notionalUsd;
@@ -685,27 +562,7 @@ export class PaperEngine {
       const effectiveFeeUsd = zeroxFeeUsd !== null ? gasUsd + zeroxFeeUsd : feeUsd;
 
       if (this.cashUsd < notionalUsd + effectiveFeeUsd) {
-        const skipFill: PaperFill = {
-          id: fillId,
-          signalId: signal.id,
-          decidedAt,
-          decision: "skipped",
-          skipReason: "insufficient-balance",
-          side: signal.side,
-          token,
-          quoteToken,
-          qty: 0,
-          priceUsd: 0,
-          notionalUsd: 0,
-          feeUsd: 0,
-          slippageBps: 0,
-          latencyMs: decidedAt - signal.observedAt,
-          provisional: false,
-        };
-        await insertFill(this.db, skipFill);
-        this.bus.emit("paper-fill", skipFill);
-        this.rememberLeaderHolding(signal);
-        return;
+        return this.recordSkip(signal, "insufficient-balance", token, quoteToken);
       }
 
       // Update in-memory state
@@ -751,27 +608,7 @@ export class PaperEngine {
       const key = posKey(signal.chain, token.address, signal.walletId);
       const existing = this.positions.get(key);
       if (!existing || existing.qty <= 0) {
-        const skipFill: PaperFill = {
-          id: fillId,
-          signalId: signal.id,
-          decidedAt,
-          decision: "skipped",
-          skipReason: "no-position",
-          side: signal.side,
-          token,
-          quoteToken,
-          qty: 0,
-          priceUsd: 0,
-          notionalUsd: 0,
-          feeUsd: 0,
-          slippageBps: 0,
-          latencyMs: decidedAt - signal.observedAt,
-          provisional: false,
-        };
-        await insertFill(this.db, skipFill);
-        this.bus.emit("paper-fill", skipFill);
-        this.rememberLeaderHolding(signal);
-        return;
+        return this.recordSkip(signal, "no-position", token, quoteToken);
       }
 
       const posValue = existing.qty * existing.avgCostUsd;
@@ -845,6 +682,124 @@ export class PaperEngine {
     this.rememberLeaderHolding(signal);
     this.rememberSourceNotional(signal);
     logger.info({ fillId, side: signal.side, notionalUsd, priceUsd: fillPrice, provisional }, "paper fill");
+  }
+
+  /**
+   * Mempool fast path for buys: commit a provisional fill at the leader's *implied* price with zero
+   * token-side discovery — no findBestMarket fan-out, no spot price read, no 0x quote. The liquidity
+   * and price-quality vetoes are deferred to handleConfirmed (which can void). This cuts the
+   * mempool→provisional-fill latency to ~one cheap quote-price lookup.
+   */
+  private async handleProvisionalBuy(signal: TradeSignal, token: TokenRef, quoteToken: TokenRef): Promise<void> {
+    const sized = this.sizeBuy(signal);
+    if (sized.action === "skip") return this.recordSkip(signal, sized.reason, token, quoteToken);
+
+    // Leader's implied token price from mempool calldata, valued via the cheap quote side only
+    // (Chainlink ETH/USD or ≈$1 for USDC). amountOut is the leader's amountOutMin (slippage floor),
+    // so impliedPrice is biased slightly high → qty slightly low (conservative). handleConfirmed
+    // re-prices but keeps qty fixed (it does not rewrite the ledger), so the small bias persists.
+    const quoteUsd = await this.resolveQuoteUsdPrice(quoteToken);
+    const amountInH = rawToHumanNumber(signal.amountIn, signal.tokenIn.decimals);
+    const amountOutH = rawToHumanNumber(signal.amountOut, signal.tokenOut.decimals);
+    const impliedPriceUsd = quoteUsd > 0 && amountOutH > 0 ? (amountInH * quoteUsd) / amountOutH : 0;
+    if (impliedPriceUsd <= 0) return this.recordSkip(signal, "no-price-data", token, quoteToken);
+
+    const notionalUsd = sized.notionalUsd;
+    const gasUsd = signal.chain === "eth" ? this.cfg.GAS_USD_ETH : this.cfg.GAS_USD_BASE;
+    const dexFeeUsd = (notionalUsd * DEX_FEE_BPS) / 10_000;
+    const feeUsd = gasUsd + dexFeeUsd;
+    if (this.cashUsd < notionalUsd + feeUsd) return this.recordSkip(signal, "insufficient-balance", token, quoteToken);
+
+    const fillPrice = impliedPriceUsd;
+    const qty = notionalUsd / fillPrice;
+    const fillId = randomUUID();
+    const decidedAt = Date.now();
+
+    // Snapshot pre-trade state so void/replace/confirm-veto can reverse exactly.
+    const snapKey = posKey(signal.chain, token.address, signal.walletId);
+    const prevPortfolio: AccountingPortfolio = { ...this.portfolio };
+    const prePos = this.positions.get(snapKey);
+    const prevPosition: InMemoryPosition | null = prePos ? { ...prePos } : null;
+    const signalLeaderHoldingKey = leaderHoldingKey(signal.chain, token.address, signal.walletId);
+    const prevLeaderHolding = this.leaderHoldings.get(signalLeaderHoldingKey);
+
+    const existingAcct: AccountingPosition | null = prePos
+      ? { quantity: prePos.qty, averageEntryUsd: prePos.avgCostUsd, costBasisUsd: prePos.qty * prePos.avgCostUsd, realizedPnlUsd: prePos.realizedPnlUsd, feesPaidUsd: 0 }
+      : null;
+
+    const next = applyTradeToState({
+      portfolio: this.portfolio,
+      position: existingAcct,
+      trade: {
+        side: "buy",
+        quantity: qty,
+        notionalUsd,
+        gasUsd,
+        slippageUsd: 0,
+        dexFeeUsd,
+        totalCostUsd: notionalUsd + feeUsd,
+        sellProceedsUsd: 0,
+      },
+    });
+
+    this.portfolio = next.portfolio;
+    this.cashUsd = next.portfolio.cashUsd;
+    this.positions.set(snapKey, {
+      qty: next.position.quantity,
+      avgCostUsd: next.position.averageEntryUsd,
+      realizedPnlUsd: next.position.realizedPnlUsd,
+    });
+    await upsertPosition(this.db, {
+      chain: signal.chain,
+      tokenAddress: token.address,
+      qty: next.position.quantity,
+      avgCostUsd: next.position.averageEntryUsd,
+      realizedPnlUsd: next.position.realizedPnlUsd,
+      sourceWalletId: signal.walletId,
+    });
+
+    const fill: PaperFill = {
+      id: fillId,
+      signalId: signal.id,
+      decidedAt,
+      decision: "copied",
+      side: "buy",
+      token,
+      quoteToken,
+      qty,
+      priceUsd: fillPrice,
+      notionalUsd,
+      feeUsd,
+      slippageBps: 0,
+      latencyMs: decidedAt - signal.observedAt,
+      provisional: true,
+      priceSource: "leader-implied",
+    };
+    await insertFill(this.db, fill);
+
+    this.provisionals.set(signal.id, {
+      fillId,
+      signalId: signal.id,
+      side: "buy",
+      posKey: snapKey,
+      chain: signal.chain,
+      tokenAddress: token.address,
+      sourceWalletId: signal.walletId,
+      qty,
+      leaderHoldingKey: signalLeaderHoldingKey,
+      prevLeaderHolding,
+      cashDelta: this.portfolio.cashUsd - prevPortfolio.cashUsd,
+      realizedPnlDelta: this.portfolio.realizedPnlUsd - prevPortfolio.realizedPnlUsd,
+      feesDelta: this.portfolio.feesPaidUsd - prevPortfolio.feesPaidUsd,
+      prevPosition,
+    });
+
+    // Deliberately NOT calling takeSnapshot() here — the 5-min timer and the confirm step snapshot;
+    // omitting it keeps the hot path to the fill insert + position upsert.
+    this.bus.emit("paper-fill", fill);
+    this.rememberLeaderHolding(signal);
+    this.rememberSourceNotional(signal);
+    logger.info({ fillId, side: "buy", notionalUsd, priceUsd: fillPrice, provisional: true }, "provisional paper fill (fast path)");
   }
 
   /**
@@ -1137,12 +1092,36 @@ export class PaperEngine {
     const prov = this.provisionals.get(signalId);
     if (!prov) return;
 
-    // Recompute price at confirmation time
     const token: TokenRef = confirmed.side === "buy" ? confirmed.tokenOut : confirmed.tokenIn;
-    let newPrice = 0;
+    const hint = v4MarketHint(confirmed);
+
+    // Deferred liquidity risk gate: the fast path committed the provisional buy without discovery,
+    // so run it now and void the fill if it fails. (Sells never become provisionals via the fast
+    // path, but guard on side anyway.)
+    if (prov.side === "buy") {
+      let liquidityUsd: number | null = null;
+      try {
+        const liquidity = await getLiquidityUsdResult(confirmed.chain, token.address, this.rpcClients[confirmed.chain], hint);
+        liquidityUsd = liquidity?.liquidityUsd ?? null;
+      } catch {
+        liquidityUsd = null;
+      }
+      const veto = this.liquidityVeto(confirmed, liquidityUsd);
+      if (veto) return this.reverseProvisional(signalId, `confirm-veto:${veto}`);
+    }
+
+    // Recompute price at confirmation time
+    let price: PriceResult | null = null;
     try {
-      newPrice = (await getUsdPrice(confirmed.chain, token.address, this.rpcClients[confirmed.chain], v4MarketHint(confirmed))) ?? 0;
-    } catch { /* keep 0 */ }
+      price = await getUsdPriceResult(confirmed.chain, token.address, this.rpcClients[confirmed.chain], hint);
+    } catch { /* keep null */ }
+    const newPrice = price?.priceUsd ?? 0;
+
+    // Deferred fallback-price-source veto: a buy that only prices via the DefiLlama fallback is
+    // vetoed at confirm (the fast path skipped this gate), reversing the provisional fill.
+    if (prov.side === "buy" && price?.source === "defillama" && !this.runtimeConfig.ALLOW_FALLBACK_PRICE_BUYS) {
+      return this.reverseProvisional(signalId, "confirm-veto:fallback-price-source");
+    }
 
     // Re-price failed — keep the provisional fill at its mempool estimate rather than
     // zeroing a real fill. Just clear the provisional flag.
@@ -1168,6 +1147,15 @@ export class PaperEngine {
   }
 
   private async handleVoided(signalId: string, reason: "reverted" | "replaced"): Promise<void> {
+    return this.reverseProvisional(signalId, reason);
+  }
+
+  /**
+   * Reverse a provisional fill: undo its portfolio/position/leader-holding deltas and void the fill
+   * row. Called when a mempool tx is voided (reverted/replaced) or when a deferred confirm-time veto
+   * rejects the fill.
+   */
+  private async reverseProvisional(signalId: string, reason: string): Promise<void> {
     const prov = this.provisionals.get(signalId);
     if (!prov) return;
 
@@ -1209,7 +1197,7 @@ export class PaperEngine {
 
     await voidFill(this.db, prov.fillId);
     this.provisionals.delete(signalId);
-    logger.info({ signalId, reason }, "provisional fill voided");
+    logger.info({ signalId, reason }, "provisional fill reversed");
   }
 
   private async takeSnapshot(): Promise<void> {

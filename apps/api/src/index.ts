@@ -2,7 +2,7 @@ import Fastify from "fastify";
 import wsPlugin from "@fastify/websocket";
 import { z } from "zod";
 import { BrainWeightProvider, runScorerJob } from "@tradebot/brain";
-import { config, normalizeAddressInput, deriveHealth, type HealthInput, type HealthThresholds } from "@tradebot/core";
+import { config, normalizeAddressInput, deriveHealth, estimateCuBudget, type HealthInput, type HealthThresholds } from "@tradebot/core";
 import { createPublicClient, webSocket } from "viem";
 import { mainnet, base as baseChain } from "viem/chains";
 import {
@@ -332,7 +332,12 @@ app.get("/health", async (_req, reply) => {
 app.get("/metrics", async (_req, reply) => {
   const input = await gatherHealthInput();
   const report = deriveHealth(input, Date.now(), healthThresholds);
-  reply.send({ status: report.status, checks: report.checks, input });
+  // Approximate Alchemy CU budget per chain, derived from the live wallet count in the
+  // heartbeat (see @tradebot/core cuBudget.ts for assumptions).
+  const cuBudget = (input.heartbeat?.payload.chains ?? []).map((c) =>
+    estimateCuBudget({ chain: c.chain, walletCount: c.walletCount })
+  );
+  reply.send({ status: report.status, checks: report.checks, cuBudget, input });
 });
 
 // ── WebSocket stream ──────────────────────────────────────────────────────────

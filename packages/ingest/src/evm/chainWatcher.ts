@@ -1,31 +1,28 @@
 import { createPublicClient, webSocket, parseAbi } from "viem";
 import { mainnet, base } from "viem/chains";
 import WebSocket from "ws";
-import { createLogger, type ChainId, type RawTxEvent, type EventBus, type ChainWatcherHealth, type ConnectionState } from "@tradebot/core";
+import {
+  createLogger,
+  estimateCuBudget,
+  CHUNK_SIZE,
+  BACKFILL_CHUNK_BY_CHAIN,
+  BACKFILL_ADDRESS_CHUNK_BY_CHAIN,
+  MAX_BACKFILL_BLOCKS_BY_CHAIN,
+  type ChainId,
+  type RawTxEvent,
+  type EventBus,
+  type ChainWatcherHealth,
+  type ConnectionState,
+} from "@tradebot/core";
 import { getActiveWallets, upsertLastBlock, getLastBlock, type Db } from "@tradebot/store";
 import { LruSet } from "../dedupe.js";
 import { backoffMs, sleep } from "../backoff.js";
 import type { Recorder } from "../recorder.js";
 import { TRANSFER_TOPIC, chunk } from "./topics.js";
 
-const CHUNK_SIZE = 50;
+// Wallet-batching + backfill topology constants now live in @tradebot/core (cuBudget.ts)
+// as the single source of truth shared with the CU budget estimator.
 const DEDUPE_SIZE = 50_000;
-const BACKFILL_CHUNK_BY_CHAIN: Record<ChainId, number> = {
-  eth: 10,
-  base: 10,
-};
-const BACKFILL_ADDRESS_CHUNK_BY_CHAIN: Record<ChainId, number> = {
-  eth: CHUNK_SIZE,
-  base: 5,
-};
-// Cap how far back a reconnect will backfill — roughly 30 minutes of blocks per chain.
-// When the gap is larger (e.g. the DB was stopped for hours during testing) we skip to
-// live rather than replaying long-dead trades at the current price. The engine's
-// staleness veto is the second line of defense for anything within this window.
-const MAX_BACKFILL_BLOCKS_BY_CHAIN: Record<ChainId, number> = {
-  eth: 150, // ~12s blocks → ~30 min
-  base: 900, // ~2s blocks → ~30 min
-};
 const FAILOVER_TIMEOUT_MS = 60_000;
 const WALLET_RELOAD_MS = 60_000;
 const MEMPOOL_RECONNECT_MS = 1_000;
@@ -131,8 +128,27 @@ export class ChainWatcher {
   async start(): Promise<void> {
     this.stopped = false;
     await this.loadWallets();
+    this.logCuBudget();
     this.startWalletReload();
     void this.runLoop();
+  }
+
+  /** Log an approximate Alchemy CU budget for the current wallet set (see cuBudget.ts for assumptions). */
+  private logCuBudget(): void {
+    const est = estimateCuBudget({ chain: this.chain, walletCount: this.wallets.length });
+    this.logger.info(
+      {
+        walletCount: est.walletCount,
+        subscriptions: est.subscriptionCount,
+        cuPerTrade: est.cuPerTrade,
+        estTradesPerDay: est.estTradesPerDay,
+        estCuPerDay: Math.round(est.estCuPerDay),
+        estCuPerMonth: Math.round(est.estCuPerMonth),
+        backfillCuPerReconnect: Math.round(est.backfillCuPerReconnect),
+        freeTierMonthlyPct: Math.round(est.freeTierMonthlyPct * 10) / 10,
+      },
+      "estimated Alchemy CU budget (approximate — tune assumptions in cuBudget.ts)"
+    );
   }
 
   stop(): void {

@@ -18,8 +18,16 @@ All planned phases are **COMPLETE**. The system is fully built and running.
 | Phase 5 — Brain: scoring + adaptation | COMPLETE | `747a828` |
 | Phase 6 — API + dashboard | COMPLETE | `8a8d50d` |
 | dev.ps1 startup script + API security | COMPLETE | `dabc3e1` |
+| Health + metrics endpoint | COMPLETE | `361460b` |
+| Mempool fast path | COMPLETE | `465296c` |
+| Polymarket watch + record | COMPLETE | `ff75180` |
 
 **Phase 7+ (Solana adapter, ML) — DO NOT BUILD unless user explicitly asks.**
+
+Current uncommitted fixes:
+- Dashboard `/metrics` route proxies raw JSON metrics from the API; `/status` is the human UI.
+- Runner/decoder now filter non-EVM wallets out of EVM decode paths; Polymarket remains record-only.
+- Settings page shows Polygon wallets as `record-only` and hides their auto-copy toggle.
 
 ---
 
@@ -36,6 +44,8 @@ The script: starts Postgres, waits for `pg_isready`, runs migrations, then launc
 | Service | URL |
 |---|---|
 | Dashboard (Next.js) | http://localhost:3000 |
+| Human status view | http://localhost:3000/status |
+| Raw metrics JSON | http://localhost:3000/metrics or http://localhost:3001/metrics |
 | API (Fastify) | http://localhost:3001 |
 | Postgres | localhost:5433 |
 
@@ -69,6 +79,7 @@ The script: starts Postgres, waits for `pg_isready`, runs migrations, then launc
 ### packages/ingest/src/
 - `backoff.ts`, `dedupe.ts`, `recorder.ts`
 - `evm/topics.ts`, `evm/chainWatcher.ts`
+- `polymarket/client.ts`, `polymarket/watcher.ts` — record-only Polymarket Data API poller for Polygon wallets
 - `index.ts`
 
 ### packages/decoder/src/
@@ -90,15 +101,17 @@ The script: starts Postgres, waits for `pg_isready`, runs migrations, then launc
 - `index.ts`
 
 ### apps/runner/src/
-- `index.ts` — ChainWatchers + Decoder + replay harness + startMarksJob + PaperEngine + brain scorer
+- `index.ts` — ETH/Base ChainWatchers + EVM-only Decoder + PolymarketWatcher + replay harness + startMarksJob + PaperEngine + brain scorer
 
 ### apps/api/src/
 - `index.ts` — Fastify 5 + `@fastify/websocket` server
   - `GET/POST/DELETE /wallets`
   - `GET /signals?since=&limit=`, `GET /fills?since=&limit=`
+  - `GET /candidates`, `POST /candidates/:id/copy`, `POST /candidates/:id/dismiss`
   - `GET /portfolio` (snapshot + positions with marks + 288 snapshots)
   - `GET /leaders` (all windows: 7d/30d/all)
   - `GET /adaptations?limit=`, `GET/PATCH /settings`
+  - `GET /health` (unauthenticated shallow probe), `GET /metrics` (authenticated raw JSON)
   - `WS /stream` — polls Postgres every 2s, broadcasts `trade-signal` + `paper-fill` events
   - Auth: `X-Api-Key` header vs `API_KEY` env; CORS restricted to `CORS_ORIGIN` (default localhost:3000)
 
@@ -109,7 +122,10 @@ The script: starts Postgres, waits for `pg_isready`, runs migrations, then launc
 - `app/portfolio/page.tsx` — equity curve (lightweight-charts), 4 metric panels, positions table
 - `app/leaders/page.tsx` — 7d/30d/all toggle, sortable stats table
 - `app/feed/page.tsx` — WebSocket live feed + 24h REST history, auto-reconnect
-- `app/settings/page.tsx` — wallet CRUD, settings editor, adaptation log
+- `app/candidates/page.tsx` — candidate review queue; Polymarket candidates are record-only
+- `app/status/page.tsx` — human-readable health, chain watcher, and CU-budget view
+- `app/metrics/route.ts` — raw JSON metrics proxy for direct `/metrics` access on the dashboard host
+- `app/settings/page.tsx` — wallet CRUD, settings editor, adaptation log; Polygon wallets show record-only
 
 ### Test counts (195 total — all passing, non-Docker)
 | Package | Tests |

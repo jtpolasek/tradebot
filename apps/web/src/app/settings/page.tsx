@@ -58,7 +58,7 @@ export default function SettingsPage() {
     const address = walletForm.address.trim();
     if (!ADDRESS_RE.test(address)) {
       setBusy("");
-      setError("Enter a valid Ethereum/Base address starting with 0x.");
+      setError("Enter a valid 0x wallet address.");
       return;
     }
     try {
@@ -165,7 +165,7 @@ export default function SettingsPage() {
               autoComplete="off"
               spellCheck={false}
               pattern="^0x[a-fA-F0-9]{40}$"
-              title="Use a 42-character EVM address, starting with 0x."
+              title="Use a 42-character 0x address."
               required
             />
           </div>
@@ -177,40 +177,50 @@ export default function SettingsPage() {
         </form>
 
         <div className="list">
-          {wallets.filter((w) => w.active).map((w) => (
-            <div key={w.id} className="card wallet-card" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
-              <div>
-                <div style={{ fontWeight: 700 }}>{w.label}</div>
-                <WalletLink chain={w.chain} address={w.address} />
-                <div style={{ display: "flex", gap: 6, marginTop: 4 }}>
-                  <span className="pill">{w.chain}</span>
-                  <span className="pill">added {timeAgo(w.addedAt)}</span>
-                  <span className={`pill ${w.autoCopy ? "good" : "warn"}`}>
-                    {w.autoCopy ? "auto-copy on" : "auto-copy off"}
-                  </span>
+          {wallets.filter((w) => w.active).map((w) => {
+            const isRecordOnly = w.chain === "polygon";
+            return (
+              <div key={w.id} className="card wallet-card" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+                <div>
+                  <div style={{ fontWeight: 700 }}>{w.label}</div>
+                  <WalletLink chain={w.chain} address={w.address} />
+                  <div style={{ display: "flex", gap: 6, marginTop: 4 }}>
+                    <span className="pill">{w.chain}</span>
+                    <span className="pill">added {timeAgo(w.addedAt)}</span>
+                    {isRecordOnly ? (
+                      <span className="pill warn">record-only</span>
+                    ) : (
+                      <span className={`pill ${w.autoCopy ? "good" : "warn"}`}>
+                        {w.autoCopy ? "auto-copy on" : "auto-copy off"}
+                      </span>
+                    )}
+                  </div>
+                </div>
+
+                <div style={{ display: "flex", gap: 6 }}>
+                  {!isRecordOnly && (
+                    <button
+                      className="button"
+                      style={{ minHeight: 32, padding: "4px 10px", fontSize: 12 }}
+                      onClick={() => void setAutoCopy(w.id, !w.autoCopy)}
+                      disabled={busy === `auto-${w.id}`}
+                      title={w.autoCopy ? "Stop copying this wallet's buys (still watched & scored)" : "Resume copying this wallet's buys"}
+                    >
+                      {w.autoCopy ? "Disable auto-copy" : "Enable auto-copy"}
+                    </button>
+                  )}
+                  <button
+                    className="button danger"
+                    style={{ minHeight: 32, padding: "4px 10px", fontSize: 12 }}
+                    onClick={() => void setWatching(w.id, false)}
+                    disabled={busy === `watch-${w.id}`}
+                  >
+                    <EyeOff size={14} /> Stop watching
+                  </button>
                 </div>
               </div>
-              <div style={{ display: "flex", gap: 6 }}>
-                <button
-                  className="button"
-                  style={{ minHeight: 32, padding: "4px 10px", fontSize: 12 }}
-                  onClick={() => void setAutoCopy(w.id, !w.autoCopy)}
-                  disabled={busy === `auto-${w.id}`}
-                  title={w.autoCopy ? "Stop copying this wallet's buys (still watched & scored)" : "Resume copying this wallet's buys"}
-                >
-                  {w.autoCopy ? "Disable auto-copy" : "Enable auto-copy"}
-                </button>
-                <button
-                  className="button danger"
-                  style={{ minHeight: 32, padding: "4px 10px", fontSize: 12 }}
-                  onClick={() => void setWatching(w.id, false)}
-                  disabled={busy === `watch-${w.id}`}
-                >
-                  <EyeOff size={14} /> Stop watching
-                </button>
-              </div>
-            </div>
-          ))}
+            );
+          })}
           {wallets.filter((w) => w.active).length === 0 && (
             <p className="subtle">No watched wallets. Add one above to start tracking.</p>
           )}

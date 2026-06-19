@@ -1,7 +1,7 @@
 import { createPublicClient, http } from "viem";
 import { mainnet, base } from "viem/chains";
 import PQueue from "p-queue";
-import { createLogger, fromBaseUnits, isQuoteAsset, NATIVE_TOKEN_PLACEHOLDER, WETH } from "@tradebot/core";
+import { createLogger, fromBaseUnits, isEvmChain, isQuoteAsset, NATIVE_TOKEN_PLACEHOLDER, WETH } from "@tradebot/core";
 import type { EventBus, RawTxEvent, TradeSignal, ChainId, EvmChainId } from "@tradebot/core";
 import type { Db } from "@tradebot/store";
 import { getActiveWallets } from "@tradebot/store";
@@ -82,6 +82,7 @@ export class Decoder {
     const next = new Set<string>();
     const nextIds = new Map<string, string>();
     for (const w of wallets) {
+      if (!isEvmChain(w.chain)) continue;
       // Key by chain:address so an address tracked on both chains resolves to the right UUID.
       const key = `${w.chain}:${w.address.toLowerCase()}`;
       next.add(key);

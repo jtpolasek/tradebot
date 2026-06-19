@@ -1,4 +1,4 @@
-import { config, createLogger, EventBus } from "@tradebot/core";
+import { config, createLogger, EventBus, isEvmChain } from "@tradebot/core";
 import {
   getDb,
   closeDb,
@@ -80,7 +80,13 @@ async function main() {
 
   const wallets = await getActiveWallets(db);
 
-  const decoder = new Decoder({ bus, db, wallets: wallets.map((w) => ({ address: w.address, id: w.id, chain: w.chain })) });
+  const decoder = new Decoder({
+    bus,
+    db,
+    wallets: wallets
+      .filter((w) => isEvmChain(w.chain))
+      .map((w) => ({ address: w.address, id: w.id, chain: w.chain })),
+  });
   decoder.start();
 
   // RPC clients for pricing (loose structural interfaces for viem compat)

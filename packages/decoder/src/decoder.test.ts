@@ -272,6 +272,41 @@ describe("Decoder class", () => {
     expect(signals).toHaveLength(0);
   });
 
+  it("does not track polygon-only wallets in the EVM decoder", async () => {
+    const { Decoder } = await import("./decoder.js");
+    const bus = new EventBus();
+    const decoder = new Decoder({ bus, db: {} as never, wallets: [{ address: WALLET, id: WALLET_ID, chain: "polygon" }], rpcUrls: { eth: "http://0.0.0.0:1", base: "http://0.0.0.0:1" } });
+    decoder.start();
+
+    const signals: TradeSignal[] = [];
+    bus.on("trade-signal", (s) => signals.push(s));
+
+    const ROUTER = "0xcccccccccccccccccccccccccccccccccccccccc";
+    const MEME = "0x4444444444444444444444444444444444444444";
+    const padded = (addr: string) => `0x000000000000000000000000${addr.slice(2)}`;
+    const TRANSFER = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+
+    bus.emit("raw-tx", {
+      chain: "eth", source: "confirmed", txHash: "0x2323", from: WALLET, to: ROUTER,
+      blockNumber: 23, observedAt: Date.now(), status: "success",
+      logs: [
+        {
+          address: WETH,
+          topics: [TRANSFER, padded(WALLET), padded(ROUTER)],
+          data: "0x0000000000000000000000000000000000000000000000000de0b6b3a7640000",
+        },
+        {
+          address: MEME,
+          topics: [TRANSFER, padded(ROUTER), padded(WALLET)],
+          data: "0x000000000000000000000000000000000000000000003635c9adc5dea00000",
+        },
+      ],
+    });
+
+    await tick();
+    expect(signals).toHaveLength(0);
+  });
+
   it("emits trade-signal for a confirmed tx with recognisable Transfer logs (Strategy B buy)", async () => {
     const { Decoder } = await import("./decoder.js");
     const bus = new EventBus();

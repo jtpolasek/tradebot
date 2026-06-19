@@ -7,6 +7,12 @@ import { getToken } from "./tokens.js";
 
 export type CandidateReviewStatus = NonNullable<TradeSignal["reviewStatus"]>;
 const openCandidateStatuses: CandidateReviewStatus[] = ["pending", "copy-requested", "copying", "copy-failed"];
+export type CandidateSignalStatusFilter = CandidateReviewStatus | "open";
+export type CandidateSignalFilters = {
+  chain?: ChainId;
+  venue?: string;
+  status?: CandidateSignalStatusFilter;
+};
 
 export async function insertSignal(db: Db, signal: TradeSignal): Promise<string> {
   const rows = await db.insert(tradeSignals).values({
@@ -125,17 +131,31 @@ export async function getRecentSignals(db: Db, since: Date, limit: number): Prom
   return hydrateSignals(db, rows.map(rowToSignal));
 }
 
-export async function getCandidateSignals(db: Db, limit: number): Promise<TradeSignal[]> {
+export async function getCandidateSignals(db: Db, limit: number, filters: CandidateSignalFilters = {}): Promise<TradeSignal[]> {
+  const conditions = [
+    eq(tradeSignals.decodeStatus, "candidate"),
+    candidateReviewStatusCondition(filters.status ?? "open"),
+  ];
+  if (filters.chain) conditions.push(eq(tradeSignals.chain, filters.chain));
+  if (filters.venue) conditions.push(eq(tradeSignals.venue, filters.venue));
+
   const rows = await db
     .select()
     .from(tradeSignals)
-    .where(and(
-      eq(tradeSignals.decodeStatus, "candidate"),
-      or(isNull(tradeSignals.reviewStatus), inArray(tradeSignals.reviewStatus, openCandidateStatuses)),
-    ))
+    .where(and(...conditions))
     .orderBy(desc(tradeSignals.observedAt))
     .limit(limit);
   return hydrateSignals(db, rows.map(rowToSignal));
+}
+
+function candidateReviewStatusCondition(status: CandidateSignalStatusFilter) {
+  if (status === "open") {
+    return or(isNull(tradeSignals.reviewStatus), inArray(tradeSignals.reviewStatus, openCandidateStatuses));
+  }
+  if (status === "pending") {
+    return or(isNull(tradeSignals.reviewStatus), eq(tradeSignals.reviewStatus, "pending"));
+  }
+  return eq(tradeSignals.reviewStatus, status);
 }
 
 export async function getCopyRequestedCandidates(db: Db, limit: number): Promise<TradeSignal[]> {

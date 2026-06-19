@@ -30,6 +30,7 @@ import {
   latestMark,
   getRunnerHealth,
   getChainStatesUpdatedAt,
+  type CandidateSignalFilters,
 } from "@tradebot/store";
 import { apiConfig } from "./config.js";
 
@@ -150,10 +151,20 @@ app.get("/signals", async (req, reply) => {
 
 // ── Candidate Review ─────────────────────────────────────────────────────────
 
+const CandidateQuery = z.object({
+  limit: z.coerce.number().int().min(1).max(500).default(100),
+  chain: z.enum(["eth", "base", "polygon"]).optional(),
+  venue: z.string().trim().min(1).max(64).optional(),
+  status: z.enum(["open", "pending", "copy-requested", "copying", "copy-failed", "copied", "dismissed"]).default("open"),
+});
+
 app.get("/candidates", async (req, reply) => {
-  const q = z.object({ limit: z.coerce.number().int().min(1).max(500).default(100) }).safeParse(req.query);
+  const q = CandidateQuery.safeParse(req.query);
   if (!q.success) return reply.code(400).send({ error: q.error.message });
-  const signals = await getCandidateSignals(db, q.data.limit);
+  const filters: CandidateSignalFilters = { status: q.data.status };
+  if (q.data.chain) filters.chain = q.data.chain;
+  if (q.data.venue) filters.venue = q.data.venue;
+  const signals = await getCandidateSignals(db, q.data.limit, filters);
   reply.send({ candidates: signals.map(serializeSignal) });
 });
 

@@ -23,28 +23,66 @@ type Candidate = {
   confidence: number | null;
   reason: string | null;
   externalUrl: string | null;
-  reviewStatus: "pending" | "copy-requested" | "copying" | "copy-failed" | null;
+  reviewStatus: "pending" | "copy-requested" | "copying" | "copy-failed" | "copied" | "dismissed" | null;
 };
 
 type CandidateResponse = { candidates: Candidate[] };
+type ChainFilter = "all" | "eth" | "base" | "polygon";
+type VenueFilter = "all" | "polymarket" | "balance-delta" | "uniswap-v2" | "uniswap-v3" | "uniswap-v4" | "aerodrome";
+type StatusFilter = "open" | "pending" | "copy-requested" | "copying" | "copy-failed" | "copied" | "dismissed";
+
+const chainOptions: { value: ChainFilter; label: string }[] = [
+  { value: "all", label: "All" },
+  { value: "eth", label: "Ethereum" },
+  { value: "base", label: "Base" },
+  { value: "polygon", label: "Polygon" },
+];
+
+const venueOptions: { value: VenueFilter; label: string }[] = [
+  { value: "all", label: "All" },
+  { value: "polymarket", label: "Polymarket" },
+  { value: "balance-delta", label: "Balance delta" },
+  { value: "uniswap-v2", label: "Uniswap V2" },
+  { value: "uniswap-v3", label: "Uniswap V3" },
+  { value: "uniswap-v4", label: "Uniswap V4" },
+  { value: "aerodrome", label: "Aerodrome" },
+];
+
+const statusOptions: { value: StatusFilter; label: string }[] = [
+  { value: "open", label: "Open" },
+  { value: "pending", label: "Pending" },
+  { value: "copy-requested", label: "Requested" },
+  { value: "copying", label: "Copying" },
+  { value: "copy-failed", label: "Failed" },
+  { value: "copied", label: "Copied" },
+  { value: "dismissed", label: "Dismissed" },
+];
+
+const statusLabels = new Map(statusOptions.map((option) => [option.value, option.label.toLowerCase()]));
 
 export default function CandidatesPage() {
   const [candidates, setCandidates] = useState<Candidate[]>([]);
   const [loading, setLoading] = useState(true);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [error, setError] = useState("");
+  const [chainFilter, setChainFilter] = useState<ChainFilter>("all");
+  const [venueFilter, setVenueFilter] = useState<VenueFilter>("all");
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>("open");
 
   const load = useCallback(async () => {
     setError("");
     try {
-      const data = await apiFetch<CandidateResponse>("/candidates?limit=100");
+      const params = new URLSearchParams({ limit: "100", status: statusFilter });
+      if (chainFilter !== "all") params.set("chain", chainFilter);
+      if (venueFilter !== "all") params.set("venue", venueFilter);
+      const data = await apiFetch<CandidateResponse>(`/candidates?${params.toString()}`);
       setCandidates(data.candidates);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load candidates");
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [chainFilter, statusFilter, venueFilter]);
 
   useEffect(() => {
     void load();
@@ -68,14 +106,44 @@ export default function CandidatesPage() {
   const pendingCount = candidates.filter((c) => !c.reviewStatus || c.reviewStatus === "pending").length;
   const requestedCount = candidates.filter((c) => c.reviewStatus === "copy-requested" || c.reviewStatus === "copying").length;
   const failedCount = candidates.filter((c) => c.reviewStatus === "copy-failed").length;
+  const visibleStatus = statusLabels.get(statusFilter) ?? "shown";
 
   return (
     <div className="stack">
       <div className="page-header">
         <h1>Candidate Review</h1>
-        <span className="pill">{candidates.length} open</span>
+        <span className="pill">{candidates.length} {visibleStatus}</span>
         <span className="pill warn">{requestedCount} queued</span>
         {failedCount > 0 && <span className="pill bad">{failedCount} failed</span>}
+      </div>
+
+      <div className="panel">
+        <div className="form-grid">
+          <div className="field">
+            <label htmlFor="candidate-chain">Chain</label>
+            <select id="candidate-chain" value={chainFilter} onChange={(e) => setChainFilter(e.target.value as ChainFilter)}>
+              {chainOptions.map((option) => (
+                <option key={option.value} value={option.value}>{option.label}</option>
+              ))}
+            </select>
+          </div>
+          <div className="field">
+            <label htmlFor="candidate-venue">Venue</label>
+            <select id="candidate-venue" value={venueFilter} onChange={(e) => setVenueFilter(e.target.value as VenueFilter)}>
+              {venueOptions.map((option) => (
+                <option key={option.value} value={option.value}>{option.label}</option>
+              ))}
+            </select>
+          </div>
+          <div className="field full">
+            <label htmlFor="candidate-status">Status</label>
+            <select id="candidate-status" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value as StatusFilter)}>
+              {statusOptions.map((option) => (
+                <option key={option.value} value={option.value}>{option.label}</option>
+              ))}
+            </select>
+          </div>
+        </div>
       </div>
 
       <div className="metric-strip">

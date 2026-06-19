@@ -57,6 +57,7 @@ export const tradeSignals = pgTable("trade_signals", {
   decodeStatus: text("decode_status").notNull().default("decoded"),
   confidence: numeric("confidence"),
   reason: text("reason"),
+  externalUrl: text("external_url"),
   reviewStatus: text("review_status"),
   // Uniswap V4 poolId (bytes32 hex) from the Swap event; null for non-V4 venues. Pricing reads it
   // back to value V4-only tokens, whose pools can't be discovered on-chain by token pair.

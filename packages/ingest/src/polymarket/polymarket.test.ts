@@ -95,7 +95,8 @@ describe("tradeToCandidateSignal", () => {
     expect(sig.amountOut).toBe(100_000_000n);
     expect(sig.confirmedAt).toBe(1_700_000_000 * 1000);
     expect(sig.reason).toContain("Will X happen by July?");
-    expect(sig.reason).toContain("polymarket.com/event/will-x-happen-event");
+    expect(sig.reason).not.toContain("polymarket.com/event/will-x-happen-event");
+    expect(sig.externalUrl).toBe("https://polymarket.com/event/will-x-happen-event");
   });
 
   it("maps a SELL: outcome shares in, USDC out", () => {

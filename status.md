@@ -24,7 +24,7 @@ All planned phases are **COMPLETE**. The system is fully built and running.
 
 **Phase 7+ (Solana adapter, ML) — DO NOT BUILD unless user explicitly asks.**
 
-Current uncommitted fixes:
+Recent follow-up fixes (`9ef36b9`):
 - Dashboard `/metrics` route proxies raw JSON metrics from the API; `/status` is the human UI.
 - Runner/decoder now filter non-EVM wallets out of EVM decode paths; Polymarket remains record-only.
 - Settings page shows Polygon wallets as `record-only` and hides their auto-copy toggle.

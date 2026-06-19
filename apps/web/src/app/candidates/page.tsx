@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { ExternalLink } from "lucide-react";
 import { TokenLink } from "@/components/TokenLink";
 import { TxLink } from "@/components/TxLink";
 import { apiFetch, shortAddr, timeAgo } from "@/lib/api";
@@ -21,6 +22,7 @@ type Candidate = {
   decodeStatus: "candidate";
   confidence: number | null;
   reason: string | null;
+  externalUrl: string | null;
   reviewStatus: "pending" | "copy-requested" | "copying" | "copy-failed" | null;
 };
 
@@ -131,6 +133,11 @@ export default function CandidatesPage() {
                       <span className="subtle" style={{ fontSize: "0.78rem" }}>
                         {candidate.reason}
                       </span>
+                    )}
+                    {candidate.externalUrl && (
+                      <a className="tx-link" href={candidate.externalUrl} target="_blank" rel="noreferrer">
+                        Market <ExternalLink size={11} aria-hidden="true" />
+                      </a>
                     )}
                   </div>
 

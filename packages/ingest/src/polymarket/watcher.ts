@@ -52,8 +52,8 @@ export function tradeToCandidateSignal(trade: PolymarketTrade, walletId: string)
   const amountOut = side === "buy" ? shares : usdc;
 
   const observedAt = trade.timestamp * 1000;
-  const marketUrl = trade.eventSlug ? ` https://polymarket.com/event/${trade.eventSlug}` : "";
-  const reason = `Polymarket ${side.toUpperCase()} ${trade.outcome} @ $${trade.price} — "${trade.title}"${marketUrl}`;
+  const externalUrl = trade.eventSlug ? `https://polymarket.com/event/${trade.eventSlug}` : null;
+  const reason = `Polymarket ${side.toUpperCase()} ${trade.outcome} @ $${trade.price} — "${trade.title}"`;
 
   return {
     id: randomUUID(),
@@ -73,6 +73,7 @@ export function tradeToCandidateSignal(trade: PolymarketTrade, walletId: string)
     decodeStatus: "candidate",
     confidence: null,
     reason,
+    externalUrl,
     poolId: null,
   };
 }

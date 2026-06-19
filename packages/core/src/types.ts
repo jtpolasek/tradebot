@@ -67,6 +67,8 @@ export interface TradeSignal {
   confidence?: number | null;
   /** Human-readable explanation, primarily for candidates surfaced in the review queue. */
   reason?: string | null;
+  /** Optional source-specific URL for candidate review, such as a Polymarket market page. */
+  externalUrl?: string | null;
   /** Review workflow status for candidate signals. Decoded signals leave this null/undefined. */
   reviewStatus?: "pending" | "copy-requested" | "copying" | "copied" | "copy-failed" | "dismissed" | null;
   /**

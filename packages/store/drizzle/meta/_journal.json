@@ -71,6 +71,13 @@
       "when": 1781730415379,
       "tag": "0009_tan_spencer_smythe",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1781910537507,
+      "tag": "0010_sloppy_captain_marvel",
+      "breakpoints": true
     }
   ]
 }

@@ -203,6 +203,12 @@ describe("candidate review repositories", () => {
     expect(requested[0]?.id).toBe(id);
   });
 
+  it("preserves candidate external URLs", async () => {
+    const id = await insertTestSignal({ externalUrl: "https://polymarket.com/event/test-market" });
+    const signal = await getSignalById(db as Parameters<typeof getSignalById>[0], id);
+    expect(signal?.externalUrl).toBe("https://polymarket.com/event/test-market");
+  });
+
   it("hydrates signal token names from stored token metadata", async () => {
     await upsertToken(db as Parameters<typeof upsertToken>[0], {
       chain: "eth",

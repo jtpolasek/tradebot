@@ -6,6 +6,9 @@ import {
   insertSignal,
   upsertToken,
   upsertLastBlock,
+  getPolymarketPollCursors,
+  upsertPolymarketPollFailure,
+  upsertPolymarketPollSuccess,
   type Db,
 } from "@tradebot/store";
 import { fetchTrades, type PolymarketTrade, type FetchTradesOptions } from "./client.js";
@@ -23,6 +26,15 @@ const USDC_DECIMALS = 6;
 // both the USDC leg and the share leg. Nothing downstream re-derives these (record-only).
 const SHARE_DECIMALS = 6;
 type Cursor = { timestamp: number; seenKeysAtTimestamp: Set<string> };
+type PollWalletStats = {
+  maxSeenTs: number;
+  cursorTimestamp: number | null;
+  cursorKeys: string[];
+  fetchedCount: number;
+  recordedCount: number;
+  duplicateCount: number;
+  pageCount: number;
+};
 
 /** Convert a positive float amount to a raw bigint at the given decimals (clamped at 0). */
 function toRaw(amount: number, decimals: number): bigint {
@@ -151,6 +163,25 @@ export class PolymarketWatcher {
     try {
       const wallets = await getActiveWallets(this.db, "polygon");
       this.wallets = wallets.map((w) => ({ id: w.id, address: w.address }));
+      const activeAddresses = new Set(this.wallets.map((w) => w.address));
+      for (const address of this.cursor.keys()) {
+        if (!activeAddresses.has(address)) this.cursor.delete(address);
+      }
+
+      const cursors = await getPolymarketPollCursors(this.db).catch((err: unknown) => {
+        logger.warn({ err }, "polymarket cursor load failed");
+        return [];
+      });
+      const cursorsByWalletId = new Map(cursors.map((cursor) => [cursor.walletId, cursor]));
+      for (const wallet of this.wallets) {
+        if (this.cursor.has(wallet.address)) continue;
+        const cursor = cursorsByWalletId.get(wallet.id);
+        if (!cursor) continue;
+        this.cursor.set(wallet.address, {
+          timestamp: cursor.cursorTimestamp,
+          seenKeysAtTimestamp: new Set(cursor.cursorKeys),
+        });
+      }
     } catch (err) {
       logger.warn({ err }, "polygon wallet reload failed");
     }
@@ -164,11 +195,30 @@ export class PolymarketWatcher {
       let maxTs = 0;
       let sawError = false;
       for (const wallet of this.wallets) {
+        const startedAt = Date.now();
         try {
-          maxTs = Math.max(maxTs, await this.pollWallet(wallet));
+          const stats = await this.pollWallet(wallet);
+          maxTs = Math.max(maxTs, stats.maxSeenTs);
+          await upsertPolymarketPollSuccess(this.db, {
+            walletId: wallet.id,
+            lastPolledAt: Date.now(),
+            cursorTimestamp: stats.cursorTimestamp,
+            cursorKeys: stats.cursorKeys,
+            fetchedCount: stats.fetchedCount,
+            recordedCount: stats.recordedCount,
+            duplicateCount: stats.duplicateCount,
+            pageCount: stats.pageCount,
+            durationMs: Date.now() - startedAt,
+          }).catch((stateErr: unknown) => logger.warn({ err: stateErr, wallet: wallet.address }, "polymarket poll state write failed"));
         } catch (err) {
           sawError = true;
           logger.warn({ err, wallet: wallet.address }, "polymarket trade fetch failed");
+          await upsertPolymarketPollFailure(this.db, {
+            walletId: wallet.id,
+            lastPolledAt: Date.now(),
+            error: err instanceof Error ? err.message : String(err),
+            durationMs: Date.now() - startedAt,
+          }).catch((stateErr: unknown) => logger.warn({ err: stateErr, wallet: wallet.address }, "polymarket poll failure state write failed"));
         }
       }
 
@@ -188,11 +238,15 @@ export class PolymarketWatcher {
     }
   }
 
-  private async pollWallet(wallet: { id: string; address: string }): Promise<number> {
+  private async pollWallet(wallet: { id: string; address: string }): Promise<PollWalletStats> {
     const cursor = this.cursor.get(wallet.address);
     let newestTs = cursor?.timestamp ?? 0;
     let newestKeys = new Set(cursor?.seenKeysAtTimestamp ?? []);
     let maxSeenTs = 0;
+    let fetchedCount = 0;
+    let recordedCount = 0;
+    let duplicateCount = 0;
+    let pageCount = 0;
 
     for (let page = 0; page < MAX_PAGES_PER_WALLET; page++) {
       const trades = await fetchTrades(this.baseUrl, wallet.address, {
@@ -201,6 +255,8 @@ export class PolymarketWatcher {
         ...this.fetchOpts,
       });
       if (trades.length === 0) break;
+      pageCount++;
+      fetchedCount += trades.length;
 
       let reachedCursor = false;
       for (const trade of trades) {
@@ -212,10 +268,12 @@ export class PolymarketWatcher {
           break;
         }
         if (cursor && trade.timestamp === cursor.timestamp && cursor.seenKeysAtTimestamp.has(key)) {
+          duplicateCount++;
           continue;
         }
 
         await this.recordTrade(trade, wallet.id);
+        recordedCount++;
 
         if (trade.timestamp > newestTs) {
           newestTs = trade.timestamp;
@@ -236,7 +294,15 @@ export class PolymarketWatcher {
     if (newestTs > 0) {
       this.cursor.set(wallet.address, { timestamp: newestTs, seenKeysAtTimestamp: newestKeys });
     }
-    return maxSeenTs;
+    return {
+      maxSeenTs,
+      cursorTimestamp: newestTs > 0 ? newestTs : null,
+      cursorKeys: Array.from(newestKeys).sort(),
+      fetchedCount,
+      recordedCount,
+      duplicateCount,
+      pageCount,
+    };
   }
 
   private async recordTrade(trade: PolymarketTrade, walletId: string): Promise<void> {

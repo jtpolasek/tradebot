@@ -78,6 +78,13 @@
       "when": 1781910537507,
       "tag": "0010_sloppy_captain_marvel",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1781911879352,
+      "tag": "0011_closed_norrin_radd",
+      "breakpoints": true
     }
   ]
 }

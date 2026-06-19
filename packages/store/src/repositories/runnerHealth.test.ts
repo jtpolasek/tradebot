@@ -8,6 +8,12 @@ import { fileURLToPath } from "url";
 import type { RunnerHealthPayload } from "@tradebot/core";
 import * as schema from "../schema.js";
 import { upsertRunnerHealth, getRunnerHealth, latestSignalAt, latestFillAt } from "./runnerHealth.js";
+import {
+  getPolymarketPollCursors,
+  getPolymarketPollHealth,
+  upsertPolymarketPollFailure,
+  upsertPolymarketPollSuccess,
+} from "./polymarketPollState.js";
 import { getChainStatesUpdatedAt, upsertLastBlock } from "./chainState.js";
 import { insertWallet } from "./wallets.js";
 import { insertSignal } from "./signals.js";
@@ -35,6 +41,7 @@ afterAll(async () => {
 beforeEach(async () => {
   await db.delete(schema.runnerHealth);
   await db.delete(schema.chainState);
+  await db.delete(schema.polymarketPollState);
   await db.delete(schema.paperFills);
   await db.delete(schema.tradeSignals);
   await db.delete(schema.wallets);
@@ -123,5 +130,108 @@ describe("runnerHealth repository", () => {
 
     expect(await latestSignalAt(db as Parameters<typeof latestSignalAt>[0])).not.toBeNull();
     expect(await latestFillAt(db as Parameters<typeof latestFillAt>[0])).not.toBeNull();
+  });
+});
+
+describe("polymarket poll state repository", () => {
+  it("lists active polygon wallets even before their first poll", async () => {
+    const wallet = await insertWallet(db as Parameters<typeof insertWallet>[0], {
+      chain: "polygon",
+      address: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      label: "Poly leader",
+      active: true,
+    });
+
+    const states = await getPolymarketPollHealth(db as Parameters<typeof getPolymarketPollHealth>[0]);
+    expect(states).toHaveLength(1);
+    expect(states[0]).toMatchObject({
+      walletId: wallet.id,
+      walletAddress: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      walletLabel: "Poly leader",
+      lastPolledAt: null,
+      consecutiveFailures: 0,
+    });
+  });
+
+  it("upserts successful poll state and exposes cursor data", async () => {
+    const wallet = await insertWallet(db as Parameters<typeof insertWallet>[0], {
+      chain: "polygon",
+      address: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      label: "Cursor leader",
+      active: true,
+    });
+    const now = Date.now();
+    await upsertPolymarketPollSuccess(db as Parameters<typeof upsertPolymarketPollSuccess>[0], {
+      walletId: wallet.id,
+      lastPolledAt: now,
+      cursorTimestamp: 1_700_000_000,
+      cursorKeys: ["0xabc:BUY:asset"],
+      fetchedCount: 3,
+      recordedCount: 2,
+      duplicateCount: 1,
+      pageCount: 1,
+      durationMs: 120,
+    });
+
+    const states = await getPolymarketPollHealth(db as Parameters<typeof getPolymarketPollHealth>[0]);
+    expect(states[0]).toMatchObject({
+      walletId: wallet.id,
+      cursorTimestamp: 1_700_000_000,
+      cursorKeyCount: 1,
+      fetchedCount: 3,
+      recordedCount: 2,
+      duplicateCount: 1,
+      pageCount: 1,
+      durationMs: 120,
+      consecutiveFailures: 0,
+      lastError: null,
+    });
+
+    const cursors = await getPolymarketPollCursors(db as Parameters<typeof getPolymarketPollCursors>[0]);
+    expect(cursors).toEqual([{ walletId: wallet.id, cursorTimestamp: 1_700_000_000, cursorKeys: ["0xabc:BUY:asset"] }]);
+  });
+
+  it("tracks consecutive failures without clearing the last success cursor", async () => {
+    const wallet = await insertWallet(db as Parameters<typeof insertWallet>[0], {
+      chain: "polygon",
+      address: "0xcccccccccccccccccccccccccccccccccccccccc",
+      label: "Failure leader",
+      active: true,
+    });
+    const now = Date.now();
+    await upsertPolymarketPollSuccess(db as Parameters<typeof upsertPolymarketPollSuccess>[0], {
+      walletId: wallet.id,
+      lastPolledAt: now,
+      cursorTimestamp: 1_700_000_001,
+      cursorKeys: ["0xdef:SELL:asset"],
+      fetchedCount: 1,
+      recordedCount: 1,
+      duplicateCount: 0,
+      pageCount: 1,
+      durationMs: 50,
+    });
+    await upsertPolymarketPollFailure(db as Parameters<typeof upsertPolymarketPollFailure>[0], {
+      walletId: wallet.id,
+      lastPolledAt: now + 1_000,
+      error: "network down",
+      durationMs: 75,
+    });
+    await upsertPolymarketPollFailure(db as Parameters<typeof upsertPolymarketPollFailure>[0], {
+      walletId: wallet.id,
+      lastPolledAt: now + 2_000,
+      error: "still down",
+      durationMs: 80,
+    });
+
+    const states = await getPolymarketPollHealth(db as Parameters<typeof getPolymarketPollHealth>[0]);
+    expect(states[0]).toMatchObject({
+      cursorTimestamp: 1_700_000_001,
+      cursorKeyCount: 1,
+      fetchedCount: 1,
+      recordedCount: 1,
+      consecutiveFailures: 2,
+      lastError: "still down",
+      durationMs: 80,
+    });
   });
 });

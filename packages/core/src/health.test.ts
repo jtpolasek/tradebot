@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { deriveHealth, type HealthInput, type HealthThresholds, type RunnerHealthPayload } from "./health.js";
+import { deriveHealth, type HealthInput, type HealthThresholds, type PolymarketPollHealth, type RunnerHealthPayload } from "./health.js";
 
 const NOW = 1_000_000_000_000;
 
@@ -28,6 +28,28 @@ function input(over: Partial<HealthInput> = {}): HealthInput {
     dbReachable: true,
     heartbeat: { ts: NOW - 5_000, payload: payload() },
     chainStateUpdatedAt: { eth: NOW - 10_000, base: NOW - 5_000 },
+    ...over,
+  };
+}
+
+function polymarketPoll(over: Partial<PolymarketPollHealth> = {}): PolymarketPollHealth {
+  return {
+    walletId: "wallet-1",
+    walletAddress: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    walletLabel: "Poly leader",
+    lastPolledAt: NOW - 5_000,
+    lastSuccessAt: NOW - 5_000,
+    lastErrorAt: null,
+    lastError: null,
+    cursorTimestamp: 1_700_000_000,
+    cursorKeyCount: 1,
+    fetchedCount: 2,
+    recordedCount: 1,
+    duplicateCount: 1,
+    pageCount: 1,
+    durationMs: 120,
+    consecutiveFailures: 0,
+    updatedAt: NOW - 5_000,
     ...over,
   };
 }
@@ -85,6 +107,30 @@ describe("deriveHealth", () => {
     const report = deriveHealth(input({ chainStateUpdatedAt: { base: NOW - 5_000 } }), NOW, thresholds);
     expect(report.checks.find((c) => c.name === "chain:eth")).toBeUndefined();
     expect(report.status).toBe("ok");
+  });
+
+  it("reports ok for a fresh Polymarket poll row", () => {
+    const report = deriveHealth(input({ polymarketPolls: [polymarketPoll()] }), NOW, thresholds);
+    expect(report.status).toBe("ok");
+    expect(report.checks.find((c) => c.name === "polymarket:Poly leader")?.status).toBe("ok");
+  });
+
+  it("is degraded when a Polymarket wallet has no successful poll", () => {
+    const report = deriveHealth(input({ polymarketPolls: [polymarketPoll({ lastPolledAt: null, lastSuccessAt: null })] }), NOW, thresholds);
+    expect(report.status).toBe("degraded");
+    expect(report.checks.find((c) => c.name === "polymarket:Poly leader")?.detail).toMatch(/no poll/);
+  });
+
+  it("is degraded when a Polymarket poll is stale", () => {
+    const report = deriveHealth(input({ polymarketPolls: [polymarketPoll({ lastSuccessAt: NOW - 121_000 })] }), NOW, thresholds);
+    expect(report.status).toBe("degraded");
+    expect(report.checks.find((c) => c.name === "polymarket:Poly leader")?.detail).toMatch(/last success/);
+  });
+
+  it("is degraded when a Polymarket wallet has consecutive failures", () => {
+    const report = deriveHealth(input({ polymarketPolls: [polymarketPoll({ consecutiveFailures: 2, lastError: "network down" })] }), NOW, thresholds);
+    expect(report.status).toBe("degraded");
+    expect(report.checks.find((c) => c.name === "polymarket:Poly leader")?.detail).toContain("network down");
   });
 
   it("down outranks degraded in the rollup", () => {

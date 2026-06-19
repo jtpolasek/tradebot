@@ -47,6 +47,7 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await db.delete(schema.chainState);
+  await db.delete(schema.polymarketPollState);
   await db.delete(schema.paperFills);
   await db.delete(schema.tradeSignals);
   await db.delete(schema.leaderStats);

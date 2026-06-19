@@ -30,6 +30,25 @@ type CuBudget = {
   freeTierMonthlyPct: number;
 };
 
+type PolymarketPoll = {
+  walletId: string;
+  walletAddress: string;
+  walletLabel: string;
+  lastPolledAt: number | null;
+  lastSuccessAt: number | null;
+  lastErrorAt: number | null;
+  lastError: string | null;
+  cursorTimestamp: number | null;
+  cursorKeyCount: number;
+  fetchedCount: number;
+  recordedCount: number;
+  duplicateCount: number;
+  pageCount: number;
+  durationMs: number | null;
+  consecutiveFailures: number;
+  updatedAt: number | null;
+};
+
 type Metrics = {
   status: HealthStatus;
   checks: HealthCheck[];
@@ -48,6 +67,7 @@ type Metrics = {
       };
     } | null;
     chainStateUpdatedAt: Record<string, number>;
+    polymarketPolls?: PolymarketPoll[];
   };
 };
 
@@ -66,6 +86,18 @@ function uptime(sec: number): string {
 function freeTierTone(pct: number): string {
   if (pct >= 80) return "bad";
   if (pct >= 50) return "warn";
+  return "good";
+}
+
+function ms(msValue: number | null): string {
+  if (msValue === null) return "—";
+  if (msValue < 1000) return `${msValue}ms`;
+  return `${(msValue / 1000).toFixed(1)}s`;
+}
+
+function pollTone(poll: PolymarketPoll): string {
+  if (poll.consecutiveFailures > 0) return "bad";
+  if (poll.lastSuccessAt === null) return "warn";
   return "good";
 }
 
@@ -94,6 +126,7 @@ export default function StatusPage() {
 
   const hb = data?.input.heartbeat;
   const payload = hb?.payload;
+  const polymarketPolls = data?.input.polymarketPolls ?? [];
 
   return (
     <div className="stack">
@@ -171,6 +204,47 @@ export default function StatusPage() {
                     <td className="subtle">{c.lastEventAt ? timeAgo(c.lastEventAt) : "—"}</td>
                     <td className={c.connectFailures > 0 ? "warn" : ""}>{c.connectFailures}</td>
                     <td>{c.backfillCount}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {polymarketPolls.length > 0 && (
+        <div className="panel">
+          <h2 style={{ marginBottom: 10 }}>Polymarket poller</h2>
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Wallet</th><th>Status</th><th>Last success</th><th>Last poll</th>
+                  <th>Cursor trade</th><th>Fetched</th><th>Recorded</th><th>Skipped</th>
+                  <th>Pages</th><th>Duration</th><th>Error</th>
+                </tr>
+              </thead>
+              <tbody>
+                {polymarketPolls.map((poll) => (
+                  <tr key={poll.walletId}>
+                    <td>
+                      <div style={{ fontWeight: 700 }}>{poll.walletLabel}</div>
+                      <div className="subtle mono">{poll.walletAddress.slice(0, 6)}...{poll.walletAddress.slice(-4)}</div>
+                    </td>
+                    <td>
+                      <span className={`pill ${pollTone(poll)}`}>
+                        {poll.consecutiveFailures > 0 ? `${poll.consecutiveFailures} failed` : poll.lastSuccessAt === null ? "waiting" : "ok"}
+                      </span>
+                    </td>
+                    <td className="subtle">{poll.lastSuccessAt ? timeAgo(poll.lastSuccessAt) : "—"}</td>
+                    <td className="subtle">{poll.lastPolledAt ? timeAgo(poll.lastPolledAt) : "—"}</td>
+                    <td className="subtle">{poll.cursorTimestamp ? timeAgo(poll.cursorTimestamp * 1000) : "—"}</td>
+                    <td>{poll.fetchedCount}</td>
+                    <td>{poll.recordedCount}</td>
+                    <td>{poll.duplicateCount}</td>
+                    <td>{poll.pageCount}</td>
+                    <td>{ms(poll.durationMs)}</td>
+                    <td className={poll.lastError ? "bad" : "subtle"}>{poll.lastError ?? "—"}</td>
                   </tr>
                 ))}
               </tbody>

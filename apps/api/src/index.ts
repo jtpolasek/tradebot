@@ -30,6 +30,7 @@ import {
   latestMark,
   getRunnerHealth,
   getChainStatesUpdatedAt,
+  getPolymarketPollHealth,
   type CandidateSignalFilters,
 } from "@tradebot/store";
 import { apiConfig } from "./config.js";
@@ -336,9 +337,13 @@ async function gatherHealthInput(): Promise<HealthInput> {
       getRunnerHealth(db),
       getChainStatesUpdatedAt(db),
     ]);
-    return { dbReachable: true, heartbeat, chainStateUpdatedAt };
+    const polymarketPolls = await getPolymarketPollHealth(db).catch((err: unknown) => {
+      app.log.warn({ err }, "polymarket poll health read failed");
+      return [];
+    });
+    return { dbReachable: true, heartbeat, chainStateUpdatedAt, polymarketPolls };
   } catch {
-    return { dbReachable: false, heartbeat: null, chainStateUpdatedAt: {} };
+    return { dbReachable: false, heartbeat: null, chainStateUpdatedAt: {}, polymarketPolls: [] };
   }
 }
 

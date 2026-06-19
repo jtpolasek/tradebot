@@ -13,3 +13,4 @@ export * from "./repositories/adaptationLog.js";
 export * from "./repositories/settings.js";
 export * from "./repositories/analytics.js";
 export * from "./repositories/runnerHealth.js";
+export * from "./repositories/polymarketPollState.js";

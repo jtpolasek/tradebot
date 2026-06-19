@@ -31,6 +31,26 @@ export interface RunnerHealthPayload {
   chains: ChainWatcherHealth[];
 }
 
+/** Per-wallet Polymarket polling state, persisted outside the runner heartbeat. */
+export interface PolymarketPollHealth {
+  walletId: string;
+  walletAddress: string;
+  walletLabel: string;
+  lastPolledAt: number | null;
+  lastSuccessAt: number | null;
+  lastErrorAt: number | null;
+  lastError: string | null;
+  cursorTimestamp: number | null;
+  cursorKeyCount: number;
+  fetchedCount: number;
+  recordedCount: number;
+  duplicateCount: number;
+  pageCount: number;
+  durationMs: number | null;
+  consecutiveFailures: number;
+  updatedAt: number | null;
+}
+
 export interface HealthThresholds {
   heartbeatStaleSec: number;
   chainStaleSecByChain: Record<ChainId, number>;
@@ -45,6 +65,8 @@ export interface HealthInput {
   heartbeat: { ts: number; payload: RunnerHealthPayload } | null;
   /** Per-chain `chain_state.updated_at` epoch ms; missing chains absent from the map. */
   chainStateUpdatedAt: Partial<Record<ChainId, number>>;
+  /** Active Polygon/Polymarket wallet poll state; missing when the table is unavailable. */
+  polymarketPolls?: PolymarketPollHealth[];
 }
 
 export interface HealthCheck {
@@ -142,10 +164,50 @@ export function deriveHealth(
     }
   }
 
+  const polymarketStaleSec = thresholds.chainStaleSecByChain.polygon;
+  for (const poll of input.polymarketPolls ?? []) {
+    const name = `polymarket:${poll.walletLabel || shortAddress(poll.walletAddress)}`;
+    if (poll.lastPolledAt === null) {
+      checks.push({ name, status: "degraded", detail: "no poll recorded" });
+      continue;
+    }
+    if (poll.consecutiveFailures > 0) {
+      checks.push({
+        name,
+        status: "degraded",
+        detail: `${poll.consecutiveFailures} failure(s): ${poll.lastError ?? "unknown error"}`,
+      });
+      continue;
+    }
+    if (poll.lastSuccessAt === null) {
+      checks.push({ name, status: "degraded", detail: "no successful poll recorded" });
+      continue;
+    }
+    const ageSec = (now - poll.lastSuccessAt) / 1000;
+    if (ageSec > polymarketStaleSec) {
+      checks.push({
+        name,
+        status: "degraded",
+        detail: `last success ${ageSec.toFixed(0)}s ago (limit ${polymarketStaleSec}s)`,
+      });
+    } else {
+      checks.push({
+        name,
+        status: "ok",
+        detail: `last success ${ageSec.toFixed(0)}s ago; recorded ${poll.recordedCount}/${poll.fetchedCount}`,
+      });
+    }
+  }
+
   const status = checks.reduce<HealthStatus>((acc, c) => worst(acc, c.status), "ok");
   return { status, checks };
 }
 
 function mb(bytes: number): number {
   return Math.round(bytes / (1024 * 1024));
+}
+
+function shortAddress(address: string): string {
+  if (address.length <= 12) return address;
+  return `${address.slice(0, 6)}...${address.slice(-4)}`;
 }

@@ -1,13 +1,32 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 // Mock the store so the watcher tests never touch a real DB.
-const { insertSignal, upsertToken, upsertLastBlock, getActiveWallets } = vi.hoisted(() => ({
+const {
+  insertSignal,
+  upsertToken,
+  upsertLastBlock,
+  getActiveWallets,
+  getPolymarketPollCursors,
+  upsertPolymarketPollFailure,
+  upsertPolymarketPollSuccess,
+} = vi.hoisted(() => ({
   insertSignal: vi.fn(async () => "signal-id"),
   upsertToken: vi.fn(async () => undefined),
   upsertLastBlock: vi.fn(async () => undefined),
   getActiveWallets: vi.fn(async () => [] as { id: string; address: string }[]),
+  getPolymarketPollCursors: vi.fn(async () => [] as { walletId: string; cursorTimestamp: number; cursorKeys: string[] }[]),
+  upsertPolymarketPollFailure: vi.fn(async () => undefined),
+  upsertPolymarketPollSuccess: vi.fn(async () => undefined),
 }));
-vi.mock("@tradebot/store", () => ({ insertSignal, upsertToken, upsertLastBlock, getActiveWallets }));
+vi.mock("@tradebot/store", () => ({
+  insertSignal,
+  upsertToken,
+  upsertLastBlock,
+  getActiveWallets,
+  getPolymarketPollCursors,
+  upsertPolymarketPollFailure,
+  upsertPolymarketPollSuccess,
+}));
 
 import { fetchTrades, PolymarketTradeSchema, type PolymarketTrade } from "./client.js";
 import { tradeToCandidateSignal, PolymarketWatcher, POLYGON_USDC } from "./watcher.js";
@@ -35,6 +54,10 @@ function sampleTrade(over: Partial<PolymarketTrade> = {}): PolymarketTrade {
 
 function jsonResponse(body: unknown, status = 200): Response {
   return { ok: status >= 200 && status < 300, status, json: async () => body } as Response;
+}
+
+function mockArg<T>(call: unknown[] | undefined, index: number): T {
+  return (call as unknown[])[index] as T;
 }
 
 describe("PolymarketTradeSchema", () => {
@@ -116,6 +139,10 @@ describe("PolymarketWatcher", () => {
     upsertToken.mockClear();
     upsertLastBlock.mockClear();
     getActiveWallets.mockClear();
+    getPolymarketPollCursors.mockClear();
+    upsertPolymarketPollFailure.mockClear();
+    upsertPolymarketPollSuccess.mockClear();
+    getPolymarketPollCursors.mockResolvedValue([]);
   });
 
   it("getHealth() reports the polygon poller shape", () => {
@@ -141,7 +168,45 @@ describe("PolymarketWatcher", () => {
     expect(insertSignal).toHaveBeenCalledTimes(1);
     // Both outcome + USDC token labels upserted for the one recorded trade.
     expect(upsertToken).toHaveBeenCalledTimes(2);
+    expect(upsertPolymarketPollSuccess).toHaveBeenCalledTimes(2);
+    expect(mockArg(upsertPolymarketPollSuccess.mock.calls[0], 1)).toMatchObject({
+      walletId: "wallet-1",
+      cursorTimestamp: 1_700_000_000,
+      fetchedCount: 1,
+      recordedCount: 1,
+      duplicateCount: 0,
+      pageCount: 1,
+    });
+    expect(mockArg(upsertPolymarketPollSuccess.mock.calls[1], 1)).toMatchObject({
+      walletId: "wallet-1",
+      fetchedCount: 1,
+      recordedCount: 0,
+      duplicateCount: 1,
+      pageCount: 1,
+    });
     expect(w.getHealth().connectionState).toBe("connected");
+  });
+
+  it("seeds the cursor from persisted poll state on wallet reload", async () => {
+    getActiveWallets.mockResolvedValue([{ id: "wallet-1", address: "0xLeader" }]);
+    const existing = sampleTrade({ timestamp: 100, transactionHash: "0xexisting" });
+    getPolymarketPollCursors.mockResolvedValue([{
+      walletId: "wallet-1",
+      cursorTimestamp: 100,
+      cursorKeys: [`${existing.transactionHash.toLowerCase()}:${existing.side}:${existing.asset}`],
+    }]);
+    const fetchImpl = vi.fn(async () => jsonResponse([existing]));
+    const w = new PolymarketWatcher({ db: {} as never, pollMs: 1000, baseUrl: BASE, fetchImpl: fetchImpl as unknown as typeof fetch });
+
+    await (w as unknown as { loadWallets: () => Promise<void> }).loadWallets();
+    await w.tick();
+
+    expect(insertSignal).not.toHaveBeenCalled();
+    expect(mockArg(upsertPolymarketPollSuccess.mock.calls[0], 1)).toMatchObject({
+      cursorTimestamp: 100,
+      recordedCount: 0,
+      duplicateCount: 1,
+    });
   });
 
   it("continues pagination on a warm cursor so trades past the first page are not dropped", async () => {
@@ -209,5 +274,10 @@ describe("PolymarketWatcher", () => {
     expect(insertSignal).not.toHaveBeenCalled();
     expect(w.getHealth().connectionState).toBe("reconnecting");
     expect(w.getHealth().connectFailures).toBe(1);
+    expect(upsertPolymarketPollFailure).toHaveBeenCalledTimes(1);
+    expect(mockArg(upsertPolymarketPollFailure.mock.calls[0], 1)).toMatchObject({
+      walletId: "wallet-1",
+      error: "network down",
+    });
   });
 });

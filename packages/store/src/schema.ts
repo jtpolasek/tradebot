@@ -166,3 +166,22 @@ export const runnerHealth = pgTable("runner_health", {
   ts: timestamptz("ts").notNull(),
   payload: jsonb("payload").notNull(),
 });
+
+// Per-active Polygon wallet polling telemetry for the Polymarket watcher. Unlike runner_health,
+// this survives restarts and lets the watcher resume a second-granular cursor without replaying.
+export const polymarketPollState = pgTable("polymarket_poll_state", {
+  walletId: uuid("wallet_id").primaryKey().references(() => wallets.id),
+  lastPolledAt: timestamptz("last_polled_at"),
+  lastSuccessAt: timestamptz("last_success_at"),
+  lastErrorAt: timestamptz("last_error_at"),
+  lastError: text("last_error"),
+  cursorTimestamp: bigint("cursor_timestamp", { mode: "number" }),
+  cursorKeys: jsonb("cursor_keys").$type<string[]>(),
+  fetchedCount: integer("fetched_count").notNull().default(0),
+  recordedCount: integer("recorded_count").notNull().default(0),
+  duplicateCount: integer("duplicate_count").notNull().default(0),
+  pageCount: integer("page_count").notNull().default(0),
+  durationMs: integer("duration_ms"),
+  consecutiveFailures: integer("consecutive_failures").notNull().default(0),
+  updatedAt: timestamptz("updated_at").notNull().defaultNow(),
+}, (t) => [index("polymarket_poll_state_updated_at_idx").on(t.updatedAt)]);

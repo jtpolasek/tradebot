@@ -127,7 +127,7 @@ describe("PolymarketWatcher", () => {
     expect(h.walletCount).toBe(0);
   });
 
-  it("records each new trade once across re-polls (high-water cursor)", async () => {
+  it("records each new trade once across re-polls (timestamp + trade-key cursor)", async () => {
     getActiveWallets.mockResolvedValue([{ id: "wallet-1", address: "0xLeader" }]);
     const fetchImpl = vi.fn(async () => jsonResponse([sampleTrade()]));
     const w = new PolymarketWatcher({ db: {} as never, pollMs: 1000, baseUrl: BASE, fetchImpl: fetchImpl as unknown as typeof fetch });
@@ -142,6 +142,62 @@ describe("PolymarketWatcher", () => {
     // Both outcome + USDC token labels upserted for the one recorded trade.
     expect(upsertToken).toHaveBeenCalledTimes(2);
     expect(w.getHealth().connectionState).toBe("connected");
+  });
+
+  it("continues pagination on a warm cursor so trades past the first page are not dropped", async () => {
+    getActiveWallets.mockResolvedValue([{ id: "wallet-1", address: "0xLeader" }]);
+    const baseline = sampleTrade({ timestamp: 100, transactionHash: "0xbaseline" });
+    const firstPage = Array.from({ length: 100 }, (_, i) =>
+      sampleTrade({ timestamp: 200, transactionHash: `0xnew${String(i).padStart(3, "0")}` })
+    );
+    const extra = sampleTrade({ timestamp: 199, transactionHash: "0xnew-extra" });
+
+    let cold = true;
+    const fetchImpl = vi.fn(async (url: string) => {
+      if (cold) {
+        cold = false;
+        return jsonResponse([baseline]);
+      }
+      const offset = Number(new URL(url).searchParams.get("offset") ?? "0");
+      if (offset === 0) return jsonResponse(firstPage);
+      if (offset === 100) return jsonResponse([extra, baseline]);
+      return jsonResponse([]);
+    });
+    const w = new PolymarketWatcher({ db: {} as never, pollMs: 1000, baseUrl: BASE, fetchImpl: fetchImpl as unknown as typeof fetch });
+
+    await (w as unknown as { loadWallets: () => Promise<void> }).loadWallets();
+    await w.tick();
+    insertSignal.mockClear();
+    fetchImpl.mockClear();
+
+    await w.tick();
+
+    expect(insertSignal).toHaveBeenCalledTimes(101);
+    const urls = fetchImpl.mock.calls.map((call) => String((call as unknown[])[0]));
+    expect(urls.some((url) => url.includes("offset=100"))).toBe(true);
+  });
+
+  it("records a new same-timestamp trade that was not seen at the cursor", async () => {
+    getActiveWallets.mockResolvedValue([{ id: "wallet-1", address: "0xLeader" }]);
+    const first = sampleTrade({ timestamp: 100, transactionHash: "0xfirst" });
+    const second = sampleTrade({ timestamp: 100, transactionHash: "0xsecond" });
+    let cold = true;
+    const fetchImpl = vi.fn(async () => {
+      if (cold) {
+        cold = false;
+        return jsonResponse([first]);
+      }
+      return jsonResponse([second, first]);
+    });
+    const w = new PolymarketWatcher({ db: {} as never, pollMs: 1000, baseUrl: BASE, fetchImpl: fetchImpl as unknown as typeof fetch });
+
+    await (w as unknown as { loadWallets: () => Promise<void> }).loadWallets();
+    await w.tick();
+    insertSignal.mockClear();
+
+    await w.tick();
+
+    expect(insertSignal).toHaveBeenCalledTimes(1);
   });
 
   it("marks the poller degraded when a fetch fails", async () => {

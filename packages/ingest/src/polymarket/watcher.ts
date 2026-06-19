@@ -13,6 +13,8 @@ import { fetchTrades, type PolymarketTrade, type FetchTradesOptions } from "./cl
 const logger = createLogger("ingest:polygon");
 
 const WALLET_RELOAD_MS = 60_000;
+const TRADE_PAGE_LIMIT = 100;
+const MAX_PAGES_PER_WALLET = 100;
 
 // Polymarket settles in bridged USDC.e on Polygon. Lowercased to match the tokens-table key.
 export const POLYGON_USDC = "0x2791bca1f2de4661ed88a30c99a7a9449aa84174";
@@ -20,11 +22,16 @@ const USDC_DECIMALS = 6;
 // CTF outcome shares have no on-chain ERC-20 decimals; we use a fixed 1e6 convention internally for
 // both the USDC leg and the share leg. Nothing downstream re-derives these (record-only).
 const SHARE_DECIMALS = 6;
+type Cursor = { timestamp: number; seenKeysAtTimestamp: Set<string> };
 
 /** Convert a positive float amount to a raw bigint at the given decimals (clamped at 0). */
 function toRaw(amount: number, decimals: number): bigint {
   if (!Number.isFinite(amount) || amount <= 0) return 0n;
   return BigInt(Math.round(amount * 10 ** decimals));
+}
+
+function tradeKey(trade: PolymarketTrade): string {
+  return `${trade.transactionHash.toLowerCase()}:${trade.side}:${trade.asset}`;
 }
 
 /**
@@ -100,8 +107,9 @@ export class PolymarketWatcher {
   private readonly fetchOpts: Pick<FetchTradesOptions, "fetchImpl">;
 
   private wallets: { id: string; address: string }[] = [];
-  // Per-wallet high-water trade timestamp (epoch seconds) to bound work; dedup is the DB constraint.
-  private readonly cursor = new Map<string, number>();
+  // Per-wallet high-water trade timestamp (epoch seconds) plus trade keys at that exact second.
+  // Polymarket timestamps are second-granular, so timestamp alone is not a safe cursor.
+  private readonly cursor = new Map<string, Cursor>();
 
   private pollTimer: ReturnType<typeof setInterval> | null = null;
   private walletReloadTimer: ReturnType<typeof setInterval> | null = null;
@@ -157,16 +165,7 @@ export class PolymarketWatcher {
       let sawError = false;
       for (const wallet of this.wallets) {
         try {
-          const trades = await fetchTrades(this.baseUrl, wallet.address, { limit: 100, ...this.fetchOpts });
-          const cursor = this.cursor.get(wallet.address);
-          for (const trade of trades) {
-            // On a warm cursor, skip trades we've already passed; cold start records the page.
-            if (cursor !== undefined && trade.timestamp <= cursor) continue;
-            await this.recordTrade(trade, wallet.id);
-            if (trade.timestamp > maxTs) maxTs = trade.timestamp;
-          }
-          const newest = trades.reduce((m, t) => Math.max(m, t.timestamp), cursor ?? 0);
-          this.cursor.set(wallet.address, newest);
+          maxTs = Math.max(maxTs, await this.pollWallet(wallet));
         } catch (err) {
           sawError = true;
           logger.warn({ err, wallet: wallet.address }, "polymarket trade fetch failed");
@@ -187,6 +186,57 @@ export class PolymarketWatcher {
     } finally {
       this.running = false;
     }
+  }
+
+  private async pollWallet(wallet: { id: string; address: string }): Promise<number> {
+    const cursor = this.cursor.get(wallet.address);
+    let newestTs = cursor?.timestamp ?? 0;
+    let newestKeys = new Set(cursor?.seenKeysAtTimestamp ?? []);
+    let maxSeenTs = 0;
+
+    for (let page = 0; page < MAX_PAGES_PER_WALLET; page++) {
+      const trades = await fetchTrades(this.baseUrl, wallet.address, {
+        limit: TRADE_PAGE_LIMIT,
+        offset: page * TRADE_PAGE_LIMIT,
+        ...this.fetchOpts,
+      });
+      if (trades.length === 0) break;
+
+      let reachedCursor = false;
+      for (const trade of trades) {
+        maxSeenTs = Math.max(maxSeenTs, trade.timestamp);
+        const key = tradeKey(trade);
+
+        if (cursor && trade.timestamp < cursor.timestamp) {
+          reachedCursor = true;
+          break;
+        }
+        if (cursor && trade.timestamp === cursor.timestamp && cursor.seenKeysAtTimestamp.has(key)) {
+          continue;
+        }
+
+        await this.recordTrade(trade, wallet.id);
+
+        if (trade.timestamp > newestTs) {
+          newestTs = trade.timestamp;
+          newestKeys = new Set([key]);
+        } else if (trade.timestamp === newestTs) {
+          newestKeys.add(key);
+        }
+      }
+
+      // Cold start intentionally records only the newest page rather than importing full history.
+      if (!cursor || reachedCursor || trades.length < TRADE_PAGE_LIMIT) break;
+
+      if (page === MAX_PAGES_PER_WALLET - 1) {
+        logger.warn({ wallet: wallet.address, pages: MAX_PAGES_PER_WALLET }, "polymarket pagination cap reached");
+      }
+    }
+
+    if (newestTs > 0) {
+      this.cursor.set(wallet.address, { timestamp: newestTs, seenKeysAtTimestamp: newestKeys });
+    }
+    return maxSeenTs;
   }
 
   private async recordTrade(trade: PolymarketTrade, walletId: string): Promise<void> {

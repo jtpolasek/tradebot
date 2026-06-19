@@ -1,4 +1,4 @@
-import type { ChainId } from "@tradebot/core";
+import type { ChainId, EvmChainId } from "@tradebot/core";
 import { WETH, QUOTE_ASSETS, CHAINLINK_ETH_USD, NATIVE_TOKEN_PLACEHOLDER, bigintRatioToNumber, createLogger, fromBaseUnits } from "@tradebot/core";
 
 const logger = createLogger("pricing");
@@ -195,7 +195,7 @@ const ERC20_BALANCE_ABI = [
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
-const UNI_V3_FACTORIES: Record<ChainId, string> = {
+const UNI_V3_FACTORIES: Record<EvmChainId, string> = {
   eth: "0x1f98431c8ad98523631ae4a59f267346ea31f984",
   base: "0x33128a8fc17869897dce68ed026d694621f6fdfd",
 };
@@ -204,7 +204,7 @@ const AERODROME_CL_FACTORY_BASE = "0x5e7bb104d84c7cb9b682aac2f3d509f5f406809a";
 
 // Uniswap V4 StateView deployments. Verified on-chain 2026-06-16 (StateView.poolManager() returns
 // the chain's canonical PoolManager). See docs/uniswap-v4-pricing-plan.md.
-const STATE_VIEW: Record<ChainId, string> = {
+const STATE_VIEW: Record<EvmChainId, string> = {
   eth: "0x7ffe42c4a5deea5b0fec41c94c136cf115597227",
   base: "0xa3c0c9b65bad0b08107aa264b0f3db444b867a71",
 };
@@ -216,7 +216,7 @@ const V3_FEE_TIERS = [500, 3000, 10000] as const;
 const AERODROME_TICK_SPACINGS = [1, 50, 100, 200, 2000] as const;
 
 // Stablecoins that are always exactly $1.00 USD (not WETH, which needs real price)
-const STABLECOINS: Record<ChainId, Set<string>> = {
+const STABLECOINS: Record<EvmChainId, Set<string>> = {
   eth: new Set([
     "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", // USDC
     "0xdac17f958d2ee523a2206206994597c13d831ec7", // USDT
@@ -268,7 +268,7 @@ const marketCache = new Map<string, MarketEntry>();
 
 // Chainlink ETH/USD: 30s TTL — shared across every token priced against WETH in a tick
 type ChainlinkEntry = { price: number; fetchedAt: number };
-const chainlinkCache = new Map<ChainId, ChainlinkEntry>();
+const chainlinkCache = new Map<EvmChainId, ChainlinkEntry>();
 
 const LLAMA_TTL_MS = 30_000;
 const MARKET_TTL_MS = 5 * 60_000;
@@ -360,7 +360,7 @@ function divergenceBps(left: number, right: number): number | null {
 
 // ─── Chainlink ───────────────────────────────────────────────────────────────
 
-async function getChainlinkEthUsd(chain: ChainId, client: RpcClient): Promise<number | null> {
+async function getChainlinkEthUsd(chain: EvmChainId, client: RpcClient): Promise<number | null> {
   const cached = chainlinkCache.get(chain);
   if (cached && Date.now() - cached.fetchedAt < CHAINLINK_TTL_MS) return cached.price;
   try {
@@ -402,7 +402,7 @@ type V3VenueConfig = {
   spacings: readonly number[];
 };
 
-function v3VenueConfigs(chain: ChainId): V3VenueConfig[] {
+function v3VenueConfigs(chain: EvmChainId): V3VenueConfig[] {
   const configs: V3VenueConfig[] = [
     {
       venue: "uniswap-v3",
@@ -437,7 +437,7 @@ export type MarketHint = { poolId?: string; counterCurrency?: string };
  * negative) is cached per token.
  */
 async function findBestMarket(
-  chain: ChainId,
+  chain: EvmChainId,
   token: string,
   client: RpcClient,
   hint?: MarketHint
@@ -461,7 +461,7 @@ async function findBestMarket(
 }
 
 /** Deepest USD market across Uniswap V3 + Aerodrome CL quote assets / fee tiers. Null if none. */
-async function scanV23Market(chain: ChainId, token: string, client: RpcClient): Promise<Market | null> {
+async function scanV23Market(chain: EvmChainId, token: string, client: RpcClient): Promise<Market | null> {
   const tokenLc = token.toLowerCase();
   let best: { market: Market; liquidityVal: bigint } | null = null;
 
@@ -542,7 +542,7 @@ async function scanV23Market(chain: ChainId, token: string, client: RpcClient): 
  * liquidity from `getLiquidity`'s in-range L. Null if the pool is uninitialized or unreadable.
  */
 async function readV4Market(
-  chain: ChainId,
+  chain: EvmChainId,
   poolId: string,
   token: string,
   counterCurrency: string,
@@ -648,7 +648,7 @@ async function readPoolLiquidityUsd(
 // ─── V3 spot price ───────────────────────────────────────────────────────────
 
 async function priceFromPool(
-  chain: ChainId,
+  chain: EvmChainId,
   token: string,
   pool: CachedPool,
   quoteTokenAddress: string,
@@ -749,12 +749,12 @@ async function getV3TwapPriceUsd(
 
 // ─── DefiLlama fallback ──────────────────────────────────────────────────────
 
-const LLAMA_CHAIN_SLUG: Record<ChainId, string> = {
+const LLAMA_CHAIN_SLUG: Record<EvmChainId, string> = {
   eth: "ethereum",
   base: "base",
 };
 
-async function getLlamaPrice(chain: ChainId, address: string): Promise<number | null> {
+async function getLlamaPrice(chain: EvmChainId, address: string): Promise<number | null> {
   const key = `${chain}:${address}`;
   const cached = llamaCache.get(key);
   if (cached && Date.now() - cached.fetchedAt < LLAMA_TTL_MS) return cached.price;
@@ -776,7 +776,7 @@ async function getLlamaPrice(chain: ChainId, address: string): Promise<number | 
   }
 }
 
-async function getLlamaPriceResult(chain: ChainId, address: string): Promise<PriceResult | null> {
+async function getLlamaPriceResult(chain: EvmChainId, address: string): Promise<PriceResult | null> {
   const price = await getLlamaPrice(chain, address);
   if (price === null) return null;
   return {
@@ -798,7 +798,7 @@ async function getLlamaPriceResult(chain: ChainId, address: string): Promise<Pri
  *  4. Fallback → DefiLlama (30s cache)
  */
 export async function getUsdPrice(
-  chain: ChainId,
+  chain: EvmChainId,
   address: string,
   client: RpcClient,
   hint?: MarketHint
@@ -807,7 +807,7 @@ export async function getUsdPrice(
 }
 
 export async function getUsdPriceResult(
-  chain: ChainId,
+  chain: EvmChainId,
   address: string,
   client: RpcClient,
   hint?: MarketHint
@@ -849,7 +849,7 @@ export async function getUsdPriceResult(
  * that prices the token, so price and liquidity always agree on the pool.
  */
 export async function getLiquidityUsd(
-  chain: ChainId,
+  chain: EvmChainId,
   address: string,
   client: RpcClient,
   hint?: MarketHint
@@ -858,7 +858,7 @@ export async function getLiquidityUsd(
 }
 
 export async function getLiquidityUsdResult(
-  chain: ChainId,
+  chain: EvmChainId,
   address: string,
   client: RpcClient,
   hint?: MarketHint
@@ -879,7 +879,7 @@ export async function getLiquidityUsdResult(
   };
 }
 
-function normalizePricedAddress(chain: ChainId, address: string): string {
+function normalizePricedAddress(chain: EvmChainId, address: string): string {
   const addr = address.toLowerCase();
   return addr === NATIVE_TOKEN_PLACEHOLDER ? WETH[chain] : addr;
 }

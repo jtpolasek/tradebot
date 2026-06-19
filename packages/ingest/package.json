@@ -16,7 +16,8 @@
     "@tradebot/core": "workspace:*",
     "@tradebot/store": "workspace:*",
     "viem": "^2.31.3",
-    "ws": "^8.18.2"
+    "ws": "^8.18.2",
+    "zod": "^3.25.61"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

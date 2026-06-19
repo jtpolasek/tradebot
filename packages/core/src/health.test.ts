@@ -5,7 +5,7 @@ const NOW = 1_000_000_000_000;
 
 const thresholds: HealthThresholds = {
   heartbeatStaleSec: 30,
-  chainStaleSecByChain: { eth: 60, base: 30 },
+  chainStaleSecByChain: { eth: 60, base: 30, polygon: 120 },
   rssSoftLimitBytes: 1536 * 1024 * 1024,
 };
 

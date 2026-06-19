@@ -1,5 +1,5 @@
 import { fromBaseUnits, CHAIN_IDS, QUOTE_ASSETS } from "@tradebot/core";
-import type { ChainId } from "@tradebot/core";
+import type { EvmChainId } from "@tradebot/core";
 
 export const ZEROX_PRICE_ENDPOINT = "/swap/allowance-holder/price";
 
@@ -160,7 +160,7 @@ export function summarizeDexFees(
   const fees = quote.fees;
   if (!fees) return { dexFeeUsd: 0, unpriced: [] };
 
-  const chain: ChainId = chainId === CHAIN_IDS.base ? "base" : "eth";
+  const chain: EvmChainId = chainId === CHAIN_IDS.base ? "base" : "eth";
   // USDC is always the first quote asset on both chains
   const usdcAddress = QUOTE_ASSETS[chain][0]!;
   const isUsdc = (token?: string) => token?.toLowerCase() === usdcAddress.toLowerCase();

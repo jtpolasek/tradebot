@@ -1,21 +1,22 @@
-import type { ChainId } from "./types.js";
+import type { EvmChainId } from "./types.js";
 
 /**
  * Wallet-batching and reconnect-backfill topology constants. These live in core as the
  * single source of truth: ChainWatcher consumes them operationally, and the CU budget
  * below reasons about them. Keep them in sync with how the watcher actually batches.
+ * Only EVM chains hit Alchemy, hence `EvmChainId`.
  */
 export const CHUNK_SIZE = 50;
-export const BACKFILL_CHUNK_BY_CHAIN: Record<ChainId, number> = {
+export const BACKFILL_CHUNK_BY_CHAIN: Record<EvmChainId, number> = {
   eth: 10,
   base: 10,
 };
-export const BACKFILL_ADDRESS_CHUNK_BY_CHAIN: Record<ChainId, number> = {
+export const BACKFILL_ADDRESS_CHUNK_BY_CHAIN: Record<EvmChainId, number> = {
   eth: CHUNK_SIZE,
   base: 5,
 };
 // Cap how far back a reconnect will backfill — roughly 30 minutes of blocks per chain.
-export const MAX_BACKFILL_BLOCKS_BY_CHAIN: Record<ChainId, number> = {
+export const MAX_BACKFILL_BLOCKS_BY_CHAIN: Record<EvmChainId, number> = {
   eth: 150, // ~12s blocks → ~30 min
   base: 900, // ~2s blocks → ~30 min
 };
@@ -46,7 +47,7 @@ export const DEFAULT_TRADES_PER_WALLET_PER_DAY = 5;
 export const DEFAULT_RECONNECTS_PER_DAY = 4;
 
 export interface CuBudgetInput {
-  chain: ChainId;
+  chain: EvmChainId;
   walletCount: number;
   /** Assumed confirmed trades per watched wallet per day. */
   tradesPerWalletPerDay?: number;
@@ -55,7 +56,7 @@ export interface CuBudgetInput {
 }
 
 export interface CuBudgetEstimate {
-  chain: ChainId;
+  chain: EvmChainId;
   walletCount: number;
   /** Steady-state concurrent subscriptions (logs from+to, mempool, one newHeads). */
   subscriptionCount: number;

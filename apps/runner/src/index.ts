@@ -11,7 +11,7 @@ import {
   getLatestFillForSignal,
   upsertRunnerHealth,
 } from "@tradebot/store";
-import { ChainWatcher, Recorder, deserializeEvent } from "@tradebot/ingest";
+import { ChainWatcher, PolymarketWatcher, Recorder, deserializeEvent } from "@tradebot/ingest";
 import { Decoder } from "@tradebot/decoder";
 import { startMarksJob } from "@tradebot/pricing";
 import { PaperEngine, runExitCheck } from "@tradebot/paper-engine";
@@ -139,9 +139,17 @@ async function main() {
     await watcher.start();
   }
 
-  const heartbeatJob = startHeartbeatJob(db, watchers);
+  // Polymarket (Polygon) — watch+record only, fully decoupled from the EVM bus/decoder/engine.
+  const polymarketWatcher = new PolymarketWatcher({
+    db,
+    pollMs: config.POLYMARKET_POLL_MS,
+    baseUrl: config.POLYMARKET_DATA_API_URL,
+  });
+  await polymarketWatcher.start();
 
-  logger.info("Runner ready — watching ETH and Base.");
+  const heartbeatJob = startHeartbeatJob(db, [...watchers, polymarketWatcher]);
+
+  logger.info("Runner ready — watching ETH, Base, and Polymarket (Polygon).");
 
   async function shutdown() {
     logger.info("Shutting down...");
@@ -153,6 +161,7 @@ async function main() {
     heartbeatJob.stop();
     decoder.stop();
     for (const watcher of watchers) watcher.stop();
+    polymarketWatcher.stop();
     await closeDb();
     process.exit(0);
   }
@@ -192,7 +201,10 @@ function startCandidateCopyJob(db: ReturnType<typeof getDb>, engine: PaperEngine
   return { stop: () => clearInterval(timer) };
 }
 
-function startHeartbeatJob(db: ReturnType<typeof getDb>, watchers: ChainWatcher[]): { stop: () => void } {
+function startHeartbeatJob(
+  db: ReturnType<typeof getDb>,
+  watchers: { getHealth: ChainWatcher["getHealth"] }[]
+): { stop: () => void } {
   const version = process.env["GIT_SHA"];
   const run = () => {
     const mem = process.memoryUsage();

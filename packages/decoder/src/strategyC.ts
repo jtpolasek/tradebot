@@ -1,5 +1,5 @@
 import { decodeFunctionData } from "viem";
-import type { RawTxEvent, TradeSignal, ChainId } from "@tradebot/core";
+import type { RawTxEvent, TradeSignal, EvmChainId } from "@tradebot/core";
 import type { TokenMetadataResolver } from "./tokenMetadata.js";
 
 // Uniswap V2 router ABI fragments
@@ -61,7 +61,7 @@ export async function strategyC(
 
 async function decodeUniversalRouter(
   calldata: `0x${string}`,
-  chain: ChainId,
+  chain: EvmChainId,
   meta: TokenMetadataResolver
 ): Promise<Pick<TradeSignal, "tokenIn" | "tokenOut" | "amountIn" | "amountOut" | "venue"> | null> {
   try {
@@ -107,7 +107,7 @@ async function decodeUniversalRouter(
 
 async function decodeV3SwapInput(
   input: `0x${string}`,
-  chain: ChainId,
+  chain: EvmChainId,
   meta: TokenMetadataResolver
 ): Promise<Pick<TradeSignal, "tokenIn" | "tokenOut" | "amountIn" | "amountOut" | "venue"> | null> {
   try {
@@ -147,7 +147,7 @@ async function decodeV3SwapInput(
 
 async function decodeV2SwapInput(
   input: `0x${string}`,
-  chain: ChainId,
+  chain: EvmChainId,
   meta: TokenMetadataResolver
 ): Promise<Pick<TradeSignal, "tokenIn" | "tokenOut" | "amountIn" | "amountOut" | "venue"> | null> {
   try {
@@ -185,7 +185,7 @@ async function decodeV2SwapInput(
 
 async function decodeV2Router(
   calldata: `0x${string}`,
-  chain: ChainId,
+  chain: EvmChainId,
   valueWei: bigint | undefined,
   meta: TokenMetadataResolver
 ): Promise<Pick<TradeSignal, "tokenIn" | "tokenOut" | "amountIn" | "amountOut" | "venue"> | null> {

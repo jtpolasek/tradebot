@@ -2,7 +2,7 @@ import { createPublicClient, http } from "viem";
 import { mainnet, base } from "viem/chains";
 import PQueue from "p-queue";
 import { createLogger, fromBaseUnits, isQuoteAsset, NATIVE_TOKEN_PLACEHOLDER, WETH } from "@tradebot/core";
-import type { EventBus, RawTxEvent, TradeSignal, ChainId } from "@tradebot/core";
+import type { EventBus, RawTxEvent, TradeSignal, ChainId, EvmChainId } from "@tradebot/core";
 import type { Db } from "@tradebot/store";
 import { getActiveWallets } from "@tradebot/store";
 import { TokenMetadataResolver } from "./tokenMetadata.js";
@@ -374,7 +374,7 @@ function extractV4PoolId(event: RawTxEvent): string | undefined {
   return v4Logs[0]!.topics[1]?.toLowerCase();
 }
 
-export function classifySide(chain: ChainId, tokenInAddr: string, tokenOutAddr: string): Side {
+export function classifySide(chain: EvmChainId, tokenInAddr: string, tokenOutAddr: string): Side {
   const inIsQuote = isQuoteAsset(chain, tokenInAddr) || tokenInAddr === "";
   const outIsQuote = isQuoteAsset(chain, tokenOutAddr) || tokenOutAddr === "";
 

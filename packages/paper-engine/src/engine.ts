@@ -1,7 +1,7 @@
 import { randomUUID } from "crypto";
 import PQueue from "p-queue";
-import { CHAIN_IDS, WETH } from "@tradebot/core";
-import type { ChainId, TradeSignal, PaperFill, TokenRef } from "@tradebot/core";
+import { CHAIN_IDS, WETH, isEvmChain } from "@tradebot/core";
+import type { ChainId, EvmChainId, TradeSignal, PaperFill, TokenRef } from "@tradebot/core";
 import type { Config, EventBus } from "@tradebot/core";
 import type { Db } from "@tradebot/store";
 import {
@@ -97,21 +97,21 @@ export class PaperEngine {
   // positions from their signals. Refreshed on the settings timer.
   private autoCopyDisabled = new Set<string>();
   private readonly markPrices = new Map<string, number>();
-  private readonly nativeUsd: Record<ChainId, number> = { eth: 0, base: 0 };
+  private readonly nativeUsd: Record<EvmChainId, number> = { eth: 0, base: 0 };
 
-  private readonly rpcClients: Record<ChainId, RpcClient>;
+  private readonly rpcClients: Record<EvmChainId, RpcClient>;
 
   constructor(
     private readonly db: Db,
     private readonly bus: EventBus,
     private readonly cfg: Config,
-    rpcClients: RpcClient | Record<ChainId, RpcClient>,
+    rpcClients: RpcClient | Record<EvmChainId, RpcClient>,
     private readonly weights: WeightProvider = constantWeights,
   ) {
     // Accept either a single client (legacy/tests) or a per-chain map.
     this.rpcClients =
       "eth" in rpcClients && "base" in rpcClients
-        ? (rpcClients as Record<ChainId, RpcClient>)
+        ? (rpcClients as Record<EvmChainId, RpcClient>)
         : { eth: rpcClients as RpcClient, base: rpcClients as RpcClient };
     this.cashUsd = cfg.PAPER_STARTING_CASH_USD;
     this.portfolio = { cashUsd: this.cashUsd, realizedPnlUsd: 0, feesPaidUsd: 0 };
@@ -125,6 +125,17 @@ export class PaperEngine {
       ALLOW_FALLBACK_PRICE_BUYS: cfg.ALLOW_FALLBACK_PRICE_BUYS,
       MAX_SPOT_TWAP_DIVERGENCE_BPS: cfg.MAX_SPOT_TWAP_DIVERGENCE_BPS,
     };
+  }
+
+  /**
+   * Narrow a signal/position chain to an EVM chain before touching the AMM pricing/RPC maps. The
+   * engine only ever processes EVM trades — the decoder emits EVM-only signals and the candidate
+   * copy path is guarded against non-EVM chains in the API — so reaching here with a non-EVM chain
+   * is a programming error; throwing (caught by the queue) is safer than indexing with undefined.
+   */
+  private evm(chain: ChainId): EvmChainId {
+    if (isEvmChain(chain)) return chain;
+    throw new Error(`paper engine received unsupported non-EVM chain: ${chain}`);
   }
 
   async start(): Promise<void> {
@@ -251,7 +262,7 @@ export class PaperEngine {
 
   /** Cache the native (WETH) USD price per chain so proportional sizing can value ETH-quoted trades. */
   private async refreshNativePrices(): Promise<void> {
-    for (const chain of ["eth", "base"] as ChainId[]) {
+    for (const chain of ["eth", "base"] as EvmChainId[]) {
       try {
         const price = await getUsdPrice(chain, WETH[chain], this.rpcClients[chain]);
         if (price && price > 0) this.nativeUsd[chain] = price;
@@ -329,7 +340,7 @@ export class PaperEngine {
       tokenOutAddress: signal.tokenOut.address,
       tokenOutAmountHuman: rawToHumanNumber(signal.amountOut, signal.tokenOut.decimals),
     };
-    const notional = estimateSourceNotionalUsd(candidate, this.nativeUsd[signal.chain] ?? 0);
+    const notional = estimateSourceNotionalUsd(candidate, this.nativeUsd[this.evm(signal.chain)] ?? 0);
     return Number.isFinite(notional) && notional > 0 ? notional : null;
   }
 
@@ -471,7 +482,7 @@ export class PaperEngine {
     let liquidityUsd: number | null = null;
     let liquidityWarnings: string[] = [];
     try {
-      const liquidity = await getLiquidityUsdResult(signal.chain, token.address, this.rpcClients[signal.chain], marketHint);
+      const liquidity = await getLiquidityUsdResult(this.evm(signal.chain), token.address, this.rpcClients[this.evm(signal.chain)], marketHint);
       liquidityUsd = liquidity?.liquidityUsd ?? null;
       liquidityWarnings = liquidity?.warnings ?? [];
     } catch {
@@ -489,7 +500,7 @@ export class PaperEngine {
     // Get price
     let price: PriceResult | null = null;
     try {
-      price = await getUsdPriceResult(signal.chain, token.address, this.rpcClients[signal.chain], marketHint);
+      price = await getUsdPriceResult(this.evm(signal.chain), token.address, this.rpcClients[this.evm(signal.chain)], marketHint);
     } catch {
       price = null;
     }
@@ -871,7 +882,7 @@ export class PaperEngine {
   }
 
   private async resolveQuoteUsdPrice(quoteToken: TokenRef): Promise<number> {
-    const price = await getUsdPrice(quoteToken.chain, quoteToken.address, this.rpcClients[quoteToken.chain]);
+    const price = await getUsdPrice(this.evm(quoteToken.chain), quoteToken.address, this.rpcClients[this.evm(quoteToken.chain)]);
     return price ?? 0;
   }
 
@@ -1101,7 +1112,7 @@ export class PaperEngine {
     if (prov.side === "buy") {
       let liquidityUsd: number | null = null;
       try {
-        const liquidity = await getLiquidityUsdResult(confirmed.chain, token.address, this.rpcClients[confirmed.chain], hint);
+        const liquidity = await getLiquidityUsdResult(this.evm(confirmed.chain), token.address, this.rpcClients[this.evm(confirmed.chain)], hint);
         liquidityUsd = liquidity?.liquidityUsd ?? null;
       } catch {
         liquidityUsd = null;
@@ -1113,7 +1124,7 @@ export class PaperEngine {
     // Recompute price at confirmation time
     let price: PriceResult | null = null;
     try {
-      price = await getUsdPriceResult(confirmed.chain, token.address, this.rpcClients[confirmed.chain], hint);
+      price = await getUsdPriceResult(this.evm(confirmed.chain), token.address, this.rpcClients[this.evm(confirmed.chain)], hint);
     } catch { /* keep null */ }
     const newPrice = price?.priceUsd ?? 0;
 
@@ -1338,7 +1349,7 @@ function classifyLiquidityTier(liquidityUsd: number | null): LiquidityTier {
   return "longtail";
 }
 
-function quoteTokenFor(chain: ChainId): TokenRef {
+function quoteTokenFor(chain: EvmChainId): TokenRef {
   return chain === "eth"
     ? { chain, address: "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", symbol: "USDC", decimals: 6 }
     : { chain, address: "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913", symbol: "USDC", decimals: 6 };

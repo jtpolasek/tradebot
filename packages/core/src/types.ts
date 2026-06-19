@@ -1,4 +1,13 @@
-export type ChainId = "eth" | "base";
+/**
+ * Chains the EVM AMM hot path can price on-chain (Uniswap/Aerodrome pool math, Chainlink, 0x).
+ * Every `Record<EvmChainId, …>` map below is read only by the EVM watcher/decoder/pricing/engine,
+ * so keeping it separate from `ChainId` proves at compile time that a non-EVM chain (Polymarket on
+ * Polygon) can never index one — and spares us from fabricating placeholder addresses for it.
+ */
+export type EvmChainId = "eth" | "base";
+
+/** Every chain we record trades for. `polygon` is watch+record only (Polymarket); never AMM-priced. */
+export type ChainId = EvmChainId | "polygon";
 
 export interface TrackedWallet {
   id: string;
@@ -11,7 +20,8 @@ export interface TrackedWallet {
 }
 
 export interface RawTxEvent {
-  chain: ChainId;
+  /** Raw on-chain tx events are only produced by the EVM watchers — never a non-EVM chain. */
+  chain: EvmChainId;
   source: "mempool" | "confirmed";
   txHash: string;
   from: string;

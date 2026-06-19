@@ -1,5 +1,5 @@
 import { parseAbiItem, keccak256, toBytes } from "viem";
-import type { ChainId } from "@tradebot/core";
+import type { EvmChainId } from "@tradebot/core";
 
 export const VENUE_ABIS = {
   UNISWAP_V2_SWAP: parseAbiItem(
@@ -35,7 +35,7 @@ export const WETH_DEPOSIT_TOPIC = topicHash("Deposit(address,uint256)");
 export const WETH_WITHDRAWAL_TOPIC = topicHash("Withdrawal(address,uint256)");
 
 // Known factory/singleton addresses for pool-origin verification
-export const KNOWN_FACTORIES: Record<ChainId, { v2?: string; v3?: string; aerodromeCl?: string; v4PoolManager?: string }> = {
+export const KNOWN_FACTORIES: Record<EvmChainId, { v2?: string; v3?: string; aerodromeCl?: string; v4PoolManager?: string }> = {
   eth: {
     v2: "0x5c69bee701ef814a2b6a3edd4b1652cb9cc5aa6f",
     v3: "0x1f98431c8ad98523631ae4a59f267346ea31f984",

@@ -1,5 +1,5 @@
 import { decodeEventLog, parseAbi } from "viem";
-import type { RawTxEvent, TradeSignal, ChainId } from "@tradebot/core";
+import type { RawTxEvent, TradeSignal, EvmChainId } from "@tradebot/core";
 import { KNOWN_FACTORIES, VENUE_ABIS, VENUE_TOPIC_MAP, TRANSFER_TOPIC } from "./venues.js";
 import type { TokenMetadataResolver } from "./tokenMetadata.js";
 
@@ -13,7 +13,7 @@ type ReadContractClient = {
   }) => Promise<unknown>;
 };
 
-export type StrategyAClients = Partial<Record<ChainId, ReadContractClient>>;
+export type StrategyAClients = Partial<Record<EvmChainId, ReadContractClient>>;
 
 /** Fields Strategy A derives from a single swap. `poolId` is set for Uniswap V4 only. */
 type DecodedSwap = Pick<
@@ -288,7 +288,7 @@ function transferAmount(log: Log): bigint {
 }
 
 async function verifyV2Pool(
-  chain: ChainId,
+  chain: EvmChainId,
   poolAddress: string,
   token0: string,
   token1: string,
@@ -314,7 +314,7 @@ async function verifyV2Pool(
 }
 
 async function verifyV3Pool(
-  chain: ChainId,
+  chain: EvmChainId,
   poolAddress: string,
   token0: string,
   token1: string,

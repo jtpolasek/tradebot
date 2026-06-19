@@ -1,0 +1,156 @@
+import { describe, it, expect, vi, beforeEach } from "vitest";
+
+// Mock the store so the watcher tests never touch a real DB.
+const { insertSignal, upsertToken, upsertLastBlock, getActiveWallets } = vi.hoisted(() => ({
+  insertSignal: vi.fn(async () => "signal-id"),
+  upsertToken: vi.fn(async () => undefined),
+  upsertLastBlock: vi.fn(async () => undefined),
+  getActiveWallets: vi.fn(async () => [] as { id: string; address: string }[]),
+}));
+vi.mock("@tradebot/store", () => ({ insertSignal, upsertToken, upsertLastBlock, getActiveWallets }));
+
+import { fetchTrades, PolymarketTradeSchema, type PolymarketTrade } from "./client.js";
+import { tradeToCandidateSignal, PolymarketWatcher, POLYGON_USDC } from "./watcher.js";
+
+const BASE = "https://data-api.polymarket.com";
+
+function sampleTrade(over: Partial<PolymarketTrade> = {}): PolymarketTrade {
+  return {
+    proxyWallet: "0x1111111111111111111111111111111111111111",
+    side: "BUY",
+    asset: "71321045679252212594626385532706912750332728571942532289631379312455583992563",
+    conditionId: "0xcond",
+    size: 100,
+    price: 0.62,
+    timestamp: 1_700_000_000,
+    title: "Will X happen by July?",
+    slug: "will-x-happen",
+    eventSlug: "will-x-happen-event",
+    outcome: "Yes",
+    outcomeIndex: 0,
+    transactionHash: "0xabc123",
+    ...over,
+  };
+}
+
+function jsonResponse(body: unknown, status = 200): Response {
+  return { ok: status >= 200 && status < 300, status, json: async () => body } as Response;
+}
+
+describe("PolymarketTradeSchema", () => {
+  it("parses a valid trade payload", () => {
+    const parsed = PolymarketTradeSchema.parse(sampleTrade());
+    expect(parsed.asset).toContain("713210");
+    expect(parsed.side).toBe("BUY");
+  });
+
+  it("rejects a malformed payload (missing transactionHash)", () => {
+    const bad = { ...sampleTrade() } as Record<string, unknown>;
+    delete bad["transactionHash"];
+    expect(() => PolymarketTradeSchema.parse(bad)).toThrow();
+  });
+});
+
+describe("fetchTrades", () => {
+  it("requests the trades endpoint with the user and parses the result", async () => {
+    const fetchImpl = vi.fn(async () => jsonResponse([sampleTrade()]));
+    const trades = await fetchTrades(BASE, "0xLeader", { limit: 50, fetchImpl: fetchImpl as unknown as typeof fetch });
+    expect(trades).toHaveLength(1);
+    const calledUrl = String((fetchImpl.mock.calls[0] as unknown[])[0]);
+    expect(calledUrl).toContain("/trades?user=0xLeader");
+    expect(calledUrl).toContain("limit=50");
+  });
+
+  it("retries on HTTP 429 then succeeds", async () => {
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(null, 429))
+      .mockResolvedValueOnce(jsonResponse([sampleTrade()]));
+    const trades = await fetchTrades(BASE, "0xLeader", { fetchImpl: fetchImpl as unknown as typeof fetch });
+    expect(trades).toHaveLength(1);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  }, 10_000);
+
+  it("throws on a non-429 error status", async () => {
+    const fetchImpl = vi.fn(async () => jsonResponse(null, 500));
+    await expect(
+      fetchTrades(BASE, "0xLeader", { fetchImpl: fetchImpl as unknown as typeof fetch })
+    ).rejects.toThrow(/500/);
+  });
+});
+
+describe("tradeToCandidateSignal", () => {
+  it("maps a BUY: USDC in, outcome shares out (1e6 convention)", () => {
+    const sig = tradeToCandidateSignal(sampleTrade({ side: "BUY", size: 100, price: 0.62 }), "wallet-1");
+    expect(sig.chain).toBe("polygon");
+    expect(sig.venue).toBe("polymarket");
+    expect(sig.side).toBe("buy");
+    expect(sig.decodeStatus).toBe("candidate");
+    expect(sig.walletId).toBe("wallet-1");
+    expect(sig.tokenIn.address).toBe(POLYGON_USDC);
+    expect(sig.tokenOut.address).toBe(sampleTrade().asset);
+    expect(sig.tokenOut.symbol).toBe("Yes");
+    // usdc = 100 * 0.62 * 1e6 = 62_000_000 ; shares = 100 * 1e6 = 100_000_000
+    expect(sig.amountIn).toBe(62_000_000n);
+    expect(sig.amountOut).toBe(100_000_000n);
+    expect(sig.confirmedAt).toBe(1_700_000_000 * 1000);
+    expect(sig.reason).toContain("Will X happen by July?");
+    expect(sig.reason).toContain("polymarket.com/event/will-x-happen-event");
+  });
+
+  it("maps a SELL: outcome shares in, USDC out", () => {
+    const sig = tradeToCandidateSignal(sampleTrade({ side: "SELL", outcome: "No", size: 50, price: 0.4 }), "wallet-1");
+    expect(sig.side).toBe("sell");
+    expect(sig.tokenIn.address).toBe(sampleTrade().asset);
+    expect(sig.tokenIn.symbol).toBe("No");
+    expect(sig.tokenOut.address).toBe(POLYGON_USDC);
+    expect(sig.amountIn).toBe(50_000_000n); // shares
+    expect(sig.amountOut).toBe(20_000_000n); // 50 * 0.4 * 1e6
+  });
+});
+
+describe("PolymarketWatcher", () => {
+  beforeEach(() => {
+    insertSignal.mockClear();
+    upsertToken.mockClear();
+    upsertLastBlock.mockClear();
+    getActiveWallets.mockClear();
+  });
+
+  it("getHealth() reports the polygon poller shape", () => {
+    const w = new PolymarketWatcher({ db: {} as never, pollMs: 1000, baseUrl: BASE });
+    const h = w.getHealth();
+    expect(h.chain).toBe("polygon");
+    expect(h.usingFallback).toBe(false);
+    expect(h.backfillCount).toBe(0);
+    expect(h.walletCount).toBe(0);
+  });
+
+  it("records each new trade once across re-polls (high-water cursor)", async () => {
+    getActiveWallets.mockResolvedValue([{ id: "wallet-1", address: "0xLeader" }]);
+    const fetchImpl = vi.fn(async () => jsonResponse([sampleTrade()]));
+    const w = new PolymarketWatcher({ db: {} as never, pollMs: 1000, baseUrl: BASE, fetchImpl: fetchImpl as unknown as typeof fetch });
+
+    // Manually drive ticks (don't start timers).
+    await (w as unknown as { loadWallets: () => Promise<void> }).loadWallets();
+    await w.tick();
+    await w.tick();
+
+    // Same trade returned twice, but the cursor stops the second insert.
+    expect(insertSignal).toHaveBeenCalledTimes(1);
+    // Both outcome + USDC token labels upserted for the one recorded trade.
+    expect(upsertToken).toHaveBeenCalledTimes(2);
+    expect(w.getHealth().connectionState).toBe("connected");
+  });
+
+  it("marks the poller degraded when a fetch fails", async () => {
+    getActiveWallets.mockResolvedValue([{ id: "wallet-1", address: "0xLeader" }]);
+    const fetchImpl = vi.fn(async () => { throw new Error("network down"); });
+    const w = new PolymarketWatcher({ db: {} as never, pollMs: 1000, baseUrl: BASE, fetchImpl: fetchImpl as unknown as typeof fetch });
+    await (w as unknown as { loadWallets: () => Promise<void> }).loadWallets();
+    await w.tick();
+    expect(insertSignal).not.toHaveBeenCalled();
+    expect(w.getHealth().connectionState).toBe("reconnecting");
+    expect(w.getHealth().connectFailures).toBe(1);
+  });
+});

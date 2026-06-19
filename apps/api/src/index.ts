@@ -2,7 +2,7 @@ import Fastify from "fastify";
 import wsPlugin from "@fastify/websocket";
 import { z } from "zod";
 import { BrainWeightProvider, runScorerJob } from "@tradebot/brain";
-import { config, normalizeAddressInput, deriveHealth, estimateCuBudget, type HealthInput, type HealthThresholds } from "@tradebot/core";
+import { config, normalizeAddressInput, deriveHealth, estimateCuBudget, isEvmChain, type HealthInput, type HealthThresholds } from "@tradebot/core";
 import { createPublicClient, webSocket } from "viem";
 import { mainnet, base as baseChain } from "viem/chains";
 import {
@@ -81,7 +81,7 @@ app.get("/wallets", async (_req, reply) => {
 });
 
 const PostWalletBody = z.object({
-  chain: z.enum(["eth", "base"]),
+  chain: z.enum(["eth", "base", "polygon"]),
   address: z.string().min(1),
   label: z.string().min(1),
 });
@@ -162,6 +162,11 @@ app.post("/candidates/:id/copy", async (req, reply) => {
   const signal = await getSignalById(db, id);
   if (!signal || signal.decodeStatus !== "candidate") {
     return reply.code(404).send({ error: "Candidate not found" });
+  }
+  // Record-only chains (Polymarket on Polygon) have no AMM pricing/engine path — copying one would
+  // feed a non-EVM signal into the paper engine. Block it here; the UI hides Copy for these too.
+  if (!isEvmChain(signal.chain)) {
+    return reply.code(400).send({ error: `Copy is not supported for ${signal.venue} (${signal.chain}) candidates — record only` });
   }
   if (signal.reviewStatus === "dismissed" || signal.reviewStatus === "copied" || signal.reviewStatus === "copying") {
     return reply.code(409).send({ error: `Candidate is already ${signal.reviewStatus}` });
@@ -306,7 +311,11 @@ app.delete("/settings/:key", async (req, reply) => {
 
 const healthThresholds: HealthThresholds = {
   heartbeatStaleSec: config.HEARTBEAT_STALE_SEC,
-  chainStaleSecByChain: { eth: config.CHAIN_STALE_SEC_ETH, base: config.CHAIN_STALE_SEC_BASE },
+  chainStaleSecByChain: {
+    eth: config.CHAIN_STALE_SEC_ETH,
+    base: config.CHAIN_STALE_SEC_BASE,
+    polygon: config.CHAIN_STALE_SEC_POLYGON,
+  },
   rssSoftLimitBytes: config.RSS_SOFT_LIMIT_MB * 1024 * 1024,
 };
 
@@ -334,9 +343,10 @@ app.get("/metrics", async (_req, reply) => {
   const report = deriveHealth(input, Date.now(), healthThresholds);
   // Approximate Alchemy CU budget per chain, derived from the live wallet count in the
   // heartbeat (see @tradebot/core cuBudget.ts for assumptions).
-  const cuBudget = (input.heartbeat?.payload.chains ?? []).map((c) =>
-    estimateCuBudget({ chain: c.chain, walletCount: c.walletCount })
-  );
+  // Only EVM chains hit Alchemy; the Polymarket poller has no CU budget.
+  const cuBudget = (input.heartbeat?.payload.chains ?? [])
+    .filter((c) => isEvmChain(c.chain))
+    .map((c) => estimateCuBudget({ chain: isEvmChain(c.chain) ? c.chain : "eth", walletCount: c.walletCount }));
   reply.send({ status: report.status, checks: report.checks, cuBudget, input });
 });
 

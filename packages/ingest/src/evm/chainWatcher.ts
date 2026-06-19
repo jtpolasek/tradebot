@@ -8,7 +8,7 @@ import {
   BACKFILL_CHUNK_BY_CHAIN,
   BACKFILL_ADDRESS_CHUNK_BY_CHAIN,
   MAX_BACKFILL_BLOCKS_BY_CHAIN,
-  type ChainId,
+  type EvmChainId,
   type RawTxEvent,
   type EventBus,
   type ChainWatcherHealth,
@@ -79,7 +79,7 @@ type Client = {
 const BLOCK_TS_CACHE_MAX = 2_000;
 
 export interface ChainWatcherOptions {
-  chain: ChainId;
+  chain: EvmChainId;
   primaryWsUrl: string;
   fallbackWsUrl?: string;
   db: Db;
@@ -88,7 +88,7 @@ export interface ChainWatcherOptions {
 }
 
 export class ChainWatcher {
-  private readonly chain: ChainId;
+  private readonly chain: EvmChainId;
   private readonly primaryWsUrl: string;
   private readonly fallbackWsUrl: string | undefined;
   private readonly db: Db;

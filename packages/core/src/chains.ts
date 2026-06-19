@@ -1,16 +1,22 @@
-import type { ChainId, TokenRef } from "./types.js";
+import type { ChainId, EvmChainId, TokenRef } from "./types.js";
 
 export const CHAIN_IDS = {
   eth: 1,
   base: 8453,
+  polygon: 137,
 } as const;
 
-export const WETH: Record<ChainId, string> = {
+/** Narrows a `ChainId` to an `EvmChainId` so callers can guard before touching AMM-only maps. */
+export function isEvmChain(chain: ChainId): chain is EvmChainId {
+  return chain === "eth" || chain === "base";
+}
+
+export const WETH: Record<EvmChainId, string> = {
   eth: "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
   base: "0x4200000000000000000000000000000000000006",
 };
 
-export const QUOTE_ASSETS: Record<ChainId, string[]> = {
+export const QUOTE_ASSETS: Record<EvmChainId, string[]> = {
   eth: [
     "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", // USDC
     "0xdac17f958d2ee523a2206206994597c13d831ec7", // USDT
@@ -26,18 +32,18 @@ export const QUOTE_ASSETS: Record<ChainId, string[]> = {
 
 export const NATIVE_TOKEN_PLACEHOLDER = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
 
-export function isQuoteAsset(chain: ChainId, address: string): boolean {
+export function isQuoteAsset(chain: EvmChainId, address: string): boolean {
   const addr = address.toLowerCase();
   return addr === NATIVE_TOKEN_PLACEHOLDER || QUOTE_ASSETS[chain].includes(addr);
 }
 
-export function wethRef(chain: ChainId): TokenRef {
+export function wethRef(chain: EvmChainId): TokenRef {
   const decimals = 18;
   const symbol = "WETH";
   return { chain, address: WETH[chain], symbol, decimals };
 }
 
-export const CHAINLINK_ETH_USD: Record<ChainId, string> = {
+export const CHAINLINK_ETH_USD: Record<EvmChainId, string> = {
   eth: "0x5f4ec3df9cbd43714fe2740f5e3616155c5b8419",
   base: "0x71041dddad3595f9ced3dccfbe3d1f4b0a16bb70",
 };

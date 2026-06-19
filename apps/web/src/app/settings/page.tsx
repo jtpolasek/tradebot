@@ -149,6 +149,7 @@ export default function SettingsPage() {
             <select value={walletForm.chain} onChange={(e) => setWalletForm({ ...walletForm, chain: e.target.value })}>
               <option value="eth">Ethereum</option>
               <option value="base">Base</option>
+              <option value="polygon">Polygon (Polymarket)</option>
             </select>
           </div>
           <div className="field">

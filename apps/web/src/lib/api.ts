@@ -71,6 +71,7 @@ export function tokenTitle(token: DisplayToken): string {
 function explorerBase(chain: string | undefined): string | null {
   if (chain === "base") return "https://basescan.org";
   if (chain === "eth") return "https://etherscan.io";
+  if (chain === "polygon") return "https://polygonscan.com";
   return null;
 }
 

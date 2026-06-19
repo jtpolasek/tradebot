@@ -1,6 +1,6 @@
 import { hexToString } from "viem";
 import { NATIVE_TOKEN_PLACEHOLDER } from "@tradebot/core";
-import type { ChainId } from "@tradebot/core";
+import type { EvmChainId } from "@tradebot/core";
 import type { Db } from "@tradebot/store";
 import { getToken, upsertToken } from "@tradebot/store";
 import { createLogger } from "@tradebot/core";
@@ -28,10 +28,10 @@ export class TokenMetadataResolver {
 
   constructor(
     private readonly db: Db,
-    private readonly clients: Record<ChainId, MulticallClient>
+    private readonly clients: Record<EvmChainId, MulticallClient>
   ) {}
 
-  async resolve(chain: ChainId, address: string): Promise<TokenMeta> {
+  async resolve(chain: EvmChainId, address: string): Promise<TokenMeta> {
     const normalized = address.toLowerCase();
 
     if (!normalized || normalized === NATIVE_TOKEN_PLACEHOLDER) return ETH_META;
@@ -55,7 +55,7 @@ export class TokenMetadataResolver {
     return meta;
   }
 
-  private async fetchOnChain(chain: ChainId, address: string): Promise<TokenMeta> {
+  private async fetchOnChain(chain: EvmChainId, address: string): Promise<TokenMeta> {
     const client = this.clients[chain];
     const addr = address as `0x${string}`;
 

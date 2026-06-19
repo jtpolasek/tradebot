@@ -143,14 +143,17 @@ export default function CandidatesPage() {
                     >
                       Dismiss
                     </button>
-                    <button
-                      className="button"
-                      type="button"
-                      disabled={!canAct || busyId === candidate.id}
-                      onClick={() => void act(candidate.id, "copy")}
-                    >
-                      Copy
-                    </button>
+                    {/* Polymarket candidates are record-only — no AMM pricing/engine path to copy into. */}
+                    {candidate.venue !== "polymarket" && (
+                      <button
+                        className="button"
+                        type="button"
+                        disabled={!canAct || busyId === candidate.id}
+                        onClick={() => void act(candidate.id, "copy")}
+                      >
+                        Copy
+                      </button>
+                    )}
                   </div>
                 </div>
               </div>

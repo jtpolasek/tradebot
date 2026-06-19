@@ -1,5 +1,5 @@
-import { createLogger, fromBaseUnits, NATIVE_TOKEN_PLACEHOLDER, WETH } from "@tradebot/core";
-import type { ChainId } from "@tradebot/core";
+import { createLogger, fromBaseUnits, isEvmChain, NATIVE_TOKEN_PLACEHOLDER, WETH } from "@tradebot/core";
+import type { EvmChainId } from "@tradebot/core";
 import type { Db } from "@tradebot/store";
 import {
   getActiveWallets,
@@ -26,7 +26,7 @@ const logger = createLogger("brain");
 // Loose structural RpcClient interface — avoids viem type-identity errors across packages.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type RpcClient = { readContract: (args: any) => Promise<any> };
-type RpcClients = Record<ChainId, RpcClient>;
+type RpcClients = Record<EvmChainId, RpcClient>;
 type QuotePriceCache = Map<string, number>;
 type LatestMarkLookup = typeof latestMark;
 type QuotePriceLookup = typeof getUsdPrice;
@@ -91,7 +91,7 @@ export function scoreResultAgainstCohort(
   return { score, weight };
 }
 
-function normalizeQuoteAddress(chain: ChainId, address: string): string {
+function normalizeQuoteAddress(chain: EvmChainId, address: string): string {
   const addr = address.toLowerCase();
   return addr === "" || addr === NATIVE_TOKEN_PLACEHOLDER ? WETH[chain] : addr;
 }
@@ -106,7 +106,7 @@ export async function resolveQuoteUsdPrice({
   quotePriceLookup = getUsdPrice,
 }: {
   db: Db;
-  chain: ChainId;
+  chain: EvmChainId;
   address: string;
   rpcClient?: RpcClient;
   cache?: QuotePriceCache;
@@ -156,6 +156,9 @@ async function signalsToTradeRows(
   const rows: TradeRow[] = [];
 
   for (const sig of signals) {
+    // Decoded signals are EVM-only (Polymarket trades are candidates, excluded above), but the
+    // row's chain is typed ChainId — guard so the AMM pricing/RPC maps are only indexed by EVM.
+    if (!isEvmChain(sig.chain)) continue;
     const nonQuoteAddress = sig.side === "buy" ? sig.tokenOut.address : sig.tokenIn.address;
     const quoteAddress = sig.side === "buy" ? sig.tokenIn.address : sig.tokenOut.address;
     const rawQty = sig.side === "buy" ? sig.amountOut : sig.amountIn;
@@ -313,6 +316,8 @@ async function runAdaptationJob(db: Db, rpcClients?: RpcClients): Promise<Map<st
     const liquidityCache = new Map<string, number | null>();
     const fillRecords: FillRecord[] = [];
     for (const f of fills) {
+      // Copied fills are EVM-only; guard so the AMM liquidity/RPC maps are only indexed by EVM.
+      if (!isEvmChain(f.chain)) continue;
       const mark = await latestMark(db, f.chain, f.tokenAddress);
       const liquidityUsd = await getAdaptationLiquidityUsd(f.chain, f.tokenAddress, rpcClients, liquidityCache);
       fillRecords.push({
@@ -352,7 +357,7 @@ async function runAdaptationJob(db: Db, rpcClients?: RpcClients): Promise<Map<st
 }
 
 async function getAdaptationLiquidityUsd(
-  chain: ChainId,
+  chain: EvmChainId,
   tokenAddress: string,
   rpcClients: RpcClients | undefined,
   cache: Map<string, number | null>

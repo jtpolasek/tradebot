@@ -6,7 +6,8 @@
 
 ## Current Phase
 
-All planned phases are **COMPLETE**. The system is fully built and running.
+Core planned phases are **COMPLETE**. Current work is in post-phase operational hardening for the
+Polymarket/Polygon path and the review workflow.
 
 | Phase | Status | Commit |
 |---|---|---|
@@ -21,13 +22,35 @@ All planned phases are **COMPLETE**. The system is fully built and running.
 | Health + metrics endpoint | COMPLETE | `361460b` |
 | Mempool fast path | COMPLETE | `465296c` |
 | Polymarket watch + record | COMPLETE | `ff75180` |
+| Polymarket record-only fixes | COMPLETE | `9ef36b9` |
+| Polymarket candidate market links | COMPLETE | `096c33d` |
+| Polymarket pagination on warm cursor | COMPLETE | `abfe4d3` |
+| Candidate review queue filters | COMPLETE | `cd67e21` |
+| Polymarket poll observability | COMPLETE | `d6b0770` |
+| Candidate triage summary | COMPLETE | `064069a` |
+
+Latest implementation commit on `main`:
+- `064069a feat: add candidate triage summary`
 
 **Phase 7+ (Solana adapter, ML) — DO NOT BUILD unless user explicitly asks.**
 
-Recent follow-up fixes (`9ef36b9`):
-- Dashboard `/metrics` route proxies raw JSON metrics from the API; `/status` is the human UI.
-- Runner/decoder now filter non-EVM wallets out of EVM decode paths; Polymarket remains record-only.
-- Settings page shows Polygon wallets as `record-only` and hides their auto-copy toggle.
+Recent follow-up work:
+- `9ef36b9`:
+  Dashboard `/metrics` route proxies raw JSON metrics from the API; `/status` is the human UI.
+  Runner/decoder filter non-EVM wallets out of EVM decode paths; Polymarket remains record-only.
+  Settings page shows Polygon wallets as `record-only` and hides their auto-copy toggle.
+- `096c33d`:
+  Candidate rows now carry `external_url`; Polymarket candidates link directly to the market page.
+- `abfe4d3`:
+  Warm-cursor Polymarket polling paginates past the first page and handles same-timestamp trades without dropping them.
+- `cd67e21`:
+  `/candidates` supports `chain`, `venue`, and `status` filters; the review UI exposes those filters.
+- `d6b0770`:
+  Added persisted `polymarket_poll_state`, watcher cursor rehydration on restart, `/metrics` Polymarket poll health, and a Polymarket poller table on `/status`.
+- `064069a`:
+  Added `GET /candidates/summary`, a store-level open candidate triage aggregate, and an `/candidates`
+  summary panel that groups open candidates by chain/venue/status, highlights stuck states, and click-filters
+  the review queue.
 
 ---
 
@@ -67,19 +90,24 @@ The script: starts Postgres, waits for `pg_isready`, runs migrations, then launc
 - `schema.ts`, `db.ts`, `migrate.ts`
 - `repositories/wallets.ts` — `getAllWallets`, `getActiveWallets`, `insertWallet`, `setWalletActive`, `getWalletById`
 - `repositories/chainState.ts`, `repositories/tokens.ts`, `repositories/priceMarks.ts` — `latestMark`
-- `repositories/signals.ts` — `insertSignal`, `upsertSignal`, `getSignalById`, `getRecentSignals`
+- `repositories/signals.ts` — `insertSignal`, `upsertSignal`, `getSignalById`, `getRecentSignals`, `getCandidateSignals`, `getCandidateTriageSummary`
 - `repositories/paperFills.ts` — `insertFill`, `updateFill`, `voidFill`, `getFill`, `getRecentFills`
 - `repositories/positions.ts` — `upsertPosition`, `getPosition`, `getOpenPositions`, `closePosition`
 - `repositories/portfolioSnapshots.ts` — `insertSnapshot`, `latestSnapshot`, `getRecentSnapshots`
 - `repositories/leaderStats.ts` — `getAllLeaderStats`, `getLeaderStatsByWallet`
 - `repositories/adaptationLog.ts` — `insertAdaptationLog`, `getAdaptationLogs`
 - `repositories/settings.ts` — `getAllSettings`, `getSetting`, `setSetting`
+- `repositories/runnerHealth.ts` — heartbeat + freshness helpers
+- `repositories/polymarketPollState.ts` — persisted Polymarket cursor/poll health
 - `index.ts`, `drizzle/`, `drizzle.config.ts`
 
 ### packages/ingest/src/
 - `backoff.ts`, `dedupe.ts`, `recorder.ts`
 - `evm/topics.ts`, `evm/chainWatcher.ts`
 - `polymarket/client.ts`, `polymarket/watcher.ts` — record-only Polymarket Data API poller for Polygon wallets
+  - warm cursor pagination across >100 new trades
+  - persisted cursor reload from DB on restart
+  - per-wallet poll success/failure telemetry
 - `index.ts`
 
 ### packages/decoder/src/
@@ -107,7 +135,7 @@ The script: starts Postgres, waits for `pg_isready`, runs migrations, then launc
 - `index.ts` — Fastify 5 + `@fastify/websocket` server
   - `GET/POST/DELETE /wallets`
   - `GET /signals?since=&limit=`, `GET /fills?since=&limit=`
-  - `GET /candidates`, `POST /candidates/:id/copy`, `POST /candidates/:id/dismiss`
+  - `GET /candidates`, `GET /candidates/summary`, `POST /candidates/:id/copy`, `POST /candidates/:id/dismiss`
   - `GET /portfolio` (snapshot + positions with marks + 288 snapshots)
   - `GET /leaders` (all windows: 7d/30d/all)
   - `GET /adaptations?limit=`, `GET/PATCH /settings`
@@ -122,21 +150,21 @@ The script: starts Postgres, waits for `pg_isready`, runs migrations, then launc
 - `app/portfolio/page.tsx` — equity curve (lightweight-charts), 4 metric panels, positions table
 - `app/leaders/page.tsx` — 7d/30d/all toggle, sortable stats table
 - `app/feed/page.tsx` — WebSocket live feed + 24h REST history, auto-reconnect
-- `app/candidates/page.tsx` — candidate review queue; Polymarket candidates are record-only
-- `app/status/page.tsx` — human-readable health, chain watcher, and CU-budget view
+- `app/candidates/page.tsx` — candidate review queue with global triage summary; Polymarket candidates are record-only
+- `app/status/page.tsx` — human-readable health, chain watcher, Polymarket poller, and CU-budget view
 - `app/metrics/route.ts` — raw JSON metrics proxy for direct `/metrics` access on the dashboard host
 - `app/settings/page.tsx` — wallet CRUD, settings editor, adaptation log; Polygon wallets show record-only
 
-### Test counts (195 total — all passing, non-Docker)
+### Test counts (351 total — all passing with Docker test DB)
 | Package | Tests |
 |---|---|
-| `@tradebot/core` | 14 |
-| `@tradebot/store` | 5 (need Docker test DB on port 5434) |
-| `@tradebot/ingest` | 28 |
-| `@tradebot/decoder` | 49 |
-| `@tradebot/pricing` | 12 |
-| `@tradebot/paper-engine` | 40 |
-| `@tradebot/brain` | 44 |
+| `@tradebot/core` | 36 |
+| `@tradebot/store` | 31 (needs Docker test DB on port 5434) |
+| `@tradebot/ingest` | 58 |
+| `@tradebot/decoder` | 68 |
+| `@tradebot/pricing` | 27 |
+| `@tradebot/paper-engine` | 73 |
+| `@tradebot/brain` | 55 |
 | `@tradebot/runner` | 1 |
 | `@tradebot/api` | 1 |
 | `@tradebot/web` | 1 |
@@ -170,6 +198,21 @@ Packages with install scripts must be listed under `allowBuilds` in `pnpm-worksp
 
 ### Next.js on Windows
 Do NOT use `output: "standalone"` in `next.config.ts` — causes `EPERM: operation not permitted, symlink` on Windows. Standalone output is only needed for Docker deploys.
+
+### `/metrics` vs `/status`
+- `/metrics` is expected to return raw JSON for machine/ops use.
+- `/status` is the human-readable operational dashboard.
+- If someone says "`/metrics` looks like JSON text", that is expected.
+
+### Polymarket operational model
+- Polygon/Polymarket is **record-only**. Never route those signals into AMM pricing or the paper engine auto-copy path.
+- Candidate copy is blocked in the API for non-EVM chains, and the UI hides Copy for Polymarket rows.
+- The Polymarket watcher now persists per-wallet cursor + poll state in `polymarket_poll_state`; this is both restart recovery and observability, not just UI data.
+
+### Candidate triage summary
+- `/candidates/summary` returns global open-candidate counts by chain, venue, and review status; it is intentionally independent of the active `/candidates` filters.
+- `null` legacy `review_status` values are normalized to `pending` at the repository boundary.
+- Aggregate timestamp fields from Postgres can arrive as strings; parse them at the repository boundary before returning millisecond timestamps.
 
 ### vitest.config.ts pattern (all packages)
 ```ts
@@ -242,3 +285,21 @@ LOG_LEVEL=info
 7. Commit at every milestone
 8. If a command fails twice, stop and report
 9. Stop and say so when Docker is needed and not running
+
+---
+
+## What Is Next
+
+Recommended next slice:
+- Add **operator recovery controls for stuck candidate review states**.
+- Best target: let the operator reset or fail stale `copy-requested` / `copying` candidates from `/candidates`, then retry or dismiss them through the existing flow.
+
+Why this next:
+- The triage summary now makes stuck states visible, but `copy-requested` and `copying` rows still cannot be cleared from the UI.
+- Recovery controls keep the review workflow operational without introducing a new trading subsystem.
+- This keeps work aligned with the existing product surface instead of jumping prematurely into a new subsystem.
+
+Defer unless explicitly requested:
+- Solana adapter
+- ML/learned strategy work
+- New third-party dependencies

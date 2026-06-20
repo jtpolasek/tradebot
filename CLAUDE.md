@@ -13,6 +13,15 @@ Paper-trading copy-trader (ETH + Base). **`PLAN.md` is the single source of trut
 - If a command fails twice with the same error, stop and report instead of retrying.
 - Ask before adding any dependency not listed in PLAN.md §2.
 
+## Multi-model workflow (GLM drafts, Opus reviews)
+
+Two assistants work this repo: **Opus 4.8** (`claude`) and **GLM 5.2** (`ccr code`, via OpenRouter). They share no conversation context — **all handoff happens through git**.
+
+- **GLM 5.2 drafts.** Use it for boilerplate, test scaffolding, repetitive refactors, first-draft features, and large-file/log summaries. It must **not** be the final word on anything touching the non-negotiable rules above (money simulation, key handling, pricing/engine accounting).
+- **Opus reviews.** Architecture, ADRs, debugging subtle bugs, security, and the final `/code-review` gate before merge are Opus's job. Opus verifies GLM's work against the non-negotiable rules before it lands on `main`.
+- **Handoff = a branch + a clear commit.** Name drafting branches `glm/<short-description>`; review/fix branches `opus/<short-description>`. Never have both models editing the same files simultaneously — split by branch or task.
+- **Nothing merges to `main` without `pnpm build && pnpm test` green** (already a non-negotiable) **and** an Opus review pass on the diff.
+
 ## Status
 
 - Phase 0: **complete** (2026-06-10). 20 tests passing, committed 2f760ed.

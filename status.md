@@ -29,9 +29,10 @@ Polymarket/Polygon path and the review workflow.
 | Polymarket poll observability | COMPLETE | `d6b0770` |
 | Candidate triage summary | COMPLETE | `064069a` |
 | Candidate recovery controls | COMPLETE | `056f354` |
+| Candidate review API tests | COMPLETE | `a62d45a` |
 
 Latest implementation commit on `main`:
-- `056f354 feat: recover stuck candidate reviews`
+- `a62d45a test: cover candidate review API routes`
 
 **Phase 7+ (Solana adapter, ML) — DO NOT BUILD unless user explicitly asks.**
 
@@ -55,6 +56,9 @@ Recent follow-up work:
 - `056f354`:
   Added guarded candidate review transitions, API recovery routes for stale `copy-requested` / `copying`
   candidates, runner compare-and-set status updates, and `/candidates` Reset / Mark failed controls.
+- `a62d45a`:
+  Extracted the API into an injectable app factory, added route-level candidate review API tests against
+  the test DB, and verified auth, query validation, summary aggregation, and copy/dismiss/reset/fail flows.
 
 ---
 
@@ -136,7 +140,8 @@ The script: starts Postgres, waits for `pg_isready`, runs migrations, then launc
 - `index.ts` — ETH/Base ChainWatchers + EVM-only Decoder + PolymarketWatcher + replay harness + startMarksJob + PaperEngine + brain scorer + guarded candidate copy worker
 
 ### apps/api/src/
-- `index.ts` — Fastify 5 + `@fastify/websocket` server
+- `app.ts` — injectable Fastify app factory used by runtime boot and route-level tests
+- `index.ts` — runtime boot entrypoint for Fastify 5 + `@fastify/websocket` server
   - `GET/POST/DELETE /wallets`
   - `GET /signals?since=&limit=`, `GET /fills?since=&limit=`
   - `GET /candidates`, `GET /candidates/summary`, `POST /candidates/:id/copy`, `POST /candidates/:id/dismiss`, `POST /candidates/:id/reset`, `POST /candidates/:id/fail`
@@ -159,7 +164,7 @@ The script: starts Postgres, waits for `pg_isready`, runs migrations, then launc
 - `app/metrics/route.ts` — raw JSON metrics proxy for direct `/metrics` access on the dashboard host
 - `app/settings/page.tsx` — wallet CRUD, settings editor, adaptation log; Polygon wallets show record-only
 
-### Test counts (352 total — all passing with Docker test DB)
+### Test counts (359 total — all passing with Docker test DB)
 | Package | Tests |
 |---|---|
 | `@tradebot/core` | 36 |
@@ -170,7 +175,7 @@ The script: starts Postgres, waits for `pg_isready`, runs migrations, then launc
 | `@tradebot/paper-engine` | 73 |
 | `@tradebot/brain` | 55 |
 | `@tradebot/runner` | 1 |
-| `@tradebot/api` | 1 |
+| `@tradebot/api` | 8 |
 | `@tradebot/web` | 1 |
 
 ---
@@ -222,6 +227,11 @@ Do NOT use `output: "standalone"` in `next.config.ts` — causes `EPERM: operati
 - Operators can reset stale `copy-requested` / `copying` candidates back to `pending` or mark them `copy-failed` from `/candidates`.
 - Recovery uses `transitionCandidateReviewStatus` compare-and-set semantics. The runner also claims and finalizes manual copies with guarded transitions so a late worker result does not overwrite an operator reset/fail action.
 - Recovery controls do not make Polymarket copyable; Polygon/Polymarket remains record-only after reset.
+
+### API test harness
+- `apps/api/src/app.ts` is the injectable app factory; `apps/api/src/index.ts` is now a thin runtime boot wrapper.
+- Candidate review routes are covered with Fastify `inject()` tests against `TEST_DATABASE_URL`, with stream polling disabled in the test app to keep the harness deterministic.
+- The API tests currently cover auth, candidate list/query validation, triage summary, and copy/dismiss/reset/fail transitions.
 
 ### vitest.config.ts pattern (all packages)
 ```ts
@@ -300,13 +310,13 @@ LOG_LEVEL=info
 ## What Is Next
 
 Recommended next slice:
-- Add **route-level tests for the candidate review API**.
-- Best target: extract an injectable Fastify app/server factory, then cover `/candidates` list/summary plus copy, dismiss, reset, and fail conflict paths against the test DB.
+- Extend the **API route-level test harness to wallets and operational endpoints**.
+- Best target: add `inject()` coverage for `/wallets`, `/health`, `/metrics`, and selected `/settings` flows now that `app.ts` exists.
 
 Why this next:
-- The store transition behavior is tested, but `apps/api` still has only a placeholder test.
-- Recovery routes are operator-facing controls; route coverage would catch auth, zod query parsing, status conflicts, and serialization regressions.
-- This hardens the existing review workflow without introducing a new trading subsystem.
+- The app factory is in place, so adding more API route coverage is now cheap and low-risk.
+- `/health`, `/metrics`, and wallet CRUD are operator-facing surfaces with real branching and auth/CORS behavior but still thin test coverage.
+- This keeps hardening on the existing operational surface instead of opening a new subsystem.
 
 Defer unless explicitly requested:
 - Solana adapter

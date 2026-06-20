@@ -22,6 +22,8 @@ Two assistants work this repo: **Opus 4.8** (`claude`) and **GLM 5.2** (`ccr cod
 - **Handoff = a branch + a clear commit.** Name drafting branches `glm/<short-description>`; review/fix branches `opus/<short-description>`. Never have both models editing the same files simultaneously — split by branch or task.
 - **Nothing merges to `main` without `pnpm build && pnpm test` green** (already a non-negotiable) **and** an Opus review pass on the diff.
 
+**Which model to use (rule of thumb):** default to **GLM** for "just do it" work (tests, scaffolding, refactors, first drafts, summaries); switch to **Opus** for "be careful here" work (money/keys/pricing accounting, phase design, subtle bugs, pre-merge review). If unsure which bucket a task is in, that hesitation is the signal — use Opus. Inside an Opus session, Opus should flag cheap grunt work as GLM-suitable; anything GLM produces that touches the non-negotiable rules goes through an Opus `/code-review` pass before it merges.
+
 ## Status
 
 - Phase 0: **complete** (2026-06-10). 20 tests passing, committed 2f760ed.

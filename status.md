@@ -28,9 +28,10 @@ Polymarket/Polygon path and the review workflow.
 | Candidate review queue filters | COMPLETE | `cd67e21` |
 | Polymarket poll observability | COMPLETE | `d6b0770` |
 | Candidate triage summary | COMPLETE | `064069a` |
+| Candidate recovery controls | COMPLETE | `056f354` |
 
 Latest implementation commit on `main`:
-- `064069a feat: add candidate triage summary`
+- `056f354 feat: recover stuck candidate reviews`
 
 **Phase 7+ (Solana adapter, ML) — DO NOT BUILD unless user explicitly asks.**
 
@@ -51,6 +52,9 @@ Recent follow-up work:
   Added `GET /candidates/summary`, a store-level open candidate triage aggregate, and an `/candidates`
   summary panel that groups open candidates by chain/venue/status, highlights stuck states, and click-filters
   the review queue.
+- `056f354`:
+  Added guarded candidate review transitions, API recovery routes for stale `copy-requested` / `copying`
+  candidates, runner compare-and-set status updates, and `/candidates` Reset / Mark failed controls.
 
 ---
 
@@ -90,7 +94,7 @@ The script: starts Postgres, waits for `pg_isready`, runs migrations, then launc
 - `schema.ts`, `db.ts`, `migrate.ts`
 - `repositories/wallets.ts` — `getAllWallets`, `getActiveWallets`, `insertWallet`, `setWalletActive`, `getWalletById`
 - `repositories/chainState.ts`, `repositories/tokens.ts`, `repositories/priceMarks.ts` — `latestMark`
-- `repositories/signals.ts` — `insertSignal`, `upsertSignal`, `getSignalById`, `getRecentSignals`, `getCandidateSignals`, `getCandidateTriageSummary`
+- `repositories/signals.ts` — `insertSignal`, `upsertSignal`, `getSignalById`, `getRecentSignals`, `getCandidateSignals`, `getCandidateTriageSummary`, `getCopyRequestedCandidates`, `setCandidateReviewStatus`, `transitionCandidateReviewStatus`
 - `repositories/paperFills.ts` — `insertFill`, `updateFill`, `voidFill`, `getFill`, `getRecentFills`
 - `repositories/positions.ts` — `upsertPosition`, `getPosition`, `getOpenPositions`, `closePosition`
 - `repositories/portfolioSnapshots.ts` — `insertSnapshot`, `latestSnapshot`, `getRecentSnapshots`
@@ -129,13 +133,13 @@ The script: starts Postgres, waits for `pg_isready`, runs migrations, then launc
 - `index.ts`
 
 ### apps/runner/src/
-- `index.ts` — ETH/Base ChainWatchers + EVM-only Decoder + PolymarketWatcher + replay harness + startMarksJob + PaperEngine + brain scorer
+- `index.ts` — ETH/Base ChainWatchers + EVM-only Decoder + PolymarketWatcher + replay harness + startMarksJob + PaperEngine + brain scorer + guarded candidate copy worker
 
 ### apps/api/src/
 - `index.ts` — Fastify 5 + `@fastify/websocket` server
   - `GET/POST/DELETE /wallets`
   - `GET /signals?since=&limit=`, `GET /fills?since=&limit=`
-  - `GET /candidates`, `GET /candidates/summary`, `POST /candidates/:id/copy`, `POST /candidates/:id/dismiss`
+  - `GET /candidates`, `GET /candidates/summary`, `POST /candidates/:id/copy`, `POST /candidates/:id/dismiss`, `POST /candidates/:id/reset`, `POST /candidates/:id/fail`
   - `GET /portfolio` (snapshot + positions with marks + 288 snapshots)
   - `GET /leaders` (all windows: 7d/30d/all)
   - `GET /adaptations?limit=`, `GET/PATCH /settings`
@@ -150,16 +154,16 @@ The script: starts Postgres, waits for `pg_isready`, runs migrations, then launc
 - `app/portfolio/page.tsx` — equity curve (lightweight-charts), 4 metric panels, positions table
 - `app/leaders/page.tsx` — 7d/30d/all toggle, sortable stats table
 - `app/feed/page.tsx` — WebSocket live feed + 24h REST history, auto-reconnect
-- `app/candidates/page.tsx` — candidate review queue with global triage summary; Polymarket candidates are record-only
+- `app/candidates/page.tsx` — candidate review queue with global triage summary and stuck-state recovery controls; Polymarket candidates are record-only
 - `app/status/page.tsx` — human-readable health, chain watcher, Polymarket poller, and CU-budget view
 - `app/metrics/route.ts` — raw JSON metrics proxy for direct `/metrics` access on the dashboard host
 - `app/settings/page.tsx` — wallet CRUD, settings editor, adaptation log; Polygon wallets show record-only
 
-### Test counts (351 total — all passing with Docker test DB)
+### Test counts (352 total — all passing with Docker test DB)
 | Package | Tests |
 |---|---|
 | `@tradebot/core` | 36 |
-| `@tradebot/store` | 31 (needs Docker test DB on port 5434) |
+| `@tradebot/store` | 32 (needs Docker test DB on port 5434) |
 | `@tradebot/ingest` | 58 |
 | `@tradebot/decoder` | 68 |
 | `@tradebot/pricing` | 27 |
@@ -213,6 +217,11 @@ Do NOT use `output: "standalone"` in `next.config.ts` — causes `EPERM: operati
 - `/candidates/summary` returns global open-candidate counts by chain, venue, and review status; it is intentionally independent of the active `/candidates` filters.
 - `null` legacy `review_status` values are normalized to `pending` at the repository boundary.
 - Aggregate timestamp fields from Postgres can arrive as strings; parse them at the repository boundary before returning millisecond timestamps.
+
+### Candidate recovery controls
+- Operators can reset stale `copy-requested` / `copying` candidates back to `pending` or mark them `copy-failed` from `/candidates`.
+- Recovery uses `transitionCandidateReviewStatus` compare-and-set semantics. The runner also claims and finalizes manual copies with guarded transitions so a late worker result does not overwrite an operator reset/fail action.
+- Recovery controls do not make Polymarket copyable; Polygon/Polymarket remains record-only after reset.
 
 ### vitest.config.ts pattern (all packages)
 ```ts
@@ -291,13 +300,13 @@ LOG_LEVEL=info
 ## What Is Next
 
 Recommended next slice:
-- Add **operator recovery controls for stuck candidate review states**.
-- Best target: let the operator reset or fail stale `copy-requested` / `copying` candidates from `/candidates`, then retry or dismiss them through the existing flow.
+- Add **route-level tests for the candidate review API**.
+- Best target: extract an injectable Fastify app/server factory, then cover `/candidates` list/summary plus copy, dismiss, reset, and fail conflict paths against the test DB.
 
 Why this next:
-- The triage summary now makes stuck states visible, but `copy-requested` and `copying` rows still cannot be cleared from the UI.
-- Recovery controls keep the review workflow operational without introducing a new trading subsystem.
-- This keeps work aligned with the existing product surface instead of jumping prematurely into a new subsystem.
+- The store transition behavior is tested, but `apps/api` still has only a placeholder test.
+- Recovery routes are operator-facing controls; route coverage would catch auth, zod query parsing, status conflicts, and serialization regressions.
+- This hardens the existing review workflow without introducing a new trading subsystem.
 
 Defer unless explicitly requested:
 - Solana adapter

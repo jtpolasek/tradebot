@@ -1,4 +1,4 @@
-import { eq, and, gte, desc, or, isNull, isNotNull, inArray } from "drizzle-orm";
+import { eq, and, gte, desc, or, isNull, isNotNull, inArray, sql } from "drizzle-orm";
 import type { Db } from "../db.js";
 import { tradeSignals } from "../schema.js";
 import { NATIVE_TOKEN_PLACEHOLDER } from "@tradebot/core";
@@ -7,11 +7,25 @@ import { getToken } from "./tokens.js";
 
 export type CandidateReviewStatus = NonNullable<TradeSignal["reviewStatus"]>;
 const openCandidateStatuses: CandidateReviewStatus[] = ["pending", "copy-requested", "copying", "copy-failed"];
+export type OpenCandidateReviewStatus = Extract<CandidateReviewStatus, "pending" | "copy-requested" | "copying" | "copy-failed">;
 export type CandidateSignalStatusFilter = CandidateReviewStatus | "open";
 export type CandidateSignalFilters = {
   chain?: ChainId;
   venue?: string;
   status?: CandidateSignalStatusFilter;
+};
+export type CandidateTriageGroup = {
+  chain: ChainId;
+  venue: string;
+  status: OpenCandidateReviewStatus;
+  count: number;
+  oldestObservedAt: number;
+  newestObservedAt: number;
+};
+export type CandidateTriageSummary = {
+  generatedAt: number;
+  totalOpen: number;
+  groups: CandidateTriageGroup[];
 };
 
 export async function insertSignal(db: Db, signal: TradeSignal): Promise<string> {
@@ -146,6 +160,51 @@ export async function getCandidateSignals(db: Db, limit: number, filters: Candid
     .orderBy(desc(tradeSignals.observedAt))
     .limit(limit);
   return hydrateSignals(db, rows.map(rowToSignal));
+}
+
+export async function getCandidateTriageSummary(db: Db): Promise<CandidateTriageSummary> {
+  const normalizedStatus = sql<OpenCandidateReviewStatus>`coalesce(${tradeSignals.reviewStatus}, 'pending')`;
+  const rows = await db
+    .select({
+      chain: tradeSignals.chain,
+      venue: tradeSignals.venue,
+      status: normalizedStatus,
+      count: sql<number>`count(*)::int`,
+      oldestObservedAt: sql<Date>`min(${tradeSignals.observedAt})`,
+      newestObservedAt: sql<Date>`max(${tradeSignals.observedAt})`,
+    })
+    .from(tradeSignals)
+    .where(and(
+      eq(tradeSignals.decodeStatus, "candidate"),
+      candidateReviewStatusCondition("open"),
+    ))
+    .groupBy(tradeSignals.chain, tradeSignals.venue, normalizedStatus);
+
+  const groups = rows
+    .map((row) => ({
+      chain: row.chain as ChainId,
+      venue: row.venue,
+      status: row.status,
+      count: Number(row.count),
+      oldestObservedAt: timestampMillis(row.oldestObservedAt),
+      newestObservedAt: timestampMillis(row.newestObservedAt),
+    }))
+    .sort((a, b) =>
+      b.count - a.count ||
+      a.chain.localeCompare(b.chain) ||
+      a.venue.localeCompare(b.venue) ||
+      a.status.localeCompare(b.status)
+    );
+
+  return {
+    generatedAt: Date.now(),
+    totalOpen: groups.reduce((sum, group) => sum + group.count, 0),
+    groups,
+  };
+}
+
+function timestampMillis(value: Date | string): number {
+  return value instanceof Date ? value.getTime() : new Date(value).getTime();
 }
 
 function candidateReviewStatusCondition(status: CandidateSignalStatusFilter) {

@@ -15,6 +15,7 @@ import {
   getSignalById,
   getRecentSignals,
   getCandidateSignals,
+  getCandidateTriageSummary,
   getCopyRequestedCandidates,
   setCandidateReviewStatus,
   getV4MarketHintForToken,
@@ -237,6 +238,73 @@ describe("candidate review repositories", () => {
 
     const dismissed = await getCandidateSignals(db as Parameters<typeof getCandidateSignals>[0], 10, { status: "dismissed" });
     expect(dismissed.map((signal) => signal.id)).toEqual([dismissedId]);
+  });
+
+  it("summarizes open candidate triage by chain, venue, and status", async () => {
+    const older = new Date("2026-06-19T12:00:00.000Z").getTime();
+    const newer = new Date("2026-06-19T12:05:00.000Z").getTime();
+    await insertTestSignal({ observedAt: older, confirmedAt: older });
+    const legacyPendingId = await insertTestSignal({
+      tokenOut: { chain: "eth", address: "0x6666666666666666666666666666666666666666", symbol: "LEGACY", decimals: 18 },
+      observedAt: newer,
+      confirmedAt: newer,
+    });
+    const requestedId = await insertTestSignal({
+      tokenOut: { chain: "eth", address: "0x7777777777777777777777777777777777777777", symbol: "REQ", decimals: 18 },
+      venue: "uniswap-v4",
+      observedAt: older + 1_000,
+      confirmedAt: older + 1_000,
+    });
+    const failedId = await insertTestSignal({
+      chain: "polygon",
+      venue: "polymarket",
+      tokenIn: { chain: "polygon", address: "0x0000000000000000000000000000000000000001", symbol: "USDC", decimals: 6 },
+      tokenOut: { chain: "polygon", address: "0x0000000000000000000000000000000000000002", symbol: "YES", decimals: 6 },
+      observedAt: older + 2_000,
+      confirmedAt: older + 2_000,
+    });
+    const dismissedId = await insertTestSignal({
+      tokenOut: { chain: "eth", address: "0x8888888888888888888888888888888888888888", symbol: "DONE", decimals: 18 },
+      observedAt: older + 3_000,
+      confirmedAt: older + 3_000,
+    });
+
+    await db
+      .update(schema.tradeSignals)
+      .set({ reviewStatus: null })
+      .where(eq(schema.tradeSignals.id, legacyPendingId));
+    await setCandidateReviewStatus(db as Parameters<typeof setCandidateReviewStatus>[0], requestedId, "copy-requested");
+    await setCandidateReviewStatus(db as Parameters<typeof setCandidateReviewStatus>[0], failedId, "copy-failed");
+    await setCandidateReviewStatus(db as Parameters<typeof setCandidateReviewStatus>[0], dismissedId, "dismissed");
+
+    const summary = await getCandidateTriageSummary(db as Parameters<typeof getCandidateTriageSummary>[0]);
+
+    expect(summary.totalOpen).toBe(4);
+    expect(summary.groups).toHaveLength(3);
+    expect(summary.groups).toContainEqual({
+      chain: "eth",
+      venue: "balance-delta",
+      status: "pending",
+      count: 2,
+      oldestObservedAt: older,
+      newestObservedAt: newer,
+    });
+    expect(summary.groups).toContainEqual({
+      chain: "eth",
+      venue: "uniswap-v4",
+      status: "copy-requested",
+      count: 1,
+      oldestObservedAt: older + 1_000,
+      newestObservedAt: older + 1_000,
+    });
+    expect(summary.groups).toContainEqual({
+      chain: "polygon",
+      venue: "polymarket",
+      status: "copy-failed",
+      count: 1,
+      oldestObservedAt: older + 2_000,
+      newestObservedAt: older + 2_000,
+    });
   });
 
   it("moves candidates into the copy-requested queue", async () => {

@@ -15,6 +15,7 @@ import {
   getWalletById,
   getRecentSignals,
   getCandidateSignals,
+  getCandidateTriageSummary,
   getSignalById,
   setCandidateReviewStatus,
   getRecentFills,
@@ -167,6 +168,11 @@ app.get("/candidates", async (req, reply) => {
   if (q.data.venue) filters.venue = q.data.venue;
   const signals = await getCandidateSignals(db, q.data.limit, filters);
   reply.send({ candidates: signals.map(serializeSignal) });
+});
+
+app.get("/candidates/summary", async (_req, reply) => {
+  const summary = await getCandidateTriageSummary(db);
+  reply.send({ summary });
 });
 
 app.post("/candidates/:id/copy", async (req, reply) => {

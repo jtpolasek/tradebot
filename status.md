@@ -31,6 +31,7 @@ Polymarket/Polygon path and the review workflow.
 | Candidate recovery controls | COMPLETE | `056f354` |
 | Candidate review API tests | COMPLETE | `a62d45a` |
 | Core API read-route tests | COMPLETE | `58a2376` |
+| Dynamic API route tests (`POST /leaders/refresh`, `WS /stream`) | IN PROGRESS (uncommitted) | working tree |
 
 Latest implementation commit on `main`:
 - `58a2376 test: cover core API read routes`
@@ -65,6 +66,11 @@ Recent follow-up work:
   `/health`, `/metrics`, `/settings`, `/signals`, `/fills`, `/portfolio`, `/analytics`, `/leaders`,
   and `/adaptations`, including CORS/auth behavior, bigint serialization, metadata hydration, and
   aggregate portfolio metrics.
+- working tree (uncommitted):
+  Extended API route-level coverage for the remaining dynamic routes: `POST /leaders/refresh` now
+  has auth and single-flight tests, and `WS /stream` now has websocket auth rejection, heartbeat
+  ping, and trade-signal / paper-fill broadcast coverage using Fastify's in-process websocket
+  harness.
 
 ---
 
@@ -170,7 +176,7 @@ The script: starts Postgres, waits for `pg_isready`, runs migrations, then launc
 - `app/metrics/route.ts` — raw JSON metrics proxy for direct `/metrics` access on the dashboard host
 - `app/settings/page.tsx` — wallet CRUD, settings editor, adaptation log; Polygon wallets show record-only
 
-### Test counts (374 total — all passing with Docker test DB)
+### Test counts (377 total — all passing with Docker test DB)
 | Package | Tests |
 |---|---|
 | `@tradebot/core` | 36 |
@@ -181,7 +187,7 @@ The script: starts Postgres, waits for `pg_isready`, runs migrations, then launc
 | `@tradebot/paper-engine` | 73 |
 | `@tradebot/brain` | 55 |
 | `@tradebot/runner` | 1 |
-| `@tradebot/api` | 23 |
+| `@tradebot/api` | 26 |
 | `@tradebot/web` | 1 |
 
 ---
@@ -316,13 +322,13 @@ LOG_LEVEL=info
 ## What Is Next
 
 Recommended next slice:
-- Extend the remaining **dynamic API route coverage**.
-- Best target: add focused tests for `POST /leaders/refresh` and the `/stream` websocket path, including auth expectations and basic event/heartbeat behavior.
+- Commit the API hardening slice, then extend failure-path coverage for the same dynamic surface.
+- Best target: add focused tests for `POST /leaders/refresh` scorer-failure behavior and stream lifecycle cleanup / idle behavior.
 
 Why this next:
-- The read-heavy API surface is now covered; the main uncovered behaviors are the scorer trigger and live stream path.
-- Those routes have more lifecycle and concurrency edges than the CRUD/read handlers, so they are the next likely regression points.
-- This continues hardening the existing operational surface instead of opening a new subsystem.
+- The baseline dynamic-route coverage is now in place; the remaining likely regressions are failure and teardown edges.
+- That continues operational hardening without opening a new subsystem or violating the Solana/ML deferral.
+- `status.md` now reflects uncommitted working-tree progress, so the next clean milestone is to commit it and close the remaining dynamic negative paths.
 
 Defer unless explicitly requested:
 - Solana adapter

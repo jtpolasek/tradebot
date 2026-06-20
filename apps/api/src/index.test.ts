@@ -1,6 +1,15 @@
 import { randomUUID } from "crypto";
-import { beforeAll, afterAll, beforeEach, afterEach, describe, expect, it } from "vitest";
+import { beforeAll, afterAll, beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 import type { InjectOptions } from "fastify";
+
+vi.mock("@tradebot/brain", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@tradebot/brain")>();
+  return {
+    ...actual,
+    runScorerJob: vi.fn(async () => {}),
+  };
+});
+
 import {
   adaptationLog,
   chainState,
@@ -29,7 +38,7 @@ import {
   upsertRunnerHealth,
   wallets,
 } from "@tradebot/store";
-import { BrainWeightProvider } from "@tradebot/brain";
+import { BrainWeightProvider, runScorerJob } from "@tradebot/brain";
 import { createApiApp } from "./app.js";
 
 const url = process.env["TEST_DATABASE_URL"];
@@ -96,6 +105,8 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  vi.useRealTimers();
+  vi.clearAllMocks();
   await app?.close();
   app = null;
 });
@@ -356,6 +367,119 @@ describe("health and metrics API", () => {
       cursorKeyCount: 2,
     }));
   });
+});
+
+describe("leader refresh and stream API", () => {
+  it("requires auth for leader refresh and de-dupes concurrent refresh runs", async () => {
+    const unauthenticated = await app!.inject({ method: "POST", url: "/leaders/refresh" });
+    expect(unauthenticated.statusCode).toBe(401);
+    expect(json<{ error: string }>({ body: unauthenticated.body }).error).toBe("Unauthorized");
+
+    const leaderRefreshGate: { resolve: () => void } = {
+      resolve: () => {
+        throw new Error("leader refresh mock did not enter the in-flight state");
+      },
+    };
+    const inFlightRun = new Promise<void>((resolve) => {
+      leaderRefreshGate.resolve = resolve;
+    });
+    const runScorerJobMock = vi.mocked(runScorerJob);
+    runScorerJobMock.mockImplementation(() => inFlightRun);
+
+    const first = authed("POST", "/leaders/refresh");
+    const second = authed("POST", "/leaders/refresh");
+
+    await vi.waitFor(() => {
+      expect(runScorerJobMock).toHaveBeenCalledTimes(1);
+    });
+    expect(runScorerJobMock).toHaveBeenCalledWith(db, expect.any(BrainWeightProvider), undefined);
+
+    leaderRefreshGate.resolve();
+
+    const [firstRes, secondRes] = await Promise.all([first, second]);
+    expect(firstRes.statusCode).toBe(200);
+    expect(secondRes.statusCode).toBe(200);
+    expect(json<{ ok: boolean }>(firstRes)).toEqual({ ok: true });
+    expect(json<{ ok: boolean }>(secondRes)).toEqual({ ok: true });
+
+    const thirdRes = await authed("POST", "/leaders/refresh");
+    expect(thirdRes.statusCode).toBe(200);
+    expect(runScorerJobMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("requires auth for the websocket stream and sends heartbeat pings", async () => {
+    await app!.ready();
+    await expect(app!.injectWS("/stream")).rejects.toThrow("Unexpected server response: 401");
+
+    const ws = await app!.injectWS("/stream", {
+      headers: { "x-api-key": testApiConfig.API_KEY },
+    });
+
+    const [pingMessage] = await collectWsMessages(ws, 1, 17_000);
+    expect(pingMessage).toEqual({ type: "ping" });
+
+    ws.terminate();
+  }, 20_000);
+
+  it("broadcasts recent trade-signal and paper-fill events over the websocket stream", async () => {
+    await app?.close();
+    app = await createApiApp({
+      db: db as Parameters<typeof createApiApp>[0]["db"],
+      apiConfig: testApiConfig,
+      healthThresholds,
+      rpcClients: undefined,
+      manualWeightProvider: new BrainWeightProvider(),
+      enableStreamPolling: true,
+    });
+    await app.ready();
+
+    const ws = await app.injectWS("/stream", {
+      headers: { "x-api-key": testApiConfig.API_KEY },
+    });
+
+    const baseTs = Date.now();
+    const signalId = await insertDecodedSignal({
+      observedAt: baseTs + 1_000,
+      confirmedAt: baseTs + 1_000,
+    });
+    await insertFill(db as Parameters<typeof insertFill>[0], {
+      id: randomUUID(),
+      signalId,
+      decidedAt: baseTs + 1_500,
+      decision: "copied",
+      side: "buy",
+      token: { chain: "eth", address: "0x1111111111111111111111111111111111111111", symbol: "TEST", decimals: 18 },
+      quoteToken: { chain: "eth", address: "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", symbol: "USDC", decimals: 6 },
+      qty: 1,
+      priceUsd: 1,
+      notionalUsd: 1,
+      feeUsd: 0.01,
+      slippageBps: 3,
+      latencyMs: 25,
+      provisional: false,
+    });
+
+    const received = await collectWsMessages(ws, 2, 7_000, (message) => message.type !== "ping");
+
+    expect(received.map((message) => message.type)).toEqual(["trade-signal", "paper-fill"]);
+    expect(received[0]).toEqual(expect.objectContaining({
+      type: "trade-signal",
+      data: expect.objectContaining({
+        id: signalId,
+        amountIn: "100000000",
+        amountOut: "1000000000000000000",
+      }),
+    }));
+    expect(received[1]).toEqual(expect.objectContaining({
+      type: "paper-fill",
+      data: expect.objectContaining({
+        signalId,
+        decision: "copied",
+      }),
+    }));
+
+    ws.terminate();
+  }, 10_000);
 });
 
 describe("settings API", () => {
@@ -922,4 +1046,38 @@ async function authed(method: TestMethod, url: string, extraHeaders?: Record<str
 
 function json<T>(res: Pick<InjectResponse, "body">): T {
   return JSON.parse(res.body) as T;
+}
+
+type StreamMessage = { type: string; data?: Record<string, unknown> };
+type MessageSocket = {
+  on: (event: "message", listener: (chunk: Buffer) => void) => void;
+  removeListener: (event: "message", listener: (chunk: Buffer) => void) => void;
+};
+
+function collectWsMessages(
+  ws: MessageSocket,
+  count: number,
+  timeoutMs: number,
+  predicate: (message: StreamMessage) => boolean = () => true,
+): Promise<StreamMessage[]> {
+  return new Promise((resolve, reject) => {
+    const messages: StreamMessage[] = [];
+    const timer = setTimeout(() => {
+      ws.removeListener("message", onMessage);
+      reject(new Error(`Timed out waiting for ${count} websocket messages`));
+    }, timeoutMs);
+
+    const onMessage = (chunk: Buffer) => {
+      const message = JSON.parse(chunk.toString()) as StreamMessage;
+      if (!predicate(message)) return;
+      messages.push(message);
+      if (messages.length >= count) {
+        clearTimeout(timer);
+        ws.removeListener("message", onMessage);
+        resolve(messages);
+      }
+    };
+
+    ws.on("message", onMessage);
+  });
 }

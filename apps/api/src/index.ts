@@ -18,6 +18,7 @@ import {
   getCandidateTriageSummary,
   getSignalById,
   setCandidateReviewStatus,
+  transitionCandidateReviewStatus,
   getRecentFills,
   getOpenPositions,
   getPortfolioAnalytics,
@@ -32,6 +33,7 @@ import {
   getRunnerHealth,
   getChainStatesUpdatedAt,
   getPolymarketPollHealth,
+  type CandidateReviewStatus,
   type CandidateSignalFilters,
 } from "@tradebot/store";
 import { apiConfig } from "./config.js";
@@ -204,6 +206,34 @@ app.post("/candidates/:id/dismiss", async (req, reply) => {
   }
   const updated = await setCandidateReviewStatus(db, id, "dismissed");
   reply.send({ candidate: updated ? serializeSignal(updated) : null });
+});
+
+app.post("/candidates/:id/reset", async (req, reply) => {
+  const { id } = req.params as { id: string };
+  const signal = await getSignalById(db, id);
+  if (!signal || signal.decodeStatus !== "candidate") {
+    return reply.code(404).send({ error: "Candidate not found" });
+  }
+  if (!isRecoverableCandidateStatus(signal.reviewStatus)) {
+    return reply.code(409).send({ error: `Candidate is ${signal.reviewStatus ?? "pending"}; only queued candidates can be reset` });
+  }
+  const updated = await transitionCandidateReviewStatus(db, id, [signal.reviewStatus], "pending");
+  if (!updated) return reply.code(409).send({ error: "Candidate status changed; refresh and retry" });
+  reply.send({ candidate: serializeSignal(updated) });
+});
+
+app.post("/candidates/:id/fail", async (req, reply) => {
+  const { id } = req.params as { id: string };
+  const signal = await getSignalById(db, id);
+  if (!signal || signal.decodeStatus !== "candidate") {
+    return reply.code(404).send({ error: "Candidate not found" });
+  }
+  if (!isRecoverableCandidateStatus(signal.reviewStatus)) {
+    return reply.code(409).send({ error: `Candidate is ${signal.reviewStatus ?? "pending"}; only queued candidates can be marked failed` });
+  }
+  const updated = await transitionCandidateReviewStatus(db, id, [signal.reviewStatus], "copy-failed");
+  if (!updated) return reply.code(409).send({ error: "Candidate status changed; refresh and retry" });
+  reply.send({ candidate: serializeSignal(updated) });
 });
 
 // ── Fills ─────────────────────────────────────────────────────────────────────
@@ -425,6 +455,12 @@ function serializeSignal(s: Awaited<ReturnType<typeof getRecentSignals>>[number]
     amountIn: s.amountIn.toString(),
     amountOut: s.amountOut.toString(),
   };
+}
+
+function isRecoverableCandidateStatus(
+  status: CandidateReviewStatus | null | undefined
+): status is Extract<CandidateReviewStatus, "copy-requested" | "copying"> {
+  return status === "copy-requested" || status === "copying";
 }
 
 // ── Boot ──────────────────────────────────────────────────────────────────────

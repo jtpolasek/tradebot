@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { ExternalLink } from "lucide-react";
+import { CircleX, ExternalLink, RotateCcw } from "lucide-react";
 import { TokenLink } from "@/components/TokenLink";
 import { TxLink } from "@/components/TxLink";
 import { apiFetch, shortAddr, timeAgo } from "@/lib/api";
@@ -129,7 +129,7 @@ export default function CandidatesPage() {
     return () => clearInterval(timer);
   }, [load]);
 
-  async function act(id: string, action: "copy" | "dismiss") {
+  async function act(id: string, action: "copy" | "dismiss" | "reset" | "fail") {
     setBusyId(id);
     setError("");
     try {
@@ -293,7 +293,8 @@ export default function CandidatesPage() {
         <div className="list">
           {candidates.map((candidate) => {
             const status = candidate.reviewStatus ?? "pending";
-            const canAct = status === "pending" || status === "copy-failed";
+            const canReviewAct = status === "pending" || status === "copy-failed";
+            const canRecover = status === "copy-requested" || status === "copying";
             const confidence = candidate.confidence === null ? "n/a" : `${Math.round(candidate.confidence * 100)}%`;
             return (
               <div key={candidate.id} className="card feed-item">
@@ -327,21 +328,44 @@ export default function CandidatesPage() {
                     )}
                   </div>
 
-                  <div className="row compact">
-                    <button
-                      className="button secondary"
-                      type="button"
-                      disabled={!canAct || busyId === candidate.id}
-                      onClick={() => void act(candidate.id, "dismiss")}
-                    >
-                      Dismiss
-                    </button>
+                  <div className="row compact" style={{ flexWrap: "wrap" }}>
+                    {canRecover ? (
+                      <>
+                        <button
+                          className="button secondary"
+                          type="button"
+                          disabled={busyId === candidate.id}
+                          onClick={() => void act(candidate.id, "reset")}
+                        >
+                          <RotateCcw size={14} aria-hidden="true" />
+                          Reset
+                        </button>
+                        <button
+                          className="button danger"
+                          type="button"
+                          disabled={busyId === candidate.id}
+                          onClick={() => void act(candidate.id, "fail")}
+                        >
+                          <CircleX size={14} aria-hidden="true" />
+                          Mark failed
+                        </button>
+                      </>
+                    ) : (
+                      <button
+                        className="button secondary"
+                        type="button"
+                        disabled={!canReviewAct || busyId === candidate.id}
+                        onClick={() => void act(candidate.id, "dismiss")}
+                      >
+                        Dismiss
+                      </button>
+                    )}
                     {/* Polymarket candidates are record-only — no AMM pricing/engine path to copy into. */}
-                    {candidate.venue !== "polymarket" && (
+                    {candidate.venue !== "polymarket" && !canRecover && (
                       <button
                         className="button"
                         type="button"
-                        disabled={!canAct || busyId === candidate.id}
+                        disabled={!canReviewAct || busyId === candidate.id}
                         onClick={() => void act(candidate.id, "copy")}
                       >
                         Copy

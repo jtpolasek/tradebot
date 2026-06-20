@@ -244,6 +244,26 @@ export async function setCandidateReviewStatus(
   return row ? hydrateSignal(db, rowToSignal(row)) : null;
 }
 
+export async function transitionCandidateReviewStatus(
+  db: Db,
+  id: string,
+  fromStatuses: CandidateReviewStatus[],
+  status: CandidateReviewStatus
+): Promise<TradeSignal | null> {
+  if (fromStatuses.length === 0) return null;
+  const rows = await db
+    .update(tradeSignals)
+    .set({ reviewStatus: status })
+    .where(and(
+      eq(tradeSignals.id, id),
+      eq(tradeSignals.decodeStatus, "candidate"),
+      inArray(tradeSignals.reviewStatus, fromStatuses),
+    ))
+    .returning();
+  const row = rows[0];
+  return row ? hydrateSignal(db, rowToSignal(row)) : null;
+}
+
 /**
  * Recover a Uniswap V4 market hint for a held token from any persisted signal that traded it.
  * V4 pools can't be discovered on-chain by token pair, so downstream pricing paths that only have a

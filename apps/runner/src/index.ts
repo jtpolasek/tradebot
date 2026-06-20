@@ -7,7 +7,7 @@ import {
   getOpenPositions,
   latestMark,
   getCopyRequestedCandidates,
-  setCandidateReviewStatus,
+  transitionCandidateReviewStatus,
   getLatestFillForSignal,
   upsertRunnerHealth,
 } from "@tradebot/store";
@@ -184,15 +184,15 @@ function startCandidateCopyJob(db: ReturnType<typeof getDb>, engine: PaperEngine
     void (async () => {
       const candidates = await getCopyRequestedCandidates(db, 10);
       for (const candidate of candidates) {
-        const claimed = await setCandidateReviewStatus(db, candidate.id, "copying");
+        const claimed = await transitionCandidateReviewStatus(db, candidate.id, ["copy-requested"], "copying");
         if (!claimed) continue;
         try {
           await engine.executeManualCandidateCopy({ ...candidate, reviewStatus: "copying" });
           const fill = await getLatestFillForSignal(db, candidate.id);
-          await setCandidateReviewStatus(db, candidate.id, fill?.decision === "copied" ? "copied" : "copy-failed");
+          await transitionCandidateReviewStatus(db, candidate.id, ["copying"], fill?.decision === "copied" ? "copied" : "copy-failed");
         } catch (err) {
           logger.error({ err, signalId: candidate.id }, "manual candidate copy failed");
-          await setCandidateReviewStatus(db, candidate.id, "copy-failed");
+          await transitionCandidateReviewStatus(db, candidate.id, ["copying"], "copy-failed");
         }
       }
     })()

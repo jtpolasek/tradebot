@@ -18,6 +18,7 @@ import {
   getCandidateTriageSummary,
   getCopyRequestedCandidates,
   setCandidateReviewStatus,
+  transitionCandidateReviewStatus,
   getV4MarketHintForToken,
 } from "./signals.js";
 import { insertFill, getRecentFills } from "./paperFills.js";
@@ -315,6 +316,44 @@ describe("candidate review repositories", () => {
     const requested = await getCopyRequestedCandidates(db as Parameters<typeof getCopyRequestedCandidates>[0], 10);
     expect(requested).toHaveLength(1);
     expect(requested[0]?.id).toBe(id);
+  });
+
+  it("guards candidate review status transitions by current status", async () => {
+    const id = await insertTestSignal();
+    await setCandidateReviewStatus(db as Parameters<typeof setCandidateReviewStatus>[0], id, "copy-requested");
+
+    const wrongCurrent = await transitionCandidateReviewStatus(
+      db as Parameters<typeof transitionCandidateReviewStatus>[0],
+      id,
+      ["copying"],
+      "pending",
+    );
+    expect(wrongCurrent).toBeNull();
+    expect((await getSignalById(db as Parameters<typeof getSignalById>[0], id))?.reviewStatus).toBe("copy-requested");
+
+    const claimed = await transitionCandidateReviewStatus(
+      db as Parameters<typeof transitionCandidateReviewStatus>[0],
+      id,
+      ["copy-requested"],
+      "copying",
+    );
+    expect(claimed?.reviewStatus).toBe("copying");
+
+    const staleFinal = await transitionCandidateReviewStatus(
+      db as Parameters<typeof transitionCandidateReviewStatus>[0],
+      id,
+      ["copy-requested"],
+      "copied",
+    );
+    expect(staleFinal).toBeNull();
+
+    const failed = await transitionCandidateReviewStatus(
+      db as Parameters<typeof transitionCandidateReviewStatus>[0],
+      id,
+      ["copying"],
+      "copy-failed",
+    );
+    expect(failed?.reviewStatus).toBe("copy-failed");
   });
 
   it("preserves candidate external URLs", async () => {

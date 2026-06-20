@@ -1,12 +1,19 @@
 import { randomUUID } from "crypto";
 import { beforeAll, afterAll, beforeEach, afterEach, describe, expect, it } from "vitest";
+import type { InjectOptions } from "fastify";
 import {
   adaptationLog,
   chainState,
   closeDb,
   getDb,
+  insertFill,
   insertSignal,
+  insertSnapshot,
   insertWallet,
+  insertPriceMark,
+  upsertLeaderStats,
+  upsertPosition,
+  upsertToken,
   leaderStats,
   paperFills,
   polymarketPollState,
@@ -17,6 +24,9 @@ import {
   settings,
   tokens,
   tradeSignals,
+  upsertLastBlock,
+  upsertPolymarketPollSuccess,
+  upsertRunnerHealth,
   wallets,
 } from "@tradebot/store";
 import { BrainWeightProvider } from "@tradebot/brain";
@@ -41,8 +51,12 @@ const healthThresholds = {
 
 let db: ReturnType<typeof getDb>;
 let app: Awaited<ReturnType<typeof createApiApp>> | null = null;
-type TestMethod = "GET" | "POST";
-type InjectResponse = { statusCode: number; body: string };
+type TestMethod = "GET" | "POST" | "PATCH" | "DELETE";
+type InjectResponse = {
+  statusCode: number;
+  body: string;
+  headers: Record<string, string | string[] | number | undefined>;
+};
 
 beforeAll(async () => {
   db = getDb(url);
@@ -224,6 +238,566 @@ describe("candidate review API", () => {
   });
 });
 
+describe("wallet API", () => {
+  it("lists wallets and adds CORS headers for the configured origin", async () => {
+    const wallet = await insertWallet(db as Parameters<typeof insertWallet>[0], {
+      chain: "eth",
+      address: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      label: "Existing wallet",
+      active: true,
+      autoCopy: true,
+    });
+
+    const res = await authed("GET", "/wallets", { origin: testApiConfig.CORS_ORIGIN });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.headers["access-control-allow-origin"]).toBe(testApiConfig.CORS_ORIGIN);
+    const body = json<{ wallets: Array<{ id: string; label: string }> }>(res);
+    expect(body.wallets).toContainEqual(expect.objectContaining({ id: wallet.id, label: "Existing wallet" }));
+  });
+
+  it("creates, updates, and soft-deletes wallets", async () => {
+    const created = await authed("POST", "/wallets", undefined, {
+      chain: "eth",
+      address: "0xbBbBBBBbbBBBbbbBbbBbbbbBBbBbbbbBbBbbBBbB",
+      label: "New wallet",
+    });
+    expect(created.statusCode).toBe(201);
+    const wallet = json<{ wallet: { id: string; address: string; autoCopy: boolean; active: boolean } }>(created).wallet;
+    expect(wallet.address).toBe("0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+    expect(wallet.autoCopy).toBe(true);
+    expect(wallet.active).toBe(true);
+
+    const updated = await authed("PATCH", `/wallets/${wallet.id}`, undefined, { autoCopy: false });
+    expect(updated.statusCode).toBe(200);
+    expect(json<{ wallet: { autoCopy: boolean } }>(updated).wallet.autoCopy).toBe(false);
+
+    const deleted = await authed("DELETE", `/wallets/${wallet.id}`);
+    expect(deleted.statusCode).toBe(200);
+    expect(json<{ ok: boolean }>(deleted)).toEqual({ ok: true });
+
+    const listed = await authed("GET", "/wallets");
+    expect(json<{ wallets: Array<{ id: string; active: boolean }> }>(listed).wallets).toContainEqual(
+      expect.objectContaining({ id: wallet.id, active: false })
+    );
+  });
+
+  it("rejects invalid wallet input", async () => {
+    const res = await authed("POST", "/wallets", undefined, {
+      chain: "eth",
+      address: "vein",
+      label: "Bad wallet",
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(json<{ error: string }>(res).error).toContain("Enter a valid Ethereum address");
+  });
+});
+
+describe("health and metrics API", () => {
+  it("exposes unauthenticated health and reports down when no heartbeat exists", async () => {
+    const res = await app!.inject({ method: "GET", url: "/health" });
+    expect(res.statusCode).toBe(503);
+    expect(json<{ status: string }>({ body: res.body }).status).toBe("down");
+  });
+
+  it("returns authenticated metrics with heartbeat, CU budget, and polymarket poll detail", async () => {
+    const polygonWallet = await insertWallet(db as Parameters<typeof insertWallet>[0], {
+      chain: "polygon",
+      address: "0x9999999999999999999999999999999999999999",
+      label: "Poly watch",
+      active: true,
+      autoCopy: true,
+    });
+    await upsertLastBlock(db as Parameters<typeof upsertLastBlock>[0], "eth", 20_000_000);
+    await upsertLastBlock(db as Parameters<typeof upsertLastBlock>[0], "base", 30_000_000);
+    await upsertRunnerHealth(db as Parameters<typeof upsertRunnerHealth>[0], {
+      pid: 1234,
+      uptimeSec: 42,
+      rssBytes: 128 * 1024 * 1024,
+      heapUsedBytes: 64 * 1024 * 1024,
+      version: "test-sha",
+      chains: [
+        { chain: "eth", connectionState: "connected", usingFallback: false, lastEventAt: Date.now(), connectFailures: 0, backfillCount: 0, walletCount: 2 },
+        { chain: "base", connectionState: "connected", usingFallback: false, lastEventAt: Date.now(), connectFailures: 0, backfillCount: 0, walletCount: 1 },
+      ],
+    });
+    await upsertPolymarketPollSuccess(db as Parameters<typeof upsertPolymarketPollSuccess>[0], {
+      walletId: polygonWallet.id,
+      lastPolledAt: Date.now(),
+      cursorTimestamp: 1_717_171_717,
+      cursorKeys: ["one", "two"],
+      fetchedCount: 12,
+      recordedCount: 9,
+      duplicateCount: 3,
+      pageCount: 2,
+      durationMs: 250,
+    });
+
+    const res = await authed("GET", "/metrics");
+
+    expect(res.statusCode).toBe(200);
+    const body = json<{
+      status: string;
+      checks: Array<{ name: string; status: string }>;
+      cuBudget: Array<{ chain: string; walletCount: number }>;
+      input: { heartbeat: { payload: { version?: string } } | null; polymarketPolls: Array<{ walletId: string; recordedCount: number; cursorKeyCount: number }> };
+    }>(res);
+    expect(body.status).toBe("ok");
+    expect(body.checks).toContainEqual(expect.objectContaining({ name: "runner", status: "ok" }));
+    expect(body.cuBudget).toEqual(expect.arrayContaining([
+      expect.objectContaining({ chain: "eth", walletCount: 2 }),
+      expect.objectContaining({ chain: "base", walletCount: 1 }),
+    ]));
+    expect(body.input.heartbeat?.payload.version).toBe("test-sha");
+    expect(body.input.polymarketPolls).toContainEqual(expect.objectContaining({
+      walletId: polygonWallet.id,
+      recordedCount: 9,
+      cursorKeyCount: 2,
+    }));
+  });
+});
+
+describe("settings API", () => {
+  it("lists, updates, and deletes settings", async () => {
+    const empty = await authed("GET", "/settings");
+    expect(empty.statusCode).toBe(200);
+    expect(json<{ settings: Record<string, unknown> }>(empty).settings).toEqual({});
+
+    const patched = await authed("PATCH", "/settings", undefined, {
+      key: "min_liquidity_usd",
+      value: 250000,
+    });
+    expect(patched.statusCode).toBe(200);
+    expect(json<{ ok: boolean }>(patched)).toEqual({ ok: true });
+
+    const listed = await authed("GET", "/settings");
+    expect(json<{ settings: Record<string, unknown> }>(listed).settings).toEqual({
+      min_liquidity_usd: 250000,
+    });
+
+    const deleted = await authed("DELETE", "/settings/min_liquidity_usd");
+    expect(deleted.statusCode).toBe(200);
+    expect(json<{ ok: boolean }>(deleted)).toEqual({ ok: true });
+
+    const afterDelete = await authed("GET", "/settings");
+    expect(json<{ settings: Record<string, unknown> }>(afterDelete).settings).toEqual({});
+  });
+
+  it("rejects invalid settings payloads", async () => {
+    const res = await authed("PATCH", "/settings", undefined, { key: "", value: 1 });
+    expect(res.statusCode).toBe(400);
+    expect(json<{ error: string }>(res).error).toMatch(/String must contain at least 1 character/);
+  });
+});
+
+describe("signals and fills API", () => {
+  it("lists recent signals with hydrated token metadata and bigint serialization", async () => {
+    const olderTs = new Date("2026-06-20T09:00:00.000Z").getTime();
+    const newerTs = new Date("2026-06-20T10:00:00.000Z").getTime();
+
+    await seedToken({
+      chain: "eth",
+      address: "0x1010101010101010101010101010101010101010",
+      symbol: "ALPHA",
+      name: "Alpha Token",
+      decimals: 18,
+    });
+
+    await insertDecodedSignal({
+      observedAt: olderTs,
+      confirmedAt: olderTs,
+      tokenOut: { chain: "eth", address: "0x1111111111111111111111111111111111111111", symbol: "OLD", decimals: 18 },
+    });
+    const newestId = await insertDecodedSignal({
+      observedAt: newerTs,
+      confirmedAt: newerTs,
+      tokenOut: { chain: "eth", address: "0x1010101010101010101010101010101010101010", symbol: "", decimals: 18 },
+    });
+
+    const res = await authed("GET", `/signals?since=${new Date(olderTs + 500).toISOString()}&limit=5`);
+
+    expect(res.statusCode).toBe(200);
+    const body = json<{
+      signals: Array<{
+        id: string;
+        amountIn: string;
+        amountOut: string;
+        tokenOut: { symbol: string; name?: string };
+      }>;
+    }>(res);
+    expect(body.signals).toHaveLength(1);
+    expect(body.signals[0]).toEqual(expect.objectContaining({
+      id: newestId,
+      amountIn: "100000000",
+      amountOut: "1000000000000000000",
+      tokenOut: expect.objectContaining({ symbol: "ALPHA", name: "Alpha Token" }),
+    }));
+  });
+
+  it("rejects invalid signals query params", async () => {
+    const res = await authed("GET", "/signals?since=not-a-date");
+    expect(res.statusCode).toBe(400);
+    expect(json<{ error: string }>(res).error).toMatch(/Invalid datetime/);
+  });
+
+  it("lists fills with hydrated token metadata", async () => {
+    const decidedAt = new Date("2026-06-20T11:00:00.000Z").getTime();
+    await seedToken({
+      chain: "eth",
+      address: "0x2020202020202020202020202020202020202020",
+      symbol: "BETA",
+      name: "Beta Token",
+      decimals: 18,
+    });
+    await seedToken({
+      chain: "eth",
+      address: "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+      symbol: "USDC",
+      name: "USD Coin",
+      decimals: 6,
+    });
+    const signalId = await insertDecodedSignal({
+      tokenOut: { chain: "eth", address: "0x2020202020202020202020202020202020202020", symbol: "", decimals: 18 },
+    });
+    await insertFill(db as Parameters<typeof insertFill>[0], {
+      id: randomUUID(),
+      signalId,
+      decidedAt,
+      decision: "copied",
+      side: "buy",
+      token: { chain: "eth", address: "0x2020202020202020202020202020202020202020", symbol: "", decimals: 18 },
+      quoteToken: { chain: "eth", address: "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", symbol: "", decimals: 6 },
+      qty: 12,
+      priceUsd: 1.25,
+      notionalUsd: 15,
+      feeUsd: 0.15,
+      slippageBps: 8,
+      latencyMs: 220,
+      provisional: false,
+      priceSource: "mark",
+      priceVenue: "uniswap-v3",
+      liquidityUsd: 125000,
+    });
+
+    const res = await authed("GET", `/fills?since=${new Date(decidedAt - 1_000).toISOString()}&limit=5`);
+
+    expect(res.statusCode).toBe(200);
+    const body = json<{
+      fills: Array<{
+        decision: string;
+        token: { symbol: string; name?: string };
+        quoteToken: { symbol: string };
+        liquidityUsd?: number;
+        priceVenue?: string;
+      }>;
+    }>(res);
+    expect(body.fills).toHaveLength(1);
+    expect(body.fills[0]).toEqual(expect.objectContaining({
+      decision: "copied",
+      token: expect.objectContaining({ symbol: "BETA", name: "Beta Token" }),
+      quoteToken: expect.objectContaining({ symbol: "USDC" }),
+      liquidityUsd: 125000,
+      priceVenue: "uniswap-v3",
+    }));
+  });
+
+  it("rejects invalid fills query params", async () => {
+    const res = await authed("GET", "/fills?limit=0");
+    expect(res.statusCode).toBe(400);
+    expect(json<{ error: string }>(res).error).toMatch(/Number must be greater than or equal to 1/);
+  });
+});
+
+describe("portfolio, analytics, leaders, and adaptations API", () => {
+  it("returns portfolio snapshots, open positions with marks, and source wallet details", async () => {
+    const wallet = await insertWallet(db as Parameters<typeof insertWallet>[0], {
+      chain: "eth",
+      address: "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd",
+      label: "Lead wallet",
+      active: true,
+      autoCopy: true,
+    });
+    await seedToken({
+      chain: "eth",
+      address: "0x3030303030303030303030303030303030303030",
+      symbol: "GAMMA",
+      name: "Gamma Token",
+      decimals: 18,
+    });
+    await upsertPosition(db as Parameters<typeof upsertPosition>[0], {
+      chain: "eth",
+      tokenAddress: "0x3030303030303030303030303030303030303030",
+      qty: 4,
+      avgCostUsd: 2.5,
+      realizedPnlUsd: 1.25,
+      sourceWalletId: wallet.id,
+    });
+    await insertPriceMark(db as Parameters<typeof insertPriceMark>[0], {
+      chain: "eth",
+      tokenAddress: "0x3030303030303030303030303030303030303030",
+      ts: new Date("2026-06-20T12:00:00.000Z"),
+      priceUsd: 3.75,
+      source: "unit-test",
+    });
+    await insertSnapshot(db as Parameters<typeof insertSnapshot>[0], {
+      ts: new Date("2026-06-20T11:00:00.000Z"),
+      equityUsd: 1000,
+      cashUsd: 700,
+      positionsValueUsd: 300,
+      dailyPnlUsd: 25,
+    });
+    await insertSnapshot(db as Parameters<typeof insertSnapshot>[0], {
+      ts: new Date("2026-06-20T12:00:00.000Z"),
+      equityUsd: 1025,
+      cashUsd: 710,
+      positionsValueUsd: 315,
+      dailyPnlUsd: 30,
+    });
+
+    const res = await authed("GET", "/portfolio");
+
+    expect(res.statusCode).toBe(200);
+    const body = json<{
+      snapshot: { equityUsd: number };
+      positions: Array<{
+        currentPriceUsd: number | null;
+        token?: { symbol: string };
+        sourceWallet: { id: string; label: string } | null;
+      }>;
+      snapshots: Array<{ equityUsd: number }>;
+    }>(res);
+    expect(body.snapshot?.equityUsd).toBe(1025);
+    expect(body.snapshots.map((snapshot) => snapshot.equityUsd)).toEqual([1000, 1025]);
+    expect(body.positions).toContainEqual(expect.objectContaining({
+      currentPriceUsd: 3.75,
+      token: expect.objectContaining({ symbol: "GAMMA" }),
+      sourceWallet: expect.objectContaining({ id: wallet.id, label: "Lead wallet" }),
+    }));
+  });
+
+  it("returns portfolio analytics aggregates", async () => {
+    await seedToken({
+      chain: "eth",
+      address: "0x4040404040404040404040404040404040404040",
+      symbol: "DELTA",
+      name: "Delta Token",
+      decimals: 18,
+    });
+    await db.insert(positions).values([
+      {
+        chain: "eth",
+        tokenAddress: "0x4040404040404040404040404040404040404040",
+        qty: "0",
+        avgCostUsd: "2",
+        openedAt: new Date("2026-06-20T08:00:00.000Z"),
+        closedAt: new Date("2026-06-20T10:00:00.000Z"),
+        realizedPnlUsd: "15",
+      },
+      {
+        chain: "eth",
+        tokenAddress: "0x4040404040404040404040404040404040404040",
+        qty: "5",
+        avgCostUsd: "3",
+        openedAt: new Date("2026-06-20T11:00:00.000Z"),
+        realizedPnlUsd: "-2",
+      },
+    ]);
+
+    const signalId = await insertDecodedSignal({
+      tokenOut: { chain: "eth", address: "0x4040404040404040404040404040404040404040", symbol: "", decimals: 18 },
+    });
+    await insertFill(db as Parameters<typeof insertFill>[0], {
+      id: randomUUID(),
+      signalId,
+      decidedAt: new Date("2026-06-20T11:05:00.000Z").getTime(),
+      decision: "copied",
+      side: "buy",
+      token: { chain: "eth", address: "0x4040404040404040404040404040404040404040", symbol: "", decimals: 18 },
+      quoteToken: { chain: "eth", address: "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", symbol: "USDC", decimals: 6 },
+      qty: 5,
+      priceUsd: 3,
+      notionalUsd: 15,
+      feeUsd: 0.3,
+      slippageBps: 5,
+      latencyMs: 100,
+      provisional: false,
+    });
+    await insertFill(db as Parameters<typeof insertFill>[0], {
+      id: randomUUID(),
+      signalId,
+      decidedAt: new Date("2026-06-20T11:06:00.000Z").getTime(),
+      decision: "skipped",
+      skipReason: "liq",
+      side: "buy",
+      token: { chain: "eth", address: "0x4040404040404040404040404040404040404040", symbol: "", decimals: 18 },
+      quoteToken: { chain: "eth", address: "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", symbol: "USDC", decimals: 6 },
+      qty: 0,
+      priceUsd: 3,
+      notionalUsd: 0,
+      feeUsd: 0,
+      slippageBps: 0,
+      latencyMs: 50,
+      provisional: false,
+    });
+
+    const res = await authed("GET", "/analytics");
+
+    expect(res.statusCode).toBe(200);
+    const body = json<{
+      analytics: {
+        closedTrades: number;
+        winningTrades: number;
+        realizedPnlUsd: number;
+        totalFeesUsd: number;
+        totalNotionalUsd: number;
+        averageHoldHours: number | null;
+        openExposureUsd: number;
+        copiedFills: number;
+        skippedFills: number;
+        byToken: Array<{ symbol: string; realizedPnlUsd: number; closedTrades: number }>;
+      };
+    }>(res);
+    expect(body.analytics).toEqual(expect.objectContaining({
+      closedTrades: 1,
+      winningTrades: 1,
+      realizedPnlUsd: 13,
+      totalFeesUsd: 0.3,
+      totalNotionalUsd: 15,
+      averageHoldHours: 2,
+      openExposureUsd: 15,
+      copiedFills: 1,
+      skippedFills: 1,
+    }));
+    expect(body.analytics.byToken).toContainEqual(expect.objectContaining({
+      symbol: "DELTA",
+      realizedPnlUsd: 13,
+      closedTrades: 1,
+    }));
+  });
+
+  it("returns leaders for active and inactive wallets grouped by window", async () => {
+    const activeWallet = await insertWallet(db as Parameters<typeof insertWallet>[0], {
+      chain: "eth",
+      address: "0x5050505050505050505050505050505050505050",
+      label: "Active leader",
+      active: true,
+      autoCopy: true,
+    });
+    const inactiveWallet = await insertWallet(db as Parameters<typeof insertWallet>[0], {
+      chain: "eth",
+      address: "0x6060606060606060606060606060606060606060",
+      label: "Inactive leader",
+      active: false,
+      autoCopy: true,
+    });
+
+    await upsertLeaderStats(db as Parameters<typeof upsertLeaderStats>[0], {
+      walletId: activeWallet.id,
+      window: "7d",
+      trades: 4,
+      winRate: 0.75,
+      avgReturnPct: 0.12,
+      medianHoldMinutes: 90,
+      realizedPnlUsd: 120,
+      maxDrawdownPct: -0.08,
+      score: 1.5,
+      weight: 1.4,
+    });
+    await upsertLeaderStats(db as Parameters<typeof upsertLeaderStats>[0], {
+      walletId: activeWallet.id,
+      window: "30d",
+      trades: 10,
+      winRate: 0.6,
+      avgReturnPct: 0.08,
+      medianHoldMinutes: 120,
+      realizedPnlUsd: 250,
+      maxDrawdownPct: -0.15,
+      score: 1.1,
+      weight: 1.2,
+    });
+    await upsertLeaderStats(db as Parameters<typeof upsertLeaderStats>[0], {
+      walletId: activeWallet.id,
+      window: "all",
+      trades: 20,
+      winRate: 0.55,
+      avgReturnPct: 0.05,
+      medianHoldMinutes: 150,
+      realizedPnlUsd: 400,
+      maxDrawdownPct: -0.2,
+      score: 0.9,
+      weight: 1.1,
+    });
+    await upsertLeaderStats(db as Parameters<typeof upsertLeaderStats>[0], {
+      walletId: inactiveWallet.id,
+      window: "7d",
+      trades: 2,
+      winRate: 0.5,
+      avgReturnPct: 0.03,
+      medianHoldMinutes: 45,
+      realizedPnlUsd: 20,
+      maxDrawdownPct: -0.05,
+      score: 0.2,
+      weight: 0.8,
+    });
+
+    const res = await authed("GET", "/leaders");
+
+    expect(res.statusCode).toBe(200);
+    const body = json<{
+      leaders: Array<{
+        wallet: { id: string; label: string; active: boolean };
+        stats: Record<string, { trades: number; weight: number }>;
+      }>;
+    }>(res);
+    expect(body.leaders).toContainEqual(expect.objectContaining({
+      wallet: expect.objectContaining({ id: activeWallet.id, label: "Active leader", active: true }),
+      stats: expect.objectContaining({
+        "7d": expect.objectContaining({ trades: 4, weight: 1.4 }),
+        "30d": expect.objectContaining({ trades: 10, weight: 1.2 }),
+        all: expect.objectContaining({ trades: 20, weight: 1.1 }),
+      }),
+    }));
+    expect(body.leaders).toContainEqual(expect.objectContaining({
+      wallet: expect.objectContaining({ id: inactiveWallet.id, label: "Inactive leader", active: false }),
+      stats: expect.objectContaining({
+        "7d": expect.objectContaining({ trades: 2, weight: 0.8 }),
+      }),
+    }));
+  });
+
+  it("lists adaptation logs by most recent first and validates limit", async () => {
+    await db.insert(adaptationLog).values([
+      {
+        ts: new Date("2026-06-20T09:00:00.000Z"),
+        rule: "liquidity-notch",
+        oldValue: "150000",
+        newValue: "175000",
+        evidenceJson: { reason: "spread" },
+      },
+      {
+        ts: new Date("2026-06-20T10:00:00.000Z"),
+        rule: "leader-mute",
+        oldValue: "off",
+        newValue: "on",
+        evidenceJson: { wallet: "0x1" },
+      },
+    ]);
+
+    const listed = await authed("GET", "/adaptations?limit=1");
+
+    expect(listed.statusCode).toBe(200);
+    const body = json<{ entries: Array<{ rule: string; newValue: string }> }>(listed);
+    expect(body.entries).toEqual([
+      expect.objectContaining({ rule: "leader-mute", newValue: "on" }),
+    ]);
+
+    const invalid = await authed("GET", "/adaptations?limit=0");
+    expect(invalid.statusCode).toBe(400);
+    expect(json<{ error: string }>(invalid).error).toMatch(/Number must be greater than or equal to 1/);
+  });
+});
+
 async function insertCandidate(
   overrides: Partial<Parameters<typeof insertSignal>[1]> = {},
 ) {
@@ -277,13 +851,73 @@ async function insertCandidate(
   return id;
 }
 
-async function authed(method: TestMethod, url: string): Promise<InjectResponse> {
-  const res = await app!.inject({
+async function insertDecodedSignal(
+  overrides: Partial<Parameters<typeof insertSignal>[1]> = {},
+) {
+  const chain = overrides.chain ?? "eth";
+  const wallet = await insertWallet(db as Parameters<typeof insertWallet>[0], {
+    chain,
+    address: `0x${randomUUID().replace(/-/g, "").padEnd(40, "0").slice(0, 40)}`,
+    label: "Decoded wallet",
+    active: true,
+    autoCopy: true,
+  });
+
+  const observedAt = overrides.observedAt ?? Date.now();
+  return insertSignal(db as Parameters<typeof insertSignal>[0], {
+    id: randomUUID(),
+    chain,
+    walletId: wallet.id,
+    txHash: `0x${randomUUID().replace(/-/g, "").padEnd(64, "0").slice(0, 64)}`,
+    source: "confirmed",
+    side: overrides.side ?? "buy",
+    tokenIn: overrides.tokenIn ?? {
+      chain,
+      address: chain === "polygon" ? "0x0000000000000000000000000000000000000001" : "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+      symbol: "USDC",
+      decimals: 6,
+    },
+    tokenOut: overrides.tokenOut ?? {
+      chain,
+      address: chain === "polygon" ? "0x0000000000000000000000000000000000000002" : "0x1111111111111111111111111111111111111111",
+      symbol: "TEST",
+      decimals: 18,
+    },
+    amountIn: overrides.amountIn ?? 100_000_000n,
+    amountOut: overrides.amountOut ?? 1_000_000_000_000_000_000n,
+    venue: overrides.venue ?? (chain === "polygon" ? "polymarket" : "balance-delta"),
+    observedAt,
+    confirmedAt: overrides.confirmedAt ?? observedAt,
+    blockNumber: overrides.blockNumber ?? 1,
+    decodeStatus: "decoded",
+    confidence: overrides.confidence ?? 0.88,
+    reason: overrides.reason ?? null,
+    reviewStatus: null,
+    externalUrl: overrides.externalUrl ?? null,
+    poolId: overrides.poolId ?? null,
+  });
+}
+
+async function seedToken(
+  token: Omit<Parameters<typeof upsertToken>[1], "isBlocked"> & Partial<Pick<Parameters<typeof upsertToken>[1], "isBlocked">>
+) {
+  await upsertToken(db as Parameters<typeof upsertToken>[0], {
+    ...token,
+    isBlocked: token.isBlocked ?? false,
+  });
+}
+
+async function authed(method: TestMethod, url: string, extraHeaders?: Record<string, string>, body?: unknown): Promise<InjectResponse> {
+  const options: InjectOptions = {
     method,
     url,
-    headers: { "x-api-key": testApiConfig.API_KEY },
-  });
-  return { statusCode: res.statusCode, body: res.body };
+    headers: { "x-api-key": testApiConfig.API_KEY, ...extraHeaders },
+  };
+  if (body !== undefined && body !== null) {
+    options.payload = body as Exclude<InjectOptions["payload"], undefined>;
+  }
+  const res = await app!.inject(options);
+  return { statusCode: res.statusCode, body: res.body, headers: res.headers };
 }
 
 function json<T>(res: Pick<InjectResponse, "body">): T {

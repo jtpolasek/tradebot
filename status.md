@@ -30,9 +30,10 @@ Polymarket/Polygon path and the review workflow.
 | Candidate triage summary | COMPLETE | `064069a` |
 | Candidate recovery controls | COMPLETE | `056f354` |
 | Candidate review API tests | COMPLETE | `a62d45a` |
+| Core API read-route tests | COMPLETE | `58a2376` |
 
 Latest implementation commit on `main`:
-- `a62d45a test: cover candidate review API routes`
+- `58a2376 test: cover core API read routes`
 
 **Phase 7+ (Solana adapter, ML) — DO NOT BUILD unless user explicitly asks.**
 
@@ -59,6 +60,11 @@ Recent follow-up work:
 - `a62d45a`:
   Extracted the API into an injectable app factory, added route-level candidate review API tests against
   the test DB, and verified auth, query validation, summary aggregation, and copy/dismiss/reset/fail flows.
+- `58a2376`:
+  Extended the Fastify `inject()` harness across the rest of the read-heavy API surface: `/wallets`,
+  `/health`, `/metrics`, `/settings`, `/signals`, `/fills`, `/portfolio`, `/analytics`, `/leaders`,
+  and `/adaptations`, including CORS/auth behavior, bigint serialization, metadata hydration, and
+  aggregate portfolio metrics.
 
 ---
 
@@ -164,7 +170,7 @@ The script: starts Postgres, waits for `pg_isready`, runs migrations, then launc
 - `app/metrics/route.ts` — raw JSON metrics proxy for direct `/metrics` access on the dashboard host
 - `app/settings/page.tsx` — wallet CRUD, settings editor, adaptation log; Polygon wallets show record-only
 
-### Test counts (359 total — all passing with Docker test DB)
+### Test counts (374 total — all passing with Docker test DB)
 | Package | Tests |
 |---|---|
 | `@tradebot/core` | 36 |
@@ -175,7 +181,7 @@ The script: starts Postgres, waits for `pg_isready`, runs migrations, then launc
 | `@tradebot/paper-engine` | 73 |
 | `@tradebot/brain` | 55 |
 | `@tradebot/runner` | 1 |
-| `@tradebot/api` | 8 |
+| `@tradebot/api` | 23 |
 | `@tradebot/web` | 1 |
 
 ---
@@ -231,7 +237,7 @@ Do NOT use `output: "standalone"` in `next.config.ts` — causes `EPERM: operati
 ### API test harness
 - `apps/api/src/app.ts` is the injectable app factory; `apps/api/src/index.ts` is now a thin runtime boot wrapper.
 - Candidate review routes are covered with Fastify `inject()` tests against `TEST_DATABASE_URL`, with stream polling disabled in the test app to keep the harness deterministic.
-- The API tests currently cover auth, candidate list/query validation, triage summary, and copy/dismiss/reset/fail transitions.
+- The API tests currently cover auth, candidate review flows, wallet CRUD, health/metrics, settings, signals, fills, portfolio, analytics, leaders, and adaptation-log reads.
 
 ### vitest.config.ts pattern (all packages)
 ```ts
@@ -310,13 +316,13 @@ LOG_LEVEL=info
 ## What Is Next
 
 Recommended next slice:
-- Extend the **API route-level test harness to wallets and operational endpoints**.
-- Best target: add `inject()` coverage for `/wallets`, `/health`, `/metrics`, and selected `/settings` flows now that `app.ts` exists.
+- Extend the remaining **dynamic API route coverage**.
+- Best target: add focused tests for `POST /leaders/refresh` and the `/stream` websocket path, including auth expectations and basic event/heartbeat behavior.
 
 Why this next:
-- The app factory is in place, so adding more API route coverage is now cheap and low-risk.
-- `/health`, `/metrics`, and wallet CRUD are operator-facing surfaces with real branching and auth/CORS behavior but still thin test coverage.
-- This keeps hardening on the existing operational surface instead of opening a new subsystem.
+- The read-heavy API surface is now covered; the main uncovered behaviors are the scorer trigger and live stream path.
+- Those routes have more lifecycle and concurrency edges than the CRUD/read handlers, so they are the next likely regression points.
+- This continues hardening the existing operational surface instead of opening a new subsystem.
 
 Defer unless explicitly requested:
 - Solana adapter

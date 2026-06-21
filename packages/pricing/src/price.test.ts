@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { getUsdPrice, getUsdPriceResult, getLiquidityUsd, getLiquidityUsdResult, sqrtPriceX96ToPrice, tickToPrice, clearCaches } from "./price.js";
+import { getUsdPrice, getUsdPriceResult, getLiquidityUsd, getLiquidityUsdResult, sqrtPriceX96ToPrice, tickToPrice, clearCaches, __cacheSizes, MAX_CACHE_ENTRIES } from "./price.js";
 import { NATIVE_TOKEN_PLACEHOLDER, WETH, QUOTE_ASSETS } from "@tradebot/core";
 
 const Q96 = 2 ** 96;
@@ -506,5 +506,44 @@ describe("Uniswap V4 pricing via poolId hint", () => {
     // No V3/Aerodrome pool exists and no hint → the V4 pool is invisible, as before the fix.
     const res = await getLiquidityUsdResult("base", FAKE_TOKEN_HI, v4Client());
     expect(res).toBeNull();
+  });
+});
+
+describe("per-token cache bounding", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    clearCaches();
+  });
+
+  // Drive the real DefiLlama fallback path: distinct non-stablecoin, non-WETH tokens with no V3
+  // pool fall through to getLlamaPrice, which writes llamaCache via the size-bounded helper.
+  function distinctAddress(i: number): string {
+    return "0x" + i.toString(16).padStart(40, "0").slice(0, 40);
+  }
+
+  it("caps llamaCache at MAX_CACHE_ENTRIES and evicts the oldest entry", async () => {
+    const client = makeClient(); // getPool → NULL_ADDR, so every token reaches the DefiLlama fallback
+    const fetchMock = vi.fn(async (url: string) => ({
+      ok: true,
+      json: async () => ({ coins: { [url.split("/").pop()!]: { price: 1 } } }),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const total = MAX_CACHE_ENTRIES + 5;
+    for (let i = 0; i < total; i++) {
+      await getUsdPrice("eth", distinctAddress(i), client);
+    }
+
+    expect(__cacheSizes().llama).toBe(MAX_CACHE_ENTRIES);
+
+    // The oldest key (first inserted) was evicted → re-pricing it is a cache miss (fetch fires).
+    fetchMock.mockClear();
+    await getUsdPrice("eth", distinctAddress(0), client);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    // The newest key is still cached → re-pricing it is a hit (no fetch).
+    fetchMock.mockClear();
+    await getUsdPrice("eth", distinctAddress(total - 1), client);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });

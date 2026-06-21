@@ -277,7 +277,7 @@ const TWAP_WINDOW_SECONDS = 300;
 
 // Per-token caches are TTL-only; cap their size so a long-running process tracking many tokens
 // can't grow them unbounded. Oldest entry is evicted first (Map preserves insertion order).
-const MAX_CACHE_ENTRIES = 5_000;
+export const MAX_CACHE_ENTRIES = 5_000;
 function cappedSet<K, V>(map: Map<K, V>, key: K, value: V): void {
   map.delete(key); // re-insert at the end so eviction is roughly least-recently-written
   map.set(key, value);
@@ -301,6 +301,11 @@ export function clearCaches() {
   llamaCache.clear();
   marketCache.clear();
   chainlinkCache.clear();
+}
+
+/** Test-only probe of the bounded per-token cache sizes. */
+export function __cacheSizes() {
+  return { llama: llamaCache.size, market: marketCache.size, chainlink: chainlinkCache.size };
 }
 
 export type PriceSource = "stablecoin" | "chainlink" | "v3-spot" | "defillama";
@@ -456,7 +461,7 @@ async function findBestMarket(
     if (v4 && (best === null || (v4.liquidityUsd ?? -1) > (best.liquidityUsd ?? -1))) best = v4;
   }
 
-  marketCache.set(cacheKey, { market: best, fetchedAt: Date.now() });
+  cappedSet(marketCache, cacheKey, { market: best, fetchedAt: Date.now() });
   return best;
 }
 
@@ -768,7 +773,7 @@ async function getLlamaPrice(chain: EvmChainId, address: string): Promise<number
     const coinKey = `${slug}:${address}`;
     const price = json.coins?.[coinKey]?.price;
     if (typeof price !== "number" || !Number.isFinite(price)) return null;
-    llamaCache.set(key, { price, fetchedAt: Date.now() });
+    cappedSet(llamaCache, key, { price, fetchedAt: Date.now() });
     return price;
   } catch (err) {
     logger.warn({ err, chain, address }, "DefiLlama price fetch failed");

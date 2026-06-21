@@ -73,6 +73,14 @@ Recent follow-up work:
   a retry succeeds) and a `WS /stream` lifecycle-cleanup test (client connects, heartbeat timer
   fires, client disconnects, app closes cleanly with the 2s polling timer cleared and zero
   remaining clients). `@tradebot/api` now at 28 tests; 379 total.
+- `glm/bound-pricing-caches` (pending review → merge):
+  Closed the last deferred pricing follow-up (PLAN Phase 9 item 8 / deferred (b)): the per-token
+  pricing caches (`llamaCache`, `marketCache`) were TTL-bounded but never size-bounded, a slow
+  leak over a long-running process. Wired both writes through the existing `cappedSet` helper
+  (LRU-ish: evict oldest on a full 5_000-entry Map; `chainlinkCache` left alone — keyed by chain,
+  ≤2 entries). `clearCaches()` unchanged. New test proves the cap holds and the oldest key is
+  evicted (drives the real DefiLlama fallback with mocked fetch). `@tradebot/pricing` 27 → 28;
+  380 total. Plan: `docs/tasks/bound-pricing-caches.md`.
 
 ---
 
@@ -178,14 +186,14 @@ The script: starts Postgres, waits for `pg_isready`, runs migrations, then launc
 - `app/metrics/route.ts` — raw JSON metrics proxy for direct `/metrics` access on the dashboard host
 - `app/settings/page.tsx` — wallet CRUD, settings editor, adaptation log; Polygon wallets show record-only
 
-### Test counts (379 total — all passing with Docker test DB)
+### Test counts (380 total — all passing with Docker test DB)
 | Package | Tests |
 |---|---|
 | `@tradebot/core` | 36 |
 | `@tradebot/store` | 32 (needs Docker test DB on port 5434) |
 | `@tradebot/ingest` | 58 |
 | `@tradebot/decoder` | 68 |
-| `@tradebot/pricing` | 27 |
+| `@tradebot/pricing` | 28 |
 | `@tradebot/paper-engine` | 73 |
 | `@tradebot/brain` | 55 |
 | `@tradebot/runner` | 1 |

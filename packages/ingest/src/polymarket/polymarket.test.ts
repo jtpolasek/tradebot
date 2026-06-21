@@ -100,6 +100,27 @@ describe("fetchTrades", () => {
       fetchTrades(BASE, "0xLeader", { fetchImpl: fetchImpl as unknown as typeof fetch })
     ).rejects.toThrow(/500/);
   });
+
+  it("treats the offset-ceiling 400 as end of history (returns [], no throw)", async () => {
+    const fetchImpl = vi.fn(async () => ({
+      ok: false,
+      status: 400,
+      text: async () => '{"error":"max historical activity offset of 3000 exceeded"}',
+    }) as Response);
+    const trades = await fetchTrades(BASE, "0xLeader", { offset: 3100, fetchImpl: fetchImpl as unknown as typeof fetch });
+    expect(trades).toEqual([]);
+  });
+
+  it("still throws on an unrelated 400", async () => {
+    const fetchImpl = vi.fn(async () => ({
+      ok: false,
+      status: 400,
+      text: async () => '{"error":"bad request"}',
+    }) as Response);
+    await expect(
+      fetchTrades(BASE, "0xLeader", { fetchImpl: fetchImpl as unknown as typeof fetch })
+    ).rejects.toThrow(/400/);
+  });
 });
 
 describe("tradeToCandidateSignal", () => {
@@ -240,6 +261,33 @@ describe("PolymarketWatcher", () => {
     expect(insertSignal).toHaveBeenCalledTimes(101);
     const urls = fetchImpl.mock.calls.map((call) => String((call as unknown[])[0]));
     expect(urls.some((url) => url.includes("offset=100"))).toBe(true);
+  });
+
+  it("stops at the API history-depth ceiling and advances the cursor instead of failing forever", async () => {
+    getActiveWallets.mockResolvedValue([{ id: "wallet-1", address: "0xLeader" }]);
+    // Warm cursor far in the past; every page returns a full page of trades newer than the cursor, so
+    // the walk never reaches it. Without the offset cap this would page past offset 3000 and 400 every
+    // poll. With the cap it must stop at offset 3000 (31 pages) and still record forward progress.
+    getPolymarketPollCursors.mockResolvedValue([{ walletId: "wallet-1", cursorTimestamp: 100, cursorKeys: ["0xseen:BUY:asset"] }]);
+    const fetchImpl = vi.fn(async (url: string) => {
+      const offset = Number(new URL(url).searchParams.get("offset") ?? "0");
+      const page = Array.from({ length: 100 }, (_, i) =>
+        sampleTrade({ timestamp: 200, transactionHash: `0xt${offset}_${i}` })
+      );
+      return jsonResponse(page);
+    });
+    const w = new PolymarketWatcher({ db: {} as never, pollMs: 1000, baseUrl: BASE, fetchImpl: fetchImpl as unknown as typeof fetch });
+
+    await (w as unknown as { loadWallets: () => Promise<void> }).loadWallets();
+    await w.tick();
+
+    const offsets = fetchImpl.mock.calls.map((call) => Number(new URL(String((call as unknown[])[0])).searchParams.get("offset")));
+    expect(Math.max(...offsets)).toBe(3000); // never requests offset 3100
+    expect(fetchImpl).toHaveBeenCalledTimes(31); // pages 0..30
+    expect(upsertPolymarketPollSuccess).toHaveBeenCalledTimes(1); // forward progress, not a failure
+    expect(upsertPolymarketPollFailure).not.toHaveBeenCalled();
+    expect(mockArg(upsertPolymarketPollSuccess.mock.calls[0], 1)).toMatchObject({ cursorTimestamp: 200 });
+    expect(w.getHealth().connectionState).toBe("connected");
   });
 
   it("records a new same-timestamp trade that was not seen at the cursor", async () => {

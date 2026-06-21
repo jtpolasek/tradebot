@@ -31,11 +31,11 @@ Polymarket/Polygon path and the review workflow.
 | Candidate recovery controls | COMPLETE | `056f354` |
 | Candidate review API tests | COMPLETE | `a62d45a` |
 | Core API read-route tests | COMPLETE | `58a2376` |
-| Dynamic API route tests (`POST /leaders/refresh`, `WS /stream`) | COMPLETE | (pending commit) |
-| Dynamic API route failure/teardown tests | COMPLETE | (pending commit) |
+| Dynamic API route tests (`POST /leaders/refresh`, `WS /stream`) | COMPLETE | `ad3ae1a` |
+| Dynamic API route failure/teardown tests | COMPLETE | `ad3ae1a` |
 
 Latest implementation commit on `main`:
-- `58a2376 test: cover core API read routes`
+- `ad3ae1a test: cover leader-refresh scorer failure and stream teardown`
 
 **Phase 7+ (Solana adapter, ML) — DO NOT BUILD unless user explicitly asks.**
 
@@ -67,7 +67,7 @@ Recent follow-up work:
   `/health`, `/metrics`, `/settings`, `/signals`, `/fills`, `/portfolio`, `/analytics`, `/leaders`,
   and `/adaptations`, including CORS/auth behavior, bigint serialization, metadata hydration, and
   aggregate portfolio metrics.
-- (pending commit):
+- `ad3ae1a`:
   Closed the dynamic-route failure/teardown edges. Added a `POST /leaders/refresh` scorer-failure
   test (mocked `runScorerJob` rejects → route returns 500 and the single-flight gate is cleared so
   a retry succeeds) and a `WS /stream` lifecycle-cleanup test (client connects, heartbeat timer
@@ -323,14 +323,13 @@ LOG_LEVEL=info
 
 ## What Is Next
 
-Recommended next slice:
-- Commit the dynamic API route + failure/teardown test slice (working tree is uncommitted).
-- After commit, the dynamic API surface is fully covered (auth, single-flight, scorer-failure,
-  stream broadcast, stream lifecycle cleanup). No further failure/teardown edges remain there.
+The dynamic API route surface is now fully covered (auth, single-flight, scorer-failure,
+stream broadcast, stream lifecycle cleanup) — no further failure/teardown edges remain there.
 
-Why this next:
-- Closes the last recommended operational-hardening slice from the previous checkpoint.
-- Keeps work within post-phase hardening — no new subsystem, no Solana/ML deferral violation.
+No recommended next slice is outstanding. Defer unless explicitly requested:
+- Solana adapter
+- ML/learned strategy work
+- New third-party dependencies
 
 Defer unless explicitly requested:
 - Solana adapter

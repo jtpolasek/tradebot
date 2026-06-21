@@ -98,3 +98,18 @@ decision knobs (sizing, the auto-copy toggle).
 - **Keep everything in the review queue (manual-only, no auto-copy):** rejected as the target, though
   it is effectively the pre-existing state. The goal is parity with EVM auto-copy; the manual path
   remains available for EVM candidates regardless.
+- **Split Polymarket into its own standalone app/process:** rejected for v1. The attraction is
+  process isolation (a CLOB/Gamma hang can't wedge the EVM hot path) and independent deploy/scaling
+  (interval-polled vs. websocket-realtime). But the decisive blocker is that `PaperEngine` is a
+  single-instance, single-portfolio authority: it loads cash/positions/portfolio in-memory and writes
+  one snapshot series. A second engine instance in another process would mutate the same
+  cash/positions/snapshots in the DB concurrently — races on cash, double-counted equity, conflicting
+  snapshots — which the single-instance design exists to prevent (a money-accounting non-negotiable).
+  A separate app also still depends on `store`/`core`/`paper-engine`/`pricing`, so it buys process
+  isolation, not module isolation — and most of the isolation upside is already had in-process (the
+  watcher is decoupled and the engine runs on an error-catching `PQueue`; wrapping the CLOB/Gamma
+  calls in timeouts closes the rest). **The one condition that flips this:** if Polymarket should have
+  its *own* cash pool and equity curve ("two bots" rather than one account trading three venues), a
+  standalone app with its own engine instance and snapshot series becomes clean and the isolation
+  benefits come free. That is a product choice, not a technical one; revisit only if a separate
+  Polymarket portfolio is wanted.

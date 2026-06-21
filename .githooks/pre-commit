@@ -1,0 +1,14 @@
+#!/bin/sh
+# Block direct commits to main. Per CLAUDE.md "Multi-model workflow":
+# work happens on glm/* or opus/* branches, then merges to main after review.
+branch="$(git symbolic-ref --short HEAD 2>/dev/null)"
+if [ "$branch" = "main" ]; then
+	echo "✗ Direct commits to 'main' are blocked (CLAUDE.md multi-model workflow)." >&2
+	echo "  Create a branch first, e.g.:" >&2
+	echo "    git checkout -b glm/<desc>   # drafting" >&2
+	echo "    git checkout -b opus/<desc>  # review/fix" >&2
+	echo "  Then merge to main after an Opus review pass." >&2
+	echo "  To override a one-off (use sparingly): git commit --no-verify" >&2
+	exit 1
+fi
+exit 0

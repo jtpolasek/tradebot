@@ -24,6 +24,8 @@ Two assistants work this repo: **Opus 4.8** (`claude`) and **GLM 5.2** (`ccr cod
 
 **Which model to use (rule of thumb):** default to **GLM** for "just do it" work (tests, scaffolding, refactors, first drafts, summaries); switch to **Opus** for "be careful here" work (money/keys/pricing accounting, phase design, subtle bugs, pre-merge review). If unsure which bucket a task is in, that hesitation is the signal — use Opus. Inside an Opus session, Opus should flag cheap grunt work as GLM-suitable; anything GLM produces that touches the non-negotiable rules goes through an Opus `/code-review` pass before it merges.
 
+**Enforcement:** a versioned pre-commit hook (`.githooks/pre-commit`) blocks direct commits to `main`. It is active via `git config core.hooksPath .githooks` — **a fresh clone must run that once** to enable it. Override a one-off with `git commit --no-verify` (use sparingly).
+
 ## Status
 
 - Phase 0: **complete** (2026-06-10). 20 tests passing, committed 2f760ed.

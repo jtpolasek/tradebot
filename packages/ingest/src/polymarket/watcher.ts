@@ -17,7 +17,14 @@ const logger = createLogger("ingest:polygon");
 
 const WALLET_RELOAD_MS = 60_000;
 const TRADE_PAGE_LIMIT = 100;
-const MAX_PAGES_PER_WALLET = 100;
+// The Data API rejects offsets past 3000 with a 400 ("max historical activity offset of 3000
+// exceeded"). Cap pagination at that ceiling so we never request a page that is guaranteed to fail:
+// pages 0..30 cover offsets 0..3000 at limit 100. A wallet that made more new trades than that since
+// its last cursor leaves a permanent gap (the older trades are unreachable via this API), which is
+// acceptable for record-only candidates — the cursor still advances each cycle, so the poller keeps
+// making forward progress instead of failing on every poll forever.
+const MAX_HISTORY_OFFSET = 3000;
+const MAX_PAGES_PER_WALLET = Math.floor(MAX_HISTORY_OFFSET / TRADE_PAGE_LIMIT) + 1; // 31
 
 // Polymarket settles in bridged USDC.e on Polygon. Lowercased to match the tokens-table key.
 export const POLYGON_USDC = "0x2791bca1f2de4661ed88a30c99a7a9449aa84174";
@@ -287,7 +294,9 @@ export class PolymarketWatcher {
       if (!cursor || reachedCursor || trades.length < TRADE_PAGE_LIMIT) break;
 
       if (page === MAX_PAGES_PER_WALLET - 1) {
-        logger.warn({ wallet: wallet.address, pages: MAX_PAGES_PER_WALLET }, "polymarket pagination cap reached");
+        // Hit the API's history-depth ceiling before reaching the cursor: trades older than this page
+        // but newer than the cursor are unrecoverable. Advance the cursor anyway (below) and warn.
+        logger.warn({ wallet: wallet.address, pages: MAX_PAGES_PER_WALLET, maxOffset: MAX_HISTORY_OFFSET }, "polymarket history-depth ceiling reached; advancing cursor past gap");
       }
     }
 

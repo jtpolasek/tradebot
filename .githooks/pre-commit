@@ -1,14 +1,33 @@
 #!/bin/sh
-# Block direct commits to main. Per CLAUDE.md "Multi-model workflow":
-# work happens on glm/* or opus/* branches, then merges to main after review.
+# Gate commits to main per CLAUDE.md "Multi-model workflow".
+#
+# Policy:
+#   - GLM 5.2 drafts on glm/* branches and must NOT commit directly to main.
+#   - Opus 4.8 (the reviewer) and the human MAY land on main after a review pass.
+#
+# How we tell the assistants apart without a shared identity: GLM runs via
+# `ccr code` (claude-code-router), which redirects the API by exporting
+# ANTHROPIC_BASE_URL into the environment (and thus into this hook). Native Opus
+# Claude Code talks to api.anthropic.com directly and leaves ANTHROPIC_BASE_URL
+# unset. So a non-empty ANTHROPIC_BASE_URL on a main commit means a routed model
+# (GLM) and is blocked; everything else (Opus, plain human shell) is allowed.
+#
+# Escape hatches (use sparingly): set TRADEBOT_ALLOW_MAIN=1, or `git commit --no-verify`.
+
 branch="$(git symbolic-ref --short HEAD 2>/dev/null)"
-if [ "$branch" = "main" ]; then
-	echo "✗ Direct commits to 'main' are blocked (CLAUDE.md multi-model workflow)." >&2
-	echo "  Create a branch first, e.g.:" >&2
-	echo "    git checkout -b glm/<desc>   # drafting" >&2
-	echo "    git checkout -b opus/<desc>  # review/fix" >&2
-	echo "  Then merge to main after an Opus review pass." >&2
-	echo "  To override a one-off (use sparingly): git commit --no-verify" >&2
+[ "$branch" = "main" ] || exit 0
+
+if [ "${TRADEBOT_ALLOW_MAIN:-}" = "1" ]; then
+	exit 0
+fi
+
+if [ -n "${ANTHROPIC_BASE_URL:-}" ]; then
+	echo "✗ GLM / routed models may not commit to 'main' (CLAUDE.md multi-model workflow)." >&2
+	echo "  GLM drafts on a branch; Opus reviews and lands on main. Create a branch first:" >&2
+	echo "    git checkout -b glm/<desc>" >&2
+	echo "  Then hand off via the branch for an Opus review pass." >&2
+	echo "  One-off override (use sparingly): git commit --no-verify" >&2
 	exit 1
 fi
+
 exit 0

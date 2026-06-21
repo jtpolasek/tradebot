@@ -58,6 +58,14 @@ export async function fetchTrades(
       continue;
     }
     if (!res.ok) {
+      // The Data API caps pagination at a fixed history depth and rejects deeper offsets with a 400
+      // ("max historical activity offset of 3000 exceeded"). That is a hard ceiling, not a transient
+      // failure: treat it as "no more history" (empty page) so a very active wallet whose new trades
+      // since the last cursor exceed that depth can't wedge the poller in a permanent failure loop.
+      if (res.status === 400) {
+        const body = await res.text().catch(() => "");
+        if (body.includes("max historical activity offset")) return [];
+      }
       throw new Error(`Polymarket Data API ${res.status} for user ${user}`);
     }
     const json: unknown = await res.json();

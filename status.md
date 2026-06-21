@@ -31,7 +31,8 @@ Polymarket/Polygon path and the review workflow.
 | Candidate recovery controls | COMPLETE | `056f354` |
 | Candidate review API tests | COMPLETE | `a62d45a` |
 | Core API read-route tests | COMPLETE | `58a2376` |
-| Dynamic API route tests (`POST /leaders/refresh`, `WS /stream`) | IN PROGRESS (uncommitted) | working tree |
+| Dynamic API route tests (`POST /leaders/refresh`, `WS /stream`) | COMPLETE | (pending commit) |
+| Dynamic API route failure/teardown tests | COMPLETE | (pending commit) |
 
 Latest implementation commit on `main`:
 - `58a2376 test: cover core API read routes`
@@ -66,11 +67,12 @@ Recent follow-up work:
   `/health`, `/metrics`, `/settings`, `/signals`, `/fills`, `/portfolio`, `/analytics`, `/leaders`,
   and `/adaptations`, including CORS/auth behavior, bigint serialization, metadata hydration, and
   aggregate portfolio metrics.
-- working tree (uncommitted):
-  Extended API route-level coverage for the remaining dynamic routes: `POST /leaders/refresh` now
-  has auth and single-flight tests, and `WS /stream` now has websocket auth rejection, heartbeat
-  ping, and trade-signal / paper-fill broadcast coverage using Fastify's in-process websocket
-  harness.
+- (pending commit):
+  Closed the dynamic-route failure/teardown edges. Added a `POST /leaders/refresh` scorer-failure
+  test (mocked `runScorerJob` rejects → route returns 500 and the single-flight gate is cleared so
+  a retry succeeds) and a `WS /stream` lifecycle-cleanup test (client connects, heartbeat timer
+  fires, client disconnects, app closes cleanly with the 2s polling timer cleared and zero
+  remaining clients). `@tradebot/api` now at 28 tests; 379 total.
 
 ---
 
@@ -176,7 +178,7 @@ The script: starts Postgres, waits for `pg_isready`, runs migrations, then launc
 - `app/metrics/route.ts` — raw JSON metrics proxy for direct `/metrics` access on the dashboard host
 - `app/settings/page.tsx` — wallet CRUD, settings editor, adaptation log; Polygon wallets show record-only
 
-### Test counts (377 total — all passing with Docker test DB)
+### Test counts (379 total — all passing with Docker test DB)
 | Package | Tests |
 |---|---|
 | `@tradebot/core` | 36 |
@@ -187,7 +189,7 @@ The script: starts Postgres, waits for `pg_isready`, runs migrations, then launc
 | `@tradebot/paper-engine` | 73 |
 | `@tradebot/brain` | 55 |
 | `@tradebot/runner` | 1 |
-| `@tradebot/api` | 26 |
+| `@tradebot/api` | 28 |
 | `@tradebot/web` | 1 |
 
 ---
@@ -322,13 +324,13 @@ LOG_LEVEL=info
 ## What Is Next
 
 Recommended next slice:
-- Commit the API hardening slice, then extend failure-path coverage for the same dynamic surface.
-- Best target: add focused tests for `POST /leaders/refresh` scorer-failure behavior and stream lifecycle cleanup / idle behavior.
+- Commit the dynamic API route + failure/teardown test slice (working tree is uncommitted).
+- After commit, the dynamic API surface is fully covered (auth, single-flight, scorer-failure,
+  stream broadcast, stream lifecycle cleanup). No further failure/teardown edges remain there.
 
 Why this next:
-- The baseline dynamic-route coverage is now in place; the remaining likely regressions are failure and teardown edges.
-- That continues operational hardening without opening a new subsystem or violating the Solana/ML deferral.
-- `status.md` now reflects uncommitted working-tree progress, so the next clean milestone is to commit it and close the remaining dynamic negative paths.
+- Closes the last recommended operational-hardening slice from the previous checkpoint.
+- Keeps work within post-phase hardening — no new subsystem, no Solana/ML deferral violation.
 
 Defer unless explicitly requested:
 - Solana adapter

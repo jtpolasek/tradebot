@@ -407,6 +407,21 @@ describe("leader refresh and stream API", () => {
     expect(runScorerJobMock).toHaveBeenCalledTimes(2);
   });
 
+  it("returns 500 and clears the in-flight gate when the scorer throws", async () => {
+    const runScorerJobMock = vi.mocked(runScorerJob);
+    const scorerError = new Error("scorer exploded");
+    runScorerJobMock.mockRejectedValueOnce(scorerError);
+
+    const failed = await authed("POST", "/leaders/refresh");
+    expect(failed.statusCode).toBe(500);
+
+    // The failed run must release the single-flight gate so a later request can retry.
+    runScorerJobMock.mockResolvedValueOnce();
+    const retried = await authed("POST", "/leaders/refresh");
+    expect(retried.statusCode).toBe(200);
+    expect(runScorerJobMock).toHaveBeenCalledTimes(2);
+  });
+
   it("requires auth for the websocket stream and sends heartbeat pings", async () => {
     await app!.ready();
     await expect(app!.injectWS("/stream")).rejects.toThrow("Unexpected server response: 401");
@@ -480,6 +495,36 @@ describe("leader refresh and stream API", () => {
 
     ws.terminate();
   }, 10_000);
+
+  it("cleans up the stream polling timer on app close without leaking broadcasts", async () => {
+    await app?.close();
+    app = await createApiApp({
+      db: db as Parameters<typeof createApiApp>[0]["db"],
+      apiConfig: testApiConfig,
+      healthThresholds,
+      rpcClients: undefined,
+      manualWeightProvider: new BrainWeightProvider(),
+      enableStreamPolling: true,
+    });
+    await app.ready();
+
+    const streamApp = app;
+    // A client connects, receives the heartbeat window, then disconnects.
+    const ws = await streamApp.injectWS("/stream", {
+      headers: { "x-api-key": testApiConfig.API_KEY },
+    });
+    await collectWsMessages(ws, 1, 17_000);
+    expect(streamApp.websocketServer.clients.size).toBe(1);
+    ws.terminate();
+    await vi.waitFor(() => {
+      expect(streamApp.websocketServer.clients.size).toBe(0);
+    });
+
+    // Closing the app must clear the 2s polling timer; a clean close (no throw)
+    // and zero remaining clients is the observable proof of lifecycle cleanup.
+    await expect(streamApp.close()).resolves.toBeUndefined();
+    expect(streamApp.websocketServer.clients.size).toBe(0);
+  }, 20_000);
 });
 
 describe("settings API", () => {

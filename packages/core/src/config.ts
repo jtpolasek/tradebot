@@ -21,7 +21,9 @@ const schema = z.object({
   BASE_ALCHEMY_API_KEY: z.string().optional(),
   QUICKNODE_ETH_WS: z.string().optional(),
   QUICKNODE_BASE_WS: z.string().optional(),
-  ZEROX_API_KEY: z.string().optional(),
+  // 0x is retired (the API stopped serving our calls). The env var is intentionally parsed and
+  // discarded so an uncommented key in .env can never re-enable the dead 0x fill path at runtime.
+  ZEROX_API_KEY: z.string().optional().transform(() => undefined),
   API_KEY: z.string().min(1),
   PAPER_STARTING_CASH_USD: z.coerce.number().positive().default(100_000),
   BASE_TRADE_PCT: z.coerce.number().positive().default(0.01),

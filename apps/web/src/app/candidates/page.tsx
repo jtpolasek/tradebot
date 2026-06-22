@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { CircleX, ExternalLink, RotateCcw } from "lucide-react";
+import { CircleX, ExternalLink, RotateCcw, Trash2 } from "lucide-react";
 import { TokenLink } from "@/components/TokenLink";
 import { TxLink } from "@/components/TxLink";
 import { apiFetch, shortAddr, timeAgo } from "@/lib/api";
@@ -99,6 +99,7 @@ export default function CandidatesPage() {
   const [summary, setSummary] = useState<CandidateTriageSummary | null>(null);
   const [loading, setLoading] = useState(true);
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [clearing, setClearing] = useState(false);
   const [error, setError] = useState("");
   const [chainFilter, setChainFilter] = useState<ChainFilter>("all");
   const [venueFilter, setVenueFilter] = useState<VenueFilter>("all");
@@ -142,6 +143,29 @@ export default function CandidatesPage() {
     }
   }
 
+  async function clearPending() {
+    const scope = [
+      chainFilter !== "all" ? (chainLabels.get(chainFilter) ?? chainFilter) : null,
+      venueFilter !== "all" ? (venueLabels.get(venueFilter) ?? venueFilter) : null,
+    ].filter(Boolean).join(" / ");
+    const scopeLabel = scope ? ` (${scope})` : "";
+    if (!window.confirm(`Dismiss all ${scopedPendingCount} pending candidate(s)${scopeLabel}? This cannot be undone.`)) return;
+    setClearing(true);
+    setError("");
+    try {
+      const params = new URLSearchParams();
+      if (chainFilter !== "all") params.set("chain", chainFilter);
+      if (venueFilter !== "all") params.set("venue", venueFilter);
+      const qs = params.toString();
+      await apiFetch(`/candidates/dismiss-pending${qs ? `?${qs}` : ""}`, { method: "POST" });
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to clear pending candidates");
+    } finally {
+      setClearing(false);
+    }
+  }
+
   const pendingCount = candidates.filter((c) => !c.reviewStatus || c.reviewStatus === "pending").length;
   const requestedCount = candidates.filter((c) => c.reviewStatus === "copy-requested" || c.reviewStatus === "copying").length;
   const failedCount = candidates.filter((c) => c.reviewStatus === "copy-failed").length;
@@ -149,6 +173,14 @@ export default function CandidatesPage() {
   const summaryGroups = summary?.groups ?? [];
   const stuckGroups = summaryGroups.filter((group) => stuckStatuses.has(group.status));
   const summaryPendingCount = sumGroups(summaryGroups, (group) => group.status === "pending");
+  // Pending count under the active chain/venue filters — matches exactly what "Clear pending" dismisses.
+  const scopedPendingCount = sumGroups(
+    summaryGroups,
+    (group) =>
+      group.status === "pending" &&
+      (chainFilter === "all" || group.chain === chainFilter) &&
+      (venueFilter === "all" || group.venue === venueFilter)
+  );
   const summaryQueuedCount = sumGroups(summaryGroups, (group) => group.status === "copy-requested" || group.status === "copying");
   const summaryFailedCount = sumGroups(summaryGroups, (group) => group.status === "copy-failed");
   const triageGroups = [...summaryGroups].sort((a, b) => {
@@ -180,9 +212,21 @@ export default function CandidatesPage() {
             <h2>Open Queue Triage</h2>
             <p className="subtle">Global open-candidate summary. Filter changes below do not hide these counts.</p>
           </div>
-          <span className={`pill ${summaryFailedCount > 0 ? "bad" : summaryQueuedCount > 0 ? "warn" : ""}`}>
-            {summary?.totalOpen ?? 0} open
-          </span>
+          <div className="row compact" style={{ alignItems: "center" }}>
+            <span className={`pill ${summaryFailedCount > 0 ? "bad" : summaryQueuedCount > 0 ? "warn" : ""}`}>
+              {summary?.totalOpen ?? 0} open
+            </span>
+            <button
+              className="button danger"
+              type="button"
+              disabled={clearing || scopedPendingCount === 0}
+              onClick={() => void clearPending()}
+              title="Dismiss all pending candidates (honours the chain/venue filters below)"
+            >
+              <Trash2 size={14} aria-hidden="true" />
+              {clearing ? "Clearing…" : `Clear pending (${scopedPendingCount})`}
+            </button>
+          </div>
         </div>
 
         <div className="metric-strip">

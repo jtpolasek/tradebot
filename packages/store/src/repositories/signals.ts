@@ -272,6 +272,29 @@ export async function setCandidateReviewStatus(
   return row ? hydrateSignal(db, rowToSignal(row)) : null;
 }
 
+/**
+ * Bulk-dismiss every *pending* candidate (review status null or "pending"), optionally scoped to a
+ * chain/venue. In-flight candidates (copy-requested/copying/copy-failed) are deliberately left alone —
+ * dismissing those could race the runner's manual-copy worker. Returns the number dismissed.
+ */
+export async function dismissPendingCandidates(
+  db: Db,
+  filters: { chain?: ChainId; venue?: string } = {}
+): Promise<number> {
+  const conditions = [
+    eq(tradeSignals.decodeStatus, "candidate"),
+    or(isNull(tradeSignals.reviewStatus), eq(tradeSignals.reviewStatus, "pending")),
+  ];
+  if (filters.chain) conditions.push(eq(tradeSignals.chain, filters.chain));
+  if (filters.venue) conditions.push(eq(tradeSignals.venue, filters.venue));
+  const rows = await db
+    .update(tradeSignals)
+    .set({ reviewStatus: "dismissed" })
+    .where(and(...conditions))
+    .returning({ id: tradeSignals.id });
+  return rows.length;
+}
+
 export async function transitionCandidateReviewStatus(
   db: Db,
   id: string,

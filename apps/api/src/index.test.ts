@@ -217,6 +217,40 @@ describe("candidate review API", () => {
     expect(json<{ error: string }>(conflict).error).toContain("copy-requested");
   });
 
+  it("bulk-dismisses pending candidates while leaving queued ones untouched", async () => {
+    const pendingA = await insertCandidate();
+    const pendingB = await insertCandidate({
+      tokenOut: { chain: "eth", address: "0x9999999999999999999999999999999999999999", symbol: "PB", decimals: 18 },
+    });
+    const requestedId = await insertCandidate({
+      tokenOut: { chain: "eth", address: "0xaaaa000000000000000000000000000000000000", symbol: "REQ", decimals: 18 },
+      reviewStatus: "copy-requested",
+    });
+
+    const res = await authed("POST", "/candidates/dismiss-pending");
+    expect(res.statusCode).toBe(200);
+    expect(json<{ dismissed: number }>(res).dismissed).toBeGreaterThanOrEqual(2);
+
+    const after = await authed("GET", "/candidates?status=open&limit=500");
+    const openIds = json<{ candidates: Array<{ id: string }> }>(after).candidates.map((c) => c.id);
+    expect(openIds).not.toContain(pendingA);
+    expect(openIds).not.toContain(pendingB);
+    expect(openIds).toContain(requestedId);
+  });
+
+  it("scopes bulk dismiss to the requested chain/venue", async () => {
+    const ethPending = await insertCandidate();
+    const polyPending = await insertCandidate({ chain: "polygon" });
+
+    const res = await authed("POST", "/candidates/dismiss-pending?chain=polygon");
+    expect(res.statusCode).toBe(200);
+
+    const open = await authed("GET", "/candidates?status=open&limit=500");
+    const openIds = json<{ candidates: Array<{ id: string }> }>(open).candidates.map((c) => c.id);
+    expect(openIds).not.toContain(polyPending);
+    expect(openIds).toContain(ethPending);
+  });
+
   it("resets queued candidates back to pending and rejects non-queued ones", async () => {
     const requestedId = await insertCandidate({ reviewStatus: "copy-requested" });
     const pendingId = await insertCandidate({

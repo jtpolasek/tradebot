@@ -23,6 +23,7 @@ import {
   getSignalById,
   setCandidateReviewStatus,
   transitionCandidateReviewStatus,
+  dismissPendingCandidates,
   getRecentFills,
   getOpenPositions,
   getPortfolioAnalytics,
@@ -77,6 +78,11 @@ const CandidateQuery = z.object({
   chain: z.enum(["eth", "base", "polygon"]).optional(),
   venue: z.string().trim().min(1).max(64).optional(),
   status: z.enum(["open", "pending", "copy-requested", "copying", "copy-failed", "copied", "dismissed"]).default("open"),
+});
+
+const DismissPendingQuery = z.object({
+  chain: z.enum(["eth", "base", "polygon"]).optional(),
+  venue: z.string().trim().min(1).max(64).optional(),
 });
 
 export async function createApiApp(options: CreateApiAppOptions) {
@@ -181,6 +187,16 @@ export async function createApiApp(options: CreateApiAppOptions) {
   app.get("/candidates/summary", async (_req, reply) => {
     const summary = await getCandidateTriageSummary(db);
     reply.send({ summary });
+  });
+
+  app.post("/candidates/dismiss-pending", async (req, reply) => {
+    const q = DismissPendingQuery.safeParse(req.query);
+    if (!q.success) return reply.code(400).send({ error: q.error.message });
+    const filters: { chain?: "eth" | "base" | "polygon"; venue?: string } = {};
+    if (q.data.chain) filters.chain = q.data.chain;
+    if (q.data.venue) filters.venue = q.data.venue;
+    const dismissed = await dismissPendingCandidates(db, filters);
+    reply.send({ dismissed });
   });
 
   app.post("/candidates/:id/copy", async (req, reply) => {

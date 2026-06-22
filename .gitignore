@@ -9,3 +9,4 @@ recordings/
 .turbo/
 .next/
 *.log
+.pnpm-store/

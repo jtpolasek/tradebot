@@ -465,7 +465,12 @@ export class PaperEngine {
     // Staleness veto: a backfilled trade stamps observedAt at processing time, so latency math
     // can't catch it. The block timestamp reveals the true age — skip copying long-dead trades
     // at the current price (correctness gate, distinct from the risk filters in decide()).
-    if (isStaleSignal(signal, Date.now(), this.cfg.MAX_SIGNAL_AGE_SEC * 1000)) {
+    // Polygon (Polymarket) uses a looser budget: its data-api indexes trades with a multi-minute
+    // lag, so even a freshly-served trade is already older than the EVM 180s gate would allow.
+    const maxAgeSec = signal.chain === "polygon"
+      ? this.cfg.POLYMARKET_MAX_SIGNAL_AGE_SEC
+      : this.cfg.MAX_SIGNAL_AGE_SEC;
+    if (isStaleSignal(signal, Date.now(), maxAgeSec * 1000)) {
       return this.recordSkip(signal, "stale-signal", token, quoteToken);
     }
 

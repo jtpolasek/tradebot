@@ -31,6 +31,10 @@ const schema = z.object({
   MIN_NOTIONAL_USD: z.coerce.number().positive().default(50),
   MIN_LIQUIDITY_USD: z.coerce.number().positive().default(150_000),
   MAX_SIGNAL_AGE_SEC: z.coerce.number().positive().default(180),
+  // Polymarket's data-api indexes trades with a multi-minute lag, so a leader's trade is already
+  // 4-10 min old by the time we can query it. The EVM 180s gate (we see on-chain swaps in seconds)
+  // would reject every Polymarket signal, so Polygon gets its own, looser staleness budget.
+  POLYMARKET_MAX_SIGNAL_AGE_SEC: z.coerce.number().positive().default(900),
   COPY_DELAY_PENALTY_BPS_ETH: z.coerce.number().nonnegative().default(10),
   COPY_DELAY_PENALTY_BPS_BASE: z.coerce.number().nonnegative().default(5),
   GAS_USD_ETH: z.coerce.number().nonnegative().default(4),

@@ -130,6 +130,7 @@ function cfg(overrides: Record<string, unknown> = {}) {
     MIN_NOTIONAL_USD: 50,
     MIN_LIQUIDITY_USD: 150_000,
     MAX_SIGNAL_AGE_SEC: 180,
+    POLYMARKET_MAX_SIGNAL_AGE_SEC: 900,
     COPY_DELAY_PENALTY_BPS_ETH: 10,
     COPY_DELAY_PENALTY_BPS_BASE: 5,
     GAS_USD_ETH: 4,
@@ -975,6 +976,57 @@ describe("PaperEngine integration", () => {
     const fill = (await getRecentFills(db, new Date(Date.now() - 60_000), 5)).find((row) => row.signalId === candidate.id);
     expect(fill?.decision).toBe("skipped");
     expect(fill?.skipReason).toBe("max-spread");
+  });
+
+  it("uses the looser Polymarket staleness budget for Polygon auto-copies", async () => {
+    const bus = new EventBus();
+    await db.execute(sql`TRUNCATE paper_fills CASCADE`);
+    await db.execute(sql`TRUNCATE positions CASCADE`);
+    await db.execute(sql`TRUNCATE portfolio_snapshots CASCADE`);
+    await db.execute(sql`TRUNCATE trade_signals CASCADE`);
+    const polygonWallet = await insertWallet(db, {
+      chain: "polygon",
+      address: "0x9eade00000000000000000000000000000000009",
+      label: "Poly leader 6",
+      active: true,
+      autoCopy: true,
+    });
+
+    const polySignal = (observedMsAgo: number): TradeSignal =>
+      makeSignal({
+        walletId: polygonWallet.id,
+        chain: "polygon",
+        tokenIn: POLYGON_USDC,
+        tokenOut: POLY_YES,
+        amountIn: 60_000_000n,
+        amountOut: 100_000_000n,
+        venue: "polymarket",
+        decodeStatus: "decoded",
+        conditionId: "0xcondition",
+        source: "confirmed",
+        blockNumber: null,
+        observedAt: Date.now() - observedMsAgo,
+        confirmedAt: Date.now() - observedMsAgo,
+      });
+
+    const engine = new PaperEngine(db, bus, cfg() as never, mockRpcClient as never);
+    await engine.start();
+
+    // 5 min old: past the 180s EVM gate but inside the 900s Polymarket budget -> copies.
+    const fresh = polySignal(5 * 60_000);
+    await insertSignal(db, fresh);
+    await engine.executePolymarketSignal(fresh);
+    const freshFill = (await getRecentFills(db, new Date(Date.now() - 60_000), 10)).find((r) => r.signalId === fresh.id);
+    expect(freshFill?.decision).toBe("copied");
+
+    // 20 min old: past the 900s budget too -> stale-signal.
+    const stale = polySignal(20 * 60_000);
+    await insertSignal(db, stale);
+    await engine.executePolymarketSignal(stale);
+    engine.stop();
+    const staleFill = (await getRecentFills(db, new Date(Date.now() - 60_000), 10)).find((r) => r.signalId === stale.id);
+    expect(staleFill?.decision).toBe("skipped");
+    expect(staleFill?.skipReason).toBe("stale-signal");
   });
 
   it("vetoes a Polymarket buy when Gamma reports the market already resolved", async () => {

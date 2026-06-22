@@ -60,10 +60,24 @@ export function isNativePlaceholder(address: string): boolean {
   return address.toLowerCase() === NATIVE_TOKEN_PLACEHOLDER;
 }
 
+const EVM_ADDRESS = /^0x[a-fA-F0-9]{40}$/;
+
+/**
+ * A Polymarket outcome share: a polygon token whose address is the ERC-1155 CTF tokenId (a long
+ * decimal string, never an EVM address). USDC and other polygon ERC-20s are normal EVM addresses, so
+ * this cleanly excludes them. The watcher stores symbol="Yes"/"No" and name=market question.
+ */
+export function isPolymarketOutcome(chain: string | undefined, token: DisplayToken): boolean {
+  const effectiveChain = token.chain ?? chain;
+  return effectiveChain === "polygon" && !EVM_ADDRESS.test(token.address) && !isNativePlaceholder(token.address);
+}
+
 export function tokenTitle(token: DisplayToken): string {
   if (isNativePlaceholder(token.address)) return token.symbol?.trim() || "ETH";
   const symbol = token.symbol?.trim();
   const name = token.name?.trim();
+  // Polymarket outcome shares read most clearly as "Yes — market question".
+  if (isPolymarketOutcome(token.chain, token) && symbol && name) return `${symbol} — ${name}`;
   if (name && symbol && name.toLowerCase() !== symbol.toLowerCase()) return `${name} (${symbol})`;
   return name || symbol || shortAddr(token.address);
 }
@@ -95,9 +109,15 @@ export function explorerTxUrl(chain: string | undefined, txHash: string): string
 }
 
 export function gmgnWalletUrl(chain: string | undefined, address: string): string | null {
-  if (!/^0x[a-fA-F0-9]{40}$/.test(address)) return null;
+  if (!EVM_ADDRESS.test(address)) return null;
   if (chain !== "eth" && chain !== "base") return null;
   return `https://gmgn.ai/${chain}/address/${address}`;
+}
+
+/** Polymarket profile for a polygon leader (accepts the EOA or proxy address, as the watcher does). */
+export function polymarketProfileUrl(chain: string | undefined, address: string): string | null {
+  if (chain !== "polygon" || !EVM_ADDRESS.test(address)) return null;
+  return `https://polymarket.com/profile/${address}`;
 }
 
 export function shortHash(hash: string): string {

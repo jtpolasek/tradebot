@@ -28,4 +28,4 @@ Two assistants work this repo: **Opus 4.8** (`claude`) and **GLM 5.2** (`ccr cod
 
 ## Status
 
-All planned phases (0–9) complete as of 2026-06-20. Remaining gate: the 72h soak test (PLAN §10). Full milestone history in `CHANGELOG.md`. When you finish a milestone, append it to `CHANGELOG.md` and update this one-line summary — do not grow a changelog here.
+All planned phases (0–10, incl. Polymarket paper copy-trading) complete as of 2026-06-22. Remaining gate: the 72h soak test (PLAN §10). Full milestone history in `CHANGELOG.md`. When you finish a milestone, append it to `CHANGELOG.md` and update this one-line summary — do not grow a changelog here.

@@ -1,7 +1,7 @@
 "use client";
 
 import { ExternalLink } from "lucide-react";
-import { explorerAddressUrl, gmgnWalletUrl, shortAddr } from "@/lib/api";
+import { explorerAddressUrl, gmgnWalletUrl, polymarketProfileUrl, shortAddr } from "@/lib/api";
 
 type WalletLinkProps = {
   chain: string;
@@ -13,6 +13,7 @@ type WalletLinkProps = {
 export function WalletLink({ chain, address, label }: WalletLinkProps) {
   const explorer = explorerAddressUrl(chain, address);
   const gmgn = gmgnWalletUrl(chain, address);
+  const polymarket = polymarketProfileUrl(chain, address);
 
   return (
     <span className="wallet-link">
@@ -27,6 +28,11 @@ export function WalletLink({ chain, address, label }: WalletLinkProps) {
       {gmgn && (
         <a className="wallet-gmgn" href={gmgn} target="_blank" rel="noreferrer" title="Open on GMGN.ai">
           GMGN
+        </a>
+      )}
+      {polymarket && (
+        <a className="wallet-gmgn" href={polymarket} target="_blank" rel="noreferrer" title="Open Polymarket profile">
+          Polymarket
         </a>
       )}
     </span>

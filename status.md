@@ -6,7 +6,7 @@
 
 ## Current Phase
 
-Core planned phases (0–9) **COMPLETE**. **Phase 10 in progress**: Polymarket paper copy-trading follow-up. Parts **10.1 (`conditionId` + outcome mapping)**, **10.2 (CLOB price source)**, **10.3 (engine entry path)**, and **10.4 (auto-copy trigger)** are complete. Polymarket is now live as a **parallel paper copy-trade path**: the watcher persists decoded confirmed signals, and the runner drains unfilled Polygon rows into the dedicated engine path. Next up is **10.5 (marks + resolution settlement)**. Latest `main`: see `git log`. Full per-milestone history in `CHANGELOG.md`.
+Core planned phases (0–9) **COMPLETE**. **Phase 10 COMPLETE**: Polymarket paper copy-trading. Parts **10.1 (`conditionId` + outcome mapping)**, **10.2 (CLOB price source)**, **10.3 (engine entry path)**, **10.4 (auto-copy trigger)**, **10.5 (marks + resolution settlement)**, and **10.6 (UI + leaders parity)** are all complete. Polymarket runs as a **parallel paper copy-trade path**: the watcher persists decoded confirmed signals, the runner drains unfilled Polygon rows into the dedicated engine path, open outcome-share positions are re-marked into equity/portfolio, resolved markets are force-settled at $1/$0, and the web UI renders outcome shares as "Yes — market question" with a Polymarket profile link on polygon leaders. Full per-milestone history in `CHANGELOG.md`.
 
 **Phase 7+ (Solana adapter, ML) — DO NOT BUILD unless the user explicitly asks.**
 
@@ -67,9 +67,11 @@ Do NOT use `output: "standalone"` in `next.config.ts` — causes `EPERM: ... sym
 
 ### Polymarket operational model
 - Polygon/Polymarket now runs as a **parallel paper-trading path**. The watcher persists trades as decoded confirmed signals, and the runner's Polygon copy job routes unfilled rows into `PaperEngine.executePolymarketSignal(...)`.
+- Open Polygon positions are re-marked by a dedicated midpoint-price writer (`packages/pricing/src/polymarketMarks.ts`) so paper equity and portfolio valuation include outcome-share exposure.
+- Resolved Polymarket markets are closed by a separate Gamma-driven settlement job, which maps the winning outcome to a $1 payout and losing outcomes to $0 through `PaperEngine.settlePolymarketPosition(...)`.
 - Manual candidate copy is still EVM-only. New Polymarket trades bypass the candidate-review queue entirely; the API blocks non-EVM candidate copy requests, and the UI hides Copy for Polymarket candidate rows.
 - The watcher persists per-wallet cursor + poll state in `polymarket_poll_state` (restart recovery + observability).
-- `trade_signals` persist Polymarket `condition_id` + `outcome_index`, and `packages/pricing/src/polymarket.ts` wraps the public CLOB `/price` plus Gamma `/markets` endpoints with bounded caching for entry-time pricing and market-status vetoes.
+- `trade_signals` persist Polymarket `condition_id` + `outcome_index`, and `packages/pricing/src/polymarket.ts` wraps the public CLOB `/price` plus Gamma `/markets` endpoints with bounded caching for entry-time pricing, market-status vetoes, and resolution payout lookup.
 
 ### Candidate triage + recovery
 - `/candidates/summary` returns global open-candidate counts by chain/venue/status, independent of the active `/candidates` filters. `null` legacy `review_status` normalized to `pending` at the repo boundary. Aggregate timestamps may arrive as strings — parse at the boundary.
@@ -112,8 +114,6 @@ export default defineConfig({ test: { include: ["src/**/*.test.ts"], testTimeout
 
 ## What Is Next
 
-Next feature slice: **Phase 10.5 — marks + resolution settlement**. Add the polygon-only marks writer so open outcome-share positions contribute to equity/portfolio views, then add the Gamma-driven resolution settler that force-closes resolved markets at $1/$0 through the existing accounting path. After that: 10.6 UI + leaders parity.
-
-Still pending after Phase 10: the 72h soak test (PLAN §10) and the deferred live full-pipeline V4 re-check on a fresh post-deploy trade.
+Phase 10 is complete. Remaining gates before "done": the **72h soak test** (PLAN §10) and the deferred **live full-pipeline V4 re-check** on a fresh post-deploy trade.
 
 Defer unless explicitly requested: Solana adapter, ML/learned-strategy work, new third-party dependencies.

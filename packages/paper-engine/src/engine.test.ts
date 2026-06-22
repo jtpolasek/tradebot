@@ -46,16 +46,58 @@ vi.mock("@tradebot/pricing", () => ({
     tokenAddress: "0xaaaa000000000000000000000000000000000001",
     warnings: [],
   }),
+  getPolymarketPrice: vi.fn().mockResolvedValue({
+    tokenId: "1",
+    side: "buy",
+    source: "polymarket-clob",
+    price: 0.6,
+    bestBid: 0.59,
+    bestAsk: 0.6,
+    spread: 0.01,
+    spreadBps: 168,
+    maxSpreadBps: 500,
+    fetchedAt: Date.now(),
+  }),
+  getPolymarketMarketStatus: vi.fn().mockResolvedValue({
+    conditionId: "0xcondition",
+    source: "polymarket-gamma",
+    fetchedAt: Date.now(),
+    active: true,
+    closed: false,
+    resolved: false,
+    acceptingOrders: true,
+    outcomes: null,
+    outcomePrices: null,
+    clobTokenIds: null,
+  }),
+  getPolymarketResolutionPayout: vi.fn((status: { closed: boolean; resolved: boolean; outcomePrices: number[] | null }, outcomeIndex: number) => {
+    if (!status.closed && !status.resolved) return null;
+    const price = status.outcomePrices?.[outcomeIndex];
+    if (price === undefined) return null;
+    if (price >= 0.99) return 1;
+    if (price <= 0.01) return 0;
+    return null;
+  }),
   getZeroxPrice: vi.fn(),
 }));
 
-import { getLiquidityUsd, getLiquidityUsdResult, getUsdPrice, getUsdPriceResult, getZeroxPrice } from "@tradebot/pricing";
+import {
+  getLiquidityUsd,
+  getLiquidityUsdResult,
+  getPolymarketMarketStatus,
+  getPolymarketPrice,
+  getUsdPrice,
+  getUsdPriceResult,
+  getZeroxPrice,
+} from "@tradebot/pricing";
 
 const mockRpcClient = { readContract: vi.fn() };
 
 const USDC: TokenRef = { chain: "eth", address: "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", symbol: "USDC", decimals: 6 };
 const TOKEN_A: TokenRef = { chain: "eth", address: "0xaaaa000000000000000000000000000000000001", symbol: "TKNA", decimals: 18 };
 const TOKEN_B: TokenRef = { chain: "eth", address: "0xbbbb000000000000000000000000000000000002", symbol: "TKNB", decimals: 18 };
+const POLYGON_USDC: TokenRef = { chain: "polygon", address: "0x2791bca1f2de4661ed88a30c99a7a9449aa84174", symbol: "USDC", decimals: 6 };
+const POLY_YES: TokenRef = { chain: "polygon", address: "71321045679252212594626385532706912750332728571942532289631379312455583992563", symbol: "YES", decimals: 6, name: "Will it happen?" };
 
 function makeSignal(overrides: Partial<TradeSignal> & { walletId: string }): TradeSignal {
   return {
@@ -149,6 +191,30 @@ beforeEach(() => {
       tokenAddress,
       warnings: [],
     };
+  });
+  vi.mocked(getPolymarketPrice).mockImplementation(async (tokenId, side) => ({
+    tokenId,
+    side,
+    source: "polymarket-clob",
+    price: side === "buy" ? 0.6 : 0.58,
+    bestBid: 0.58,
+    bestAsk: 0.6,
+    spread: 0.02,
+    spreadBps: 338.9830508474576,
+    maxSpreadBps: 500,
+    fetchedAt: Date.now(),
+  }));
+  vi.mocked(getPolymarketMarketStatus).mockResolvedValue({
+    conditionId: "0xcondition",
+    source: "polymarket-gamma",
+    fetchedAt: Date.now(),
+    active: true,
+    closed: false,
+    resolved: false,
+    acceptingOrders: true,
+    outcomes: null,
+    outcomePrices: null,
+    clobTokenIds: null,
   });
   vi.mocked(getZeroxPrice).mockReset();
   return db.execute(sql`TRUNCATE settings CASCADE`);
@@ -813,6 +879,279 @@ describe("PaperEngine integration", () => {
     const fills = await getRecentFills(db, new Date(Date.now() - 60_000), 5);
     expect(fills[0]?.decision).toBe("copied");
     expect(fills[0]?.skipReason).toBeUndefined();
+  });
+
+  it("routes a manual Polymarket candidate copy through the CLOB buy path", async () => {
+    const bus = new EventBus();
+    await db.execute(sql`TRUNCATE paper_fills CASCADE`);
+    await db.execute(sql`TRUNCATE positions CASCADE`);
+    await db.execute(sql`TRUNCATE portfolio_snapshots CASCADE`);
+    await db.execute(sql`TRUNCATE trade_signals CASCADE`);
+    const polygonWallet = await insertWallet(db, {
+      chain: "polygon",
+      address: "0x4eade00000000000000000000000000000000004",
+      label: "Poly leader",
+      active: true,
+      autoCopy: false,
+    });
+    const candidate = makeSignal({
+      walletId: polygonWallet.id,
+      chain: "polygon",
+      tokenIn: POLYGON_USDC,
+      tokenOut: POLY_YES,
+      amountIn: 60_000_000n,
+      amountOut: 100_000_000n,
+      venue: "polymarket",
+      decodeStatus: "candidate",
+      reviewStatus: "copy-requested",
+      conditionId: "0xcondition",
+      source: "confirmed",
+      blockNumber: null,
+      observedAt: Date.now() - 5 * 60_000,
+      confirmedAt: Date.now() - 5 * 60_000,
+    });
+    await insertSignal(db, candidate);
+
+    const engine = new PaperEngine(db, bus, cfg() as never, mockRpcClient as never);
+    await engine.start();
+    await engine.executeManualCandidateCopy(candidate);
+    engine.stop();
+
+    const fill = (await getRecentFills(db, new Date(Date.now() - 60_000), 5)).find((row) => row.signalId === candidate.id);
+    expect(fill?.decision).toBe("copied");
+    expect(fill?.priceUsd).toBeCloseTo(0.6, 8);
+    expect(fill?.feeUsd).toBe(0);
+    expect(fill?.priceSource).toBe("polymarket-clob");
+    expect(fill?.priceVenue).toBe("polymarket");
+    expect(fill?.qty).toBeCloseTo(100 / 0.6, 6);
+    expect(getPolymarketPrice).toHaveBeenCalledWith(POLY_YES.address, "buy");
+  });
+
+  it("vetoes a Polymarket buy when the current spread exceeds the configured maximum", async () => {
+    const bus = new EventBus();
+    await db.execute(sql`TRUNCATE paper_fills CASCADE`);
+    await db.execute(sql`TRUNCATE positions CASCADE`);
+    await db.execute(sql`TRUNCATE portfolio_snapshots CASCADE`);
+    await db.execute(sql`TRUNCATE trade_signals CASCADE`);
+    const polygonWallet = await insertWallet(db, {
+      chain: "polygon",
+      address: "0x5eade00000000000000000000000000000000005",
+      label: "Poly leader 2",
+      active: true,
+    });
+    const candidate = makeSignal({
+      walletId: polygonWallet.id,
+      chain: "polygon",
+      tokenIn: POLYGON_USDC,
+      tokenOut: POLY_YES,
+      amountIn: 70_000_000n,
+      amountOut: 100_000_000n,
+      venue: "polymarket",
+      decodeStatus: "candidate",
+      reviewStatus: "copy-requested",
+      conditionId: "0xcondition",
+      source: "confirmed",
+      blockNumber: null,
+    });
+    await insertSignal(db, candidate);
+    vi.mocked(getPolymarketPrice).mockResolvedValueOnce({
+      tokenId: POLY_YES.address,
+      side: "buy",
+      source: "polymarket-clob",
+      price: 0.75,
+      bestBid: 0.65,
+      bestAsk: 0.75,
+      spread: 0.1,
+      spreadBps: 1428.5714285714287,
+      maxSpreadBps: 500,
+      fetchedAt: Date.now(),
+    });
+
+    const engine = new PaperEngine(db, bus, cfg() as never, mockRpcClient as never);
+    await engine.start();
+    await engine.executeManualCandidateCopy(candidate);
+    engine.stop();
+
+    const fill = (await getRecentFills(db, new Date(Date.now() - 60_000), 5)).find((row) => row.signalId === candidate.id);
+    expect(fill?.decision).toBe("skipped");
+    expect(fill?.skipReason).toBe("max-spread");
+  });
+
+  it("vetoes a Polymarket buy when Gamma reports the market already resolved", async () => {
+    const bus = new EventBus();
+    await db.execute(sql`TRUNCATE paper_fills CASCADE`);
+    await db.execute(sql`TRUNCATE positions CASCADE`);
+    await db.execute(sql`TRUNCATE portfolio_snapshots CASCADE`);
+    await db.execute(sql`TRUNCATE trade_signals CASCADE`);
+    const polygonWallet = await insertWallet(db, {
+      chain: "polygon",
+      address: "0x6eade00000000000000000000000000000000006",
+      label: "Poly leader 3",
+      active: true,
+    });
+    const candidate = makeSignal({
+      walletId: polygonWallet.id,
+      chain: "polygon",
+      tokenIn: POLYGON_USDC,
+      tokenOut: POLY_YES,
+      amountIn: 70_000_000n,
+      amountOut: 100_000_000n,
+      venue: "polymarket",
+      decodeStatus: "candidate",
+      reviewStatus: "copy-requested",
+      conditionId: "0xcondition",
+      source: "confirmed",
+      blockNumber: null,
+    });
+    await insertSignal(db, candidate);
+    vi.mocked(getPolymarketMarketStatus).mockResolvedValueOnce({
+      conditionId: "0xcondition",
+      source: "polymarket-gamma",
+      fetchedAt: Date.now(),
+      active: false,
+      closed: true,
+      resolved: true,
+      acceptingOrders: false,
+      outcomes: ["Yes", "No"],
+      outcomePrices: [1, 0],
+      clobTokenIds: [POLY_YES.address, "other-token"],
+    });
+
+    const engine = new PaperEngine(db, bus, cfg() as never, mockRpcClient as never);
+    await engine.start();
+    await engine.executeManualCandidateCopy(candidate);
+    engine.stop();
+
+    const fill = (await getRecentFills(db, new Date(Date.now() - 60_000), 5)).find((row) => row.signalId === candidate.id);
+    expect(fill?.decision).toBe("skipped");
+    expect(fill?.skipReason).toBe("market-resolved");
+  });
+
+  it("routes a Polymarket sell through the CLOB bid path and closes the copied position", async () => {
+    const bus = new EventBus();
+    await db.execute(sql`TRUNCATE paper_fills CASCADE`);
+    await db.execute(sql`TRUNCATE positions CASCADE`);
+    await db.execute(sql`TRUNCATE portfolio_snapshots CASCADE`);
+    await db.execute(sql`TRUNCATE trade_signals CASCADE`);
+    const polygonWallet = await insertWallet(db, {
+      chain: "polygon",
+      address: "0x7eade00000000000000000000000000000000007",
+      label: "Poly leader 4",
+      active: true,
+    });
+    await upsertPosition(db, {
+      chain: "polygon",
+      tokenAddress: POLY_YES.address,
+      qty: 120,
+      avgCostUsd: 0.4,
+      realizedPnlUsd: 0,
+      sourceWalletId: polygonWallet.id,
+    });
+    const candidate = makeSignal({
+      walletId: polygonWallet.id,
+      chain: "polygon",
+      side: "sell",
+      tokenIn: POLY_YES,
+      tokenOut: POLYGON_USDC,
+      amountIn: 120_000_000n,
+      amountOut: 58_000_000n,
+      venue: "polymarket",
+      decodeStatus: "candidate",
+      reviewStatus: "copy-requested",
+      conditionId: "0xcondition",
+      source: "confirmed",
+      blockNumber: null,
+    });
+    await insertSignal(db, candidate);
+    vi.mocked(getPolymarketPrice).mockResolvedValueOnce({
+      tokenId: POLY_YES.address,
+      side: "sell",
+      source: "polymarket-clob",
+      price: 0.58,
+      bestBid: 0.58,
+      bestAsk: 0.6,
+      spread: 0.02,
+      spreadBps: 338.9830508474576,
+      maxSpreadBps: 500,
+      fetchedAt: Date.now(),
+    });
+
+    const engine = new PaperEngine(db, bus, cfg() as never, mockRpcClient as never);
+    await engine.start();
+    await engine.executeManualCandidateCopy(candidate);
+    engine.stop();
+
+    const fill = (await getRecentFills(db, new Date(Date.now() - 60_000), 5)).find((row) => row.signalId === candidate.id);
+    expect(fill?.decision).toBe("copied");
+    expect(fill?.priceUsd).toBeCloseTo(0.58, 8);
+    expect(fill?.feeUsd).toBe(0);
+    const openRows = await getOpenPositions(db);
+    expect(openRows.some((row) => row.chain === "polygon" && row.tokenAddress === POLY_YES.address)).toBe(false);
+  });
+
+  it("force-closes an open Polymarket position at resolution through the shared sell accounting path", async () => {
+    const bus = new EventBus();
+    await db.execute(sql`TRUNCATE paper_fills CASCADE`);
+    await db.execute(sql`TRUNCATE positions CASCADE`);
+    await db.execute(sql`TRUNCATE portfolio_snapshots CASCADE`);
+    await db.execute(sql`TRUNCATE trade_signals CASCADE`);
+    const polygonWallet = await insertWallet(db, {
+      chain: "polygon",
+      address: "0x8eade00000000000000000000000000000000008",
+      label: "Poly leader 5",
+      active: true,
+    });
+    await upsertToken(db, {
+      chain: "polygon",
+      address: POLY_YES.address,
+      symbol: "YES",
+      name: "Will it happen?",
+      decimals: 6,
+      isBlocked: false,
+    });
+    await upsertPosition(db, {
+      chain: "polygon",
+      tokenAddress: POLY_YES.address,
+      qty: 100,
+      avgCostUsd: 0.4,
+      realizedPnlUsd: 0,
+      sourceWalletId: polygonWallet.id,
+    });
+    vi.mocked(getPolymarketMarketStatus).mockResolvedValueOnce({
+      conditionId: "0xcondition",
+      source: "polymarket-gamma",
+      fetchedAt: Date.now(),
+      active: false,
+      closed: true,
+      resolved: true,
+      acceptingOrders: false,
+      outcomes: ["Yes", "No"],
+      outcomePrices: [1, 0],
+      clobTokenIds: [POLY_YES.address, "other-token"],
+    });
+
+    const engine = new PaperEngine(db, bus, cfg() as never, mockRpcClient as never);
+    await engine.start();
+    const result = await engine.settlePolymarketPosition({
+      chain: "polygon",
+      tokenAddress: POLY_YES.address,
+      qty: 100,
+      avgCostUsd: 0.4,
+      sourceWalletId: polygonWallet.id,
+      conditionId: "0xcondition",
+      outcomeIndex: 0,
+    });
+    engine.stop();
+
+    expect(result).toBe("settled");
+    const fill = (await getRecentFills(db, new Date(Date.now() - 60_000), 5))[0];
+    expect(fill?.decision).toBe("copied");
+    expect(fill?.priceUsd).toBe(1);
+    expect(fill?.feeUsd).toBe(0);
+    const signal = fill ? await getSignalById(db, fill.signalId) : null;
+    expect(signal?.venue).toBe("polymarket-resolution");
+    const openRows = await getOpenPositions(db);
+    expect(openRows.some((row) => row.chain === "polygon" && row.tokenAddress === POLY_YES.address)).toBe(false);
   });
 
   it("stores fills against the persisted signal id when duplicate tx signals arrive", async () => {

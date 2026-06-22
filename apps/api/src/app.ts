@@ -190,7 +190,7 @@ export async function createApiApp(options: CreateApiAppOptions) {
       return reply.code(404).send({ error: "Candidate not found" });
     }
     if (!isEvmChain(signal.chain)) {
-      return reply.code(400).send({ error: `Copy is not supported for ${signal.venue} (${signal.chain}) candidates — record only` });
+      return reply.code(400).send({ error: `Copy is not supported for ${signal.venue} (${signal.chain}) candidates in the manual review flow` });
     }
     if (signal.reviewStatus === "dismissed" || signal.reviewStatus === "copied" || signal.reviewStatus === "copying") {
       return reply.code(409).send({ error: `Candidate is already ${signal.reviewStatus}` });

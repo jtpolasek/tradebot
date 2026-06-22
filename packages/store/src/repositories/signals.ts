@@ -1,6 +1,6 @@
 import { eq, and, gte, desc, or, isNull, isNotNull, inArray, sql } from "drizzle-orm";
 import type { Db } from "../db.js";
-import { tradeSignals } from "../schema.js";
+import { paperFills, tradeSignals } from "../schema.js";
 import { NATIVE_TOKEN_PLACEHOLDER } from "@tradebot/core";
 import type { TradeSignal, TokenRef, ChainId } from "@tradebot/core";
 import { getToken } from "./tokens.js";
@@ -149,6 +149,28 @@ export async function getRecentSignals(db: Db, since: Date, limit: number): Prom
     .orderBy(desc(tradeSignals.observedAt))
     .limit(limit);
   return hydrateSignals(db, rows.map(rowToSignal));
+}
+
+/**
+ * Confirmed, decoded Polymarket signals that have not yet been processed into a fill. The runner's
+ * Polygon auto-copy job drains this queue; once a copied or skipped fill exists for the signal, it
+ * is considered processed and won't be claimed again.
+ */
+export async function getPendingPolymarketSignals(db: Db, limit: number): Promise<TradeSignal[]> {
+  const rows = await db
+    .select({ signal: tradeSignals })
+    .from(tradeSignals)
+    .leftJoin(paperFills, eq(paperFills.signalId, tradeSignals.id))
+    .where(and(
+      eq(tradeSignals.chain, "polygon"),
+      eq(tradeSignals.venue, "polymarket"),
+      eq(tradeSignals.source, "confirmed"),
+      eq(tradeSignals.decodeStatus, "decoded"),
+      isNull(paperFills.signalId),
+    ))
+    .orderBy(tradeSignals.observedAt)
+    .limit(limit);
+  return hydrateSignals(db, rows.map((row) => rowToSignal(row.signal)));
 }
 
 export async function getCandidateSignals(db: Db, limit: number, filters: CandidateSignalFilters = {}): Promise<TradeSignal[]> {

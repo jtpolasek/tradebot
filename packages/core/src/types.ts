@@ -6,7 +6,7 @@
  */
 export type EvmChainId = "eth" | "base";
 
-/** Every chain we record trades for. `polygon` is watch+record only (Polymarket); never AMM-priced. */
+/** Every chain we record trades for. `polygon` is Polymarket's parallel path; never AMM-priced. */
 export type ChainId = EvmChainId | "polygon";
 
 export interface TrackedWallet {

@@ -14,7 +14,8 @@ const MARKS_INTERVAL_MS = 60_000;
 
 export function startMarksJob(
   db: Db,
-  clients: Record<EvmChainId, RpcClient>
+  clients: Record<EvmChainId, RpcClient>,
+  opts: { onMark?: (mark: { chain: EvmChainId; tokenAddress: string; priceUsd: number; source: string }) => void } = {},
 ): { stop: () => void } {
   let stopped = false;
 
@@ -41,6 +42,7 @@ export function startMarksJob(
             continue;
           }
           await insertPriceMark(db, { chain, tokenAddress, ts, priceUsd: price.priceUsd, source: price.source });
+          opts.onMark?.({ chain, tokenAddress, priceUsd: price.priceUsd, source: price.source });
           logger.debug({ chain, tokenAddress, priceUsd: price.priceUsd, source: price.source }, "mark persisted");
         } catch (err) {
           logger.warn({ err, chain, tokenAddress }, "marks job failed for token");

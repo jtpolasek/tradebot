@@ -156,8 +156,8 @@ async function signalsToTradeRows(
   const rows: TradeRow[] = [];
 
   for (const sig of signals) {
-    // Decoded signals are EVM-only (Polymarket trades are candidates, excluded above), but the
-    // row's chain is typed ChainId — guard so the AMM pricing/RPC maps are only indexed by EVM.
+    // Decoded Polygon signals now exist, but Polymarket still remains outside the EVM scoring
+    // cohort in v1. Guard so the AMM pricing/RPC maps are only indexed by EVM chains.
     if (!isEvmChain(sig.chain)) continue;
     const nonQuoteAddress = sig.side === "buy" ? sig.tokenOut.address : sig.tokenIn.address;
     const quoteAddress = sig.side === "buy" ? sig.tokenIn.address : sig.tokenOut.address;

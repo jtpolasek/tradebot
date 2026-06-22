@@ -178,7 +178,6 @@ export default function SettingsPage() {
 
         <div className="list">
           {wallets.filter((w) => w.active).map((w) => {
-            const isRecordOnly = w.chain === "polygon";
             return (
               <div key={w.id} className="card wallet-card" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
                 <div>
@@ -187,28 +186,22 @@ export default function SettingsPage() {
                   <div style={{ display: "flex", gap: 6, marginTop: 4 }}>
                     <span className="pill">{w.chain}</span>
                     <span className="pill">added {timeAgo(w.addedAt)}</span>
-                    {isRecordOnly ? (
-                      <span className="pill warn">record-only</span>
-                    ) : (
-                      <span className={`pill ${w.autoCopy ? "good" : "warn"}`}>
-                        {w.autoCopy ? "auto-copy on" : "auto-copy off"}
-                      </span>
-                    )}
+                    <span className={`pill ${w.autoCopy ? "good" : "warn"}`}>
+                      {w.autoCopy ? "auto-copy on" : "auto-copy off"}
+                    </span>
                   </div>
                 </div>
 
                 <div style={{ display: "flex", gap: 6 }}>
-                  {!isRecordOnly && (
-                    <button
-                      className="button"
-                      style={{ minHeight: 32, padding: "4px 10px", fontSize: 12 }}
-                      onClick={() => void setAutoCopy(w.id, !w.autoCopy)}
-                      disabled={busy === `auto-${w.id}`}
-                      title={w.autoCopy ? "Stop copying this wallet's buys (still watched & scored)" : "Resume copying this wallet's buys"}
-                    >
-                      {w.autoCopy ? "Disable auto-copy" : "Enable auto-copy"}
-                    </button>
-                  )}
+                  <button
+                    className="button"
+                    style={{ minHeight: 32, padding: "4px 10px", fontSize: 12 }}
+                    onClick={() => void setAutoCopy(w.id, !w.autoCopy)}
+                    disabled={busy === `auto-${w.id}`}
+                    title={w.autoCopy ? "Stop copying this wallet's buys (still watched & scored)" : "Resume copying this wallet's buys"}
+                  >
+                    {w.autoCopy ? "Disable auto-copy" : "Enable auto-copy"}
+                  </button>
                   <button
                     className="button danger"
                     style={{ minHeight: 32, padding: "4px 10px", fontSize: 12 }}

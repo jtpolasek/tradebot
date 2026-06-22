@@ -13,7 +13,7 @@ import {
 } from "@tradebot/store";
 import { ChainWatcher, PolymarketWatcher, Recorder, deserializeEvent } from "@tradebot/ingest";
 import { Decoder } from "@tradebot/decoder";
-import { startMarksJob } from "@tradebot/pricing";
+import { startMarksJob, startPolymarketMarksJob } from "@tradebot/pricing";
 import { PaperEngine, runExitCheck } from "@tradebot/paper-engine";
 import { BrainWeightProvider, startScorerJob } from "@tradebot/brain";
 import { createPublicClient, webSocket } from "viem";
@@ -22,6 +22,8 @@ import postgres from "postgres";
 import { readFileSync } from "fs";
 import { join } from "path";
 import { fileURLToPath } from "url";
+import { startPolymarketCopyJob } from "./polymarketCopyJob.js";
+import { startPolymarketResolutionJob } from "./polymarketResolutionJob.js";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 
@@ -96,13 +98,17 @@ async function main() {
   const baseRpcClient = createPublicClient({ chain: base, batch: { multicall: true }, transport: webSocket(`wss://base-mainnet.g.alchemy.com/v2/${config.BASE_ALCHEMY_API_KEY ?? config.ALCHEMY_API_KEY}`) });
   const rpcClients = { eth: ethRpcClient, base: baseRpcClient };
 
-  const marksJob = startMarksJob(db, rpcClients);
-
   const weightProvider = new BrainWeightProvider();
   const scorerJob = startScorerJob(db, weightProvider, rpcClients);
 
   const engine = new PaperEngine(db, bus, config, rpcClients, weightProvider);
   await engine.start();
+  const marksJob = startMarksJob(db, rpcClients, {
+    onMark: (mark) => engine.ingestPriceMark(mark.chain, mark.tokenAddress, mark.priceUsd),
+  });
+  const polymarketMarksJob = startPolymarketMarksJob(db, {
+    onMark: (mark) => engine.ingestPriceMark(mark.chain, mark.tokenAddress, mark.priceUsd),
+  });
   const exitJob = startExitJob(db, engine);
   const candidateCopyJob = startCandidateCopyJob(db, engine);
 
@@ -145,17 +151,20 @@ async function main() {
     await watcher.start();
   }
 
-  // Polymarket (Polygon) — watch+record only, fully decoupled from the EVM bus/decoder/engine.
+  // Polymarket (Polygon) — watcher writes confirmed rows directly; a separate copy job drains the
+  // unfilled rows into the dedicated Polygon engine path without touching the EVM hot bus/decoder.
   const polymarketWatcher = new PolymarketWatcher({
     db,
     pollMs: config.POLYMARKET_POLL_MS,
     baseUrl: config.POLYMARKET_DATA_API_URL,
   });
   await polymarketWatcher.start();
+  const polymarketCopyJob = startPolymarketCopyJob(db, engine);
+  const polymarketResolutionJob = startPolymarketResolutionJob(db, engine);
 
   const heartbeatJob = startHeartbeatJob(db, [...watchers, polymarketWatcher]);
 
-  logger.info("Runner ready — watching ETH, Base, and Polymarket (Polygon).");
+  logger.info("Runner ready — watching ETH, Base, and Polymarket (Polygon copy path enabled).");
 
   async function shutdown() {
     logger.info("Shutting down...");
@@ -163,8 +172,11 @@ async function main() {
     exitJob.stop();
     candidateCopyJob.stop();
     marksJob.stop();
+    polymarketMarksJob.stop();
     scorerJob.stop();
     heartbeatJob.stop();
+    polymarketCopyJob.stop();
+    polymarketResolutionJob.stop();
     decoder.stop();
     for (const watcher of watchers) watcher.stop();
     polymarketWatcher.stop();

@@ -360,7 +360,7 @@ export default function CandidatesPage() {
                         Dismiss
                       </button>
                     )}
-                    {/* Polymarket candidates are record-only — no AMM pricing/engine path to copy into. */}
+                    {/* Manual candidate copy remains EVM-only; Polymarket's live path bypasses this queue. */}
                     {candidate.venue !== "polymarket" && !canRecover && (
                       <button
                         className="button"

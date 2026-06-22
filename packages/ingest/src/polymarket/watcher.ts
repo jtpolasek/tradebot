@@ -21,7 +21,7 @@ const TRADE_PAGE_LIMIT = 100;
 // exceeded"). Cap pagination at that ceiling so we never request a page that is guaranteed to fail:
 // pages 0..30 cover offsets 0..3000 at limit 100. A wallet that made more new trades than that since
 // its last cursor leaves a permanent gap (the older trades are unreachable via this API), which is
-// acceptable for record-only candidates — the cursor still advances each cycle, so the poller keeps
+// acceptable for persisted Polymarket signals — the cursor still advances each cycle, so the poller keeps
 // making forward progress instead of failing on every poll forever.
 const MAX_HISTORY_OFFSET = 3000;
 const MAX_PAGES_PER_WALLET = Math.floor(MAX_HISTORY_OFFSET / TRADE_PAGE_LIMIT) + 1; // 31
@@ -30,7 +30,7 @@ const MAX_PAGES_PER_WALLET = Math.floor(MAX_HISTORY_OFFSET / TRADE_PAGE_LIMIT) +
 export const POLYGON_USDC = "0x2791bca1f2de4661ed88a30c99a7a9449aa84174";
 const USDC_DECIMALS = 6;
 // CTF outcome shares have no on-chain ERC-20 decimals; we use a fixed 1e6 convention internally for
-// both the USDC leg and the share leg. Nothing downstream re-derives these (record-only).
+// both the USDC leg and the share leg. Nothing downstream re-derives these.
 const SHARE_DECIMALS = 6;
 type Cursor = { timestamp: number; seenKeysAtTimestamp: Set<string> };
 type PollWalletStats = {
@@ -54,13 +54,12 @@ function tradeKey(trade: PolymarketTrade): string {
 }
 
 /**
- * Map a Polymarket Data API trade to a record-only candidate `TradeSignal`. A BUY spends USDC for
- * outcome shares (tokenIn=USDC, tokenOut=outcome); a SELL is the reverse. `decodeStatus:"candidate"`
- * makes `insertSignal` default `reviewStatus:"pending"` and keeps it out of scoring/auto-copy.
- * Phase 10.1 persists condition metadata now even though the path is still record-only, so the later
- * resolution-settlement job can map a held tokenId back to the market/outcome that resolves it.
+ * Map a Polymarket Data API trade to a confirmed `TradeSignal`. A BUY spends USDC for outcome shares
+ * (tokenIn=USDC, tokenOut=outcome); a SELL is the reverse. Polymarket trades are now confidently
+ * decoded first-class signals (`decodeStatus:"decoded"`), so the runner can auto-copy them through
+ * the dedicated Polygon engine path; they never enter the review queue by default.
  */
-export function tradeToCandidateSignal(trade: PolymarketTrade, walletId: string): TradeSignal {
+export function tradeToSignal(trade: PolymarketTrade, walletId: string): TradeSignal {
   const side: "buy" | "sell" = trade.side === "BUY" ? "buy" : "sell";
   const usdc = toRaw(trade.size * trade.price, USDC_DECIMALS);
   const shares = toRaw(trade.size, SHARE_DECIMALS);
@@ -98,15 +97,18 @@ export function tradeToCandidateSignal(trade: PolymarketTrade, walletId: string)
     observedAt,
     confirmedAt: observedAt,
     blockNumber: null,
-    decodeStatus: "candidate",
-    confidence: null,
-    reason,
+    decodeStatus: "decoded",
+    confidence: 1,
+    reason: null,
     externalUrl,
     poolId: null,
     conditionId: trade.conditionId,
     outcomeIndex: trade.outcomeIndex ?? null,
   };
 }
+
+// Backward-compatible alias for older imports/tests; Phase 10.4 promotes these signals to decoded.
+export const tradeToCandidateSignal = tradeToSignal;
 
 export interface PolymarketWatcherOptions {
   db: Db;
@@ -118,10 +120,11 @@ export interface PolymarketWatcherOptions {
 }
 
 /**
- * Polls the Polymarket Data API per watched polygon wallet and records each new trade as a candidate
- * `TradeSignal`. Fully decoupled from the EVM bus/decoder/pricing/engine: it writes rows directly via
- * `insertSignal` and never emits on the core bus. Mirrors `ChainWatcher`'s 60s wallet reload and
- * `getHealth()` shape so the runner heartbeat and `/health` treat it uniformly.
+ * Polls the Polymarket Data API per watched polygon wallet and records each new trade as a persisted
+ * confirmed `TradeSignal`. Fully decoupled from the EVM bus/decoder: it writes rows directly via
+ * `insertSignal`, and a separate runner job drains unfilled Polygon rows into the paper engine.
+ * Mirrors `ChainWatcher`'s 60s wallet reload and `getHealth()` shape so the runner heartbeat and
+ * `/health` treat it uniformly.
  */
 export class PolymarketWatcher {
   private readonly db: Db;
@@ -198,7 +201,7 @@ export class PolymarketWatcher {
     }
   }
 
-  /** One poll cycle: fetch recent trades per wallet and persist any new ones as candidates. */
+  /** One poll cycle: fetch recent trades per wallet and persist any new ones as decoded signals. */
   async tick(): Promise<void> {
     if (this.stopped || this.running) return;
     this.running = true;
@@ -319,7 +322,7 @@ export class PolymarketWatcher {
   }
 
   private async recordTrade(trade: PolymarketTrade, walletId: string): Promise<void> {
-    const signal = tradeToCandidateSignal(trade, walletId);
+    const signal = tradeToSignal(trade, walletId);
     // Upsert readable token labels so the existing hydrateToken/TokenLink UI shows "Yes/No" + market
     // question and "USDC", rather than empty symbols (rowToSignal reads symbols from the tokens table).
     await upsertToken(this.db, {

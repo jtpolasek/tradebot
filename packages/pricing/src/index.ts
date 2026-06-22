@@ -1,8 +1,9 @@
 export { getUsdPrice, getUsdPriceResult, getLiquidityUsd, getLiquidityUsdResult, sqrtPriceX96ToPrice, clearCaches } from "./price.js";
 export type { PriceResult, PriceSource, LiquidityResult, MarketHint } from "./price.js";
-export { getPolymarketPrice, clearPolymarketPriceCache } from "./polymarket.js";
-export type { PolymarketPriceResult, PolymarketExecutionSide, GetPolymarketPriceOptions } from "./polymarket.js";
+export { getPolymarketPrice, getPolymarketMarketStatus, getPolymarketResolutionPayout, clearPolymarketPriceCache } from "./polymarket.js";
+export type { PolymarketPriceResult, PolymarketExecutionSide, GetPolymarketPriceOptions, PolymarketMarketStatus, GetPolymarketMarketStatusOptions } from "./polymarket.js";
 export { startMarksJob } from "./marks.js";
+export { startPolymarketMarksJob } from "./polymarketMarks.js";
 export { getZeroxPrice, normalizeZeroxPriceQuote, summarizeZeroxIssues, assertUsableZeroxQuote, summarizeDexFees } from "./zerox.js";
 export type { ZeroxRawQuote, ZeroxPriceParams, NormalizedZeroxQuote, UnpricedFee } from "./zerox.js";
 export { getUniswapQuote, normalizeUniswapQuote, assertUsableUniswapQuote, summarizeUniswapIssues } from "./uniswapQuote.js";

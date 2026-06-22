@@ -4,6 +4,7 @@ import { z } from "zod";
 const logger = createLogger("pricing:polymarket");
 
 const PRICE_TTL_MS = 5_000;
+const MARKET_STATUS_TTL_MS = 30_000;
 const MAX_POLYMARKET_CACHE_ENTRIES = 5_000;
 
 const SharePriceSchema = z.union([z.number(), z.string()]).transform((value, ctx) => {
@@ -43,20 +44,78 @@ export interface GetPolymarketPriceOptions {
   maxSpreadBps?: number;
 }
 
+export type PolymarketMarketStatus = {
+  conditionId: string;
+  source: "polymarket-gamma";
+  fetchedAt: number;
+  active: boolean | null;
+  closed: boolean;
+  resolved: boolean;
+  acceptingOrders: boolean | null;
+  outcomes: string[] | null;
+  outcomePrices: number[] | null;
+  clobTokenIds: string[] | null;
+};
+
+export interface GetPolymarketMarketStatusOptions {
+  baseUrl?: string;
+  fetchImpl?: typeof fetch;
+}
+
 type CachedQuote = {
   bestBid: number;
   bestAsk: number;
   fetchedAt: number;
 };
 
+type CachedMarketStatus = PolymarketMarketStatus;
+
+const GammaBooleanSchema = z.union([z.boolean(), z.number(), z.string()]).transform((value, ctx) => {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") {
+    if (value === 1) return true;
+    if (value === 0) return false;
+  }
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (["1", "true", "yes", "on"].includes(normalized)) return true;
+    if (["0", "false", "no", "off"].includes(normalized)) return false;
+  }
+  ctx.addIssue({
+    code: z.ZodIssueCode.custom,
+    message: "expected a boolean-like value",
+  });
+  return z.NEVER;
+});
+
+const GammaMarketSchema = z.object({
+  conditionId: z.string().optional(),
+  condition_id: z.string().optional(),
+  active: GammaBooleanSchema.optional(),
+  closed: GammaBooleanSchema.optional(),
+  resolved: GammaBooleanSchema.optional(),
+  acceptingOrders: GammaBooleanSchema.optional(),
+  accepting_orders: GammaBooleanSchema.optional(),
+  outcomes: z.unknown().optional(),
+  outcomePrices: z.unknown().optional(),
+  outcome_prices: z.unknown().optional(),
+  clobTokenIds: z.unknown().optional(),
+  clob_token_ids: z.unknown().optional(),
+}).passthrough();
+
 const quoteCache = new Map<string, CachedQuote>();
+const marketStatusCache = new Map<string, CachedMarketStatus>();
 
 function normalizeTokenId(tokenId: string): string {
   return tokenId.trim().toLowerCase();
 }
 
-function cacheKey(baseUrl: string, tokenId: string): string {
-  return `${baseUrl.replace(/\/$/, "")}:${normalizeTokenId(tokenId)}`;
+function normalizeConditionId(conditionId: string): string {
+  return conditionId.trim().toLowerCase();
+}
+
+function cacheKey(baseUrl: string, id: string): string {
+  return `${baseUrl.replace(/\/$/, "")}:${id}`;
 }
 
 function cappedSet<K, V>(map: Map<K, V>, key: K, value: V): void {
@@ -70,6 +129,10 @@ function cappedSet<K, V>(map: Map<K, V>, key: K, value: V): void {
 
 function currentBaseUrl(opts: GetPolymarketPriceOptions): string {
   return opts.baseUrl ?? config.POLYMARKET_CLOB_API_URL;
+}
+
+function currentGammaBaseUrl(opts: GetPolymarketMarketStatusOptions): string {
+  return opts.baseUrl ?? config.POLYMARKET_GAMMA_API_URL;
 }
 
 function currentMaxSpreadBps(opts: GetPolymarketPriceOptions): number {
@@ -107,7 +170,7 @@ async function readQuote(
   opts: GetPolymarketPriceOptions = {},
 ): Promise<CachedQuote> {
   const baseUrl = currentBaseUrl(opts);
-  const key = cacheKey(baseUrl, tokenId);
+  const key = cacheKey(baseUrl, normalizeTokenId(tokenId));
   const cached = quoteCache.get(key);
   if (cached && Date.now() - cached.fetchedAt < PRICE_TTL_MS) return cached;
 
@@ -126,6 +189,92 @@ async function readQuote(
   };
   cappedSet(quoteCache, key, quote);
   return quote;
+}
+
+async function fetchGammaMarket(
+  baseUrl: string,
+  conditionId: string,
+  fetchImpl: typeof fetch,
+): Promise<z.infer<typeof GammaMarketSchema>[]> {
+  const endpoint = `${baseUrl.replace(/\/$/, "")}/markets`;
+  const queries = [
+    new URLSearchParams({ condition_id: conditionId }),
+    new URLSearchParams({ conditionId }),
+  ];
+
+  let lastStatus = 0;
+  for (const query of queries) {
+    const res = await fetchImpl(`${endpoint}?${query.toString()}`);
+    lastStatus = res.status;
+    if (!res.ok) continue;
+    const json: unknown = await res.json();
+    const parsed = parseGammaMarkets(json);
+    if (parsed.length > 0) return parsed;
+  }
+
+  throw new Error(`Polymarket Gamma /markets ${lastStatus} for condition ${conditionId}`);
+}
+
+function parseGammaMarkets(json: unknown): z.infer<typeof GammaMarketSchema>[] {
+  if (Array.isArray(json)) return z.array(GammaMarketSchema).parse(json);
+  if (json && typeof json === "object") {
+    const obj = json as Record<string, unknown>;
+    if (Array.isArray(obj["data"])) return z.array(GammaMarketSchema).parse(obj["data"]);
+    return [GammaMarketSchema.parse(obj)];
+  }
+  throw new Error("Polymarket Gamma /markets returned an unexpected payload shape");
+}
+
+function normalizeMarketStatus(
+  conditionId: string,
+  market: z.infer<typeof GammaMarketSchema>,
+  fetchedAt: number,
+): PolymarketMarketStatus {
+  const active = market.active ?? null;
+  const closed = market.closed ?? (active === false);
+  const resolved = market.resolved ?? false;
+  const acceptingOrders = market.acceptingOrders ?? market.accepting_orders ?? null;
+  return {
+    conditionId,
+    source: "polymarket-gamma",
+    fetchedAt,
+    active,
+    closed,
+    resolved,
+    acceptingOrders,
+    outcomes: parseStringArrayField(market.outcomes),
+    outcomePrices: parseNumberArrayField(market.outcomePrices ?? market.outcome_prices),
+    clobTokenIds: parseStringArrayField(market.clobTokenIds ?? market.clob_token_ids),
+  };
+}
+
+function parseStringArrayField(value: unknown): string[] | null {
+  const parsed = parseArrayField(value);
+  if (!parsed) return null;
+  const normalized = parsed
+    .map((item) => (typeof item === "string" ? item.trim() : String(item)))
+    .filter((item) => item.length > 0);
+  return normalized.length > 0 ? normalized : null;
+}
+
+function parseNumberArrayField(value: unknown): number[] | null {
+  const parsed = parseArrayField(value);
+  if (!parsed) return null;
+  const normalized = parsed
+    .map((item) => (typeof item === "number" ? item : Number(item)))
+    .filter((item) => Number.isFinite(item));
+  return normalized.length > 0 ? normalized : null;
+}
+
+function parseArrayField(value: unknown): unknown[] | null {
+  if (Array.isArray(value)) return value;
+  if (typeof value !== "string") return null;
+  try {
+    const parsed: unknown = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
 }
 
 export async function getPolymarketPrice(
@@ -155,8 +304,54 @@ export async function getPolymarketPrice(
   }
 }
 
+export async function getPolymarketMarketStatus(
+  conditionId: string,
+  opts: GetPolymarketMarketStatusOptions = {},
+): Promise<PolymarketMarketStatus | null> {
+  const normalizedConditionId = normalizeConditionId(conditionId);
+  try {
+    const baseUrl = currentGammaBaseUrl(opts);
+    const key = cacheKey(baseUrl, normalizedConditionId);
+    const cached = marketStatusCache.get(key);
+    if (cached && Date.now() - cached.fetchedAt < MARKET_STATUS_TTL_MS) return cached;
+
+    const fetchImpl = opts.fetchImpl ?? fetch;
+    const markets = await fetchGammaMarket(baseUrl, normalizedConditionId, fetchImpl);
+    const matching =
+      markets.find((market) => normalizeConditionId(market.conditionId ?? market.condition_id ?? "") === normalizedConditionId) ??
+      markets[0];
+    if (!matching) return null;
+
+    const normalized = normalizeMarketStatus(normalizedConditionId, matching, Date.now());
+    cappedSet(marketStatusCache, key, normalized);
+    return normalized;
+  } catch (err) {
+    logger.warn({ err, conditionId: normalizedConditionId }, "Polymarket Gamma market-status lookup failed");
+    return null;
+  }
+}
+
 export function clearPolymarketPriceCache(): void {
   quoteCache.clear();
+  marketStatusCache.clear();
+}
+
+/**
+ * Resolution payout for one outcome index. Gamma's live `/markets` payload currently exposes
+ * terminal prices via `outcomePrices` rather than a dedicated winner field, so the settler treats a
+ * closed/resolved market as settleable only when the relevant outcome is clearly 1 or 0.
+ */
+export function getPolymarketResolutionPayout(
+  status: Pick<PolymarketMarketStatus, "closed" | "resolved" | "outcomePrices">,
+  outcomeIndex: number,
+): 0 | 1 | null {
+  if (!Number.isInteger(outcomeIndex) || outcomeIndex < 0) return null;
+  if (!status.closed && !status.resolved) return null;
+  const price = status.outcomePrices?.[outcomeIndex];
+  if (price === undefined || !Number.isFinite(price)) return null;
+  if (price >= 0.99) return 1;
+  if (price <= 0.01) return 0;
+  return null;
 }
 
 /** Test-only probe of the bounded per-token quote cache size. */
@@ -164,3 +359,7 @@ export function __polymarketCacheSize(): number {
   return quoteCache.size;
 }
 
+/** Test-only probe of the bounded per-condition market-status cache size. */
+export function __polymarketMarketStatusCacheSize(): number {
+  return marketStatusCache.size;
+}

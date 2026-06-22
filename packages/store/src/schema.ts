@@ -63,7 +63,8 @@ export const tradeSignals = pgTable("trade_signals", {
   // back to value V4-only tokens, whose pools can't be discovered on-chain by token pair.
   poolId: text("pool_id"),
   // Polymarket condition metadata for later resolution settlement. Null for all non-Polymarket
-  // venues; record-only Phase 10.1 persists it now so the later jobs have a stable join key.
+  // venues; the Polygon copy path persists it so marks/settlement can join a held outcome share
+  // back to the market that ultimately resolves.
   conditionId: text("condition_id"),
   outcomeIndex: integer("outcome_index"),
 }, (t) => [

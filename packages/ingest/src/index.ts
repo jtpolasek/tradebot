@@ -1,6 +1,6 @@
 export { ChainWatcher } from "./evm/chainWatcher.js";
 export type { ChainWatcherOptions } from "./evm/chainWatcher.js";
-export { PolymarketWatcher, tradeToCandidateSignal, POLYGON_USDC } from "./polymarket/watcher.js";
+export { PolymarketWatcher, tradeToSignal, tradeToCandidateSignal, POLYGON_USDC } from "./polymarket/watcher.js";
 export type { PolymarketWatcherOptions } from "./polymarket/watcher.js";
 export { fetchTrades, PolymarketTradeSchema } from "./polymarket/client.js";
 export type { PolymarketTrade } from "./polymarket/client.js";

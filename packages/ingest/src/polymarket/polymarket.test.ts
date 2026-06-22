@@ -29,7 +29,7 @@ vi.mock("@tradebot/store", () => ({
 }));
 
 import { fetchTrades, PolymarketTradeSchema, type PolymarketTrade } from "./client.js";
-import { tradeToCandidateSignal, PolymarketWatcher, POLYGON_USDC } from "./watcher.js";
+import { tradeToSignal, PolymarketWatcher, POLYGON_USDC } from "./watcher.js";
 
 const BASE = "https://data-api.polymarket.com";
 
@@ -123,13 +123,13 @@ describe("fetchTrades", () => {
   });
 });
 
-describe("tradeToCandidateSignal", () => {
+describe("tradeToSignal", () => {
   it("maps a BUY: USDC in, outcome shares out (1e6 convention)", () => {
-    const sig = tradeToCandidateSignal(sampleTrade({ side: "BUY", size: 100, price: 0.62 }), "wallet-1");
+    const sig = tradeToSignal(sampleTrade({ side: "BUY", size: 100, price: 0.62 }), "wallet-1");
     expect(sig.chain).toBe("polygon");
     expect(sig.venue).toBe("polymarket");
     expect(sig.side).toBe("buy");
-    expect(sig.decodeStatus).toBe("candidate");
+    expect(sig.decodeStatus).toBe("decoded");
     expect(sig.walletId).toBe("wallet-1");
     expect(sig.tokenIn.address).toBe(POLYGON_USDC);
     expect(sig.tokenOut.address).toBe(sampleTrade().asset);
@@ -138,15 +138,14 @@ describe("tradeToCandidateSignal", () => {
     expect(sig.amountIn).toBe(62_000_000n);
     expect(sig.amountOut).toBe(100_000_000n);
     expect(sig.confirmedAt).toBe(1_700_000_000 * 1000);
-    expect(sig.reason).toContain("Will X happen by July?");
-    expect(sig.reason).not.toContain("polymarket.com/event/will-x-happen-event");
+    expect(sig.reason).toBeNull();
     expect(sig.externalUrl).toBe("https://polymarket.com/event/will-x-happen-event");
     expect(sig.conditionId).toBe("0xcond");
     expect(sig.outcomeIndex).toBe(0);
   });
 
   it("maps a SELL: outcome shares in, USDC out", () => {
-    const sig = tradeToCandidateSignal(sampleTrade({ side: "SELL", outcome: "No", size: 50, price: 0.4 }), "wallet-1");
+    const sig = tradeToSignal(sampleTrade({ side: "SELL", outcome: "No", size: 50, price: 0.4 }), "wallet-1");
     expect(sig.side).toBe("sell");
     expect(sig.tokenIn.address).toBe(sampleTrade().asset);
     expect(sig.tokenIn.symbol).toBe("No");
@@ -156,7 +155,7 @@ describe("tradeToCandidateSignal", () => {
   });
 
   it("preserves a missing outcomeIndex as null", () => {
-    const sig = tradeToCandidateSignal(sampleTrade({ outcomeIndex: undefined }), "wallet-1");
+    const sig = tradeToSignal(sampleTrade({ outcomeIndex: undefined }), "wallet-1");
     expect(sig.conditionId).toBe("0xcond");
     expect(sig.outcomeIndex).toBeNull();
   });

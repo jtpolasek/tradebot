@@ -23,7 +23,17 @@ import {
   latestMark,
   getV4MarketHintForToken,
 } from "@tradebot/store";
-import { assertUsableZeroxQuote, getLiquidityUsd, getLiquidityUsdResult, getUsdPrice, getUsdPriceResult, getZeroxPrice } from "@tradebot/pricing";
+import {
+  assertUsableZeroxQuote,
+  getLiquidityUsd,
+  getLiquidityUsdResult,
+  getPolymarketMarketStatus,
+  getPolymarketPrice,
+  getPolymarketResolutionPayout,
+  getUsdPrice,
+  getUsdPriceResult,
+  getZeroxPrice,
+} from "@tradebot/pricing";
 import type { PriceResult, MarketHint } from "@tradebot/pricing";
 import { applyTradeToState } from "./accounting.js";
 import type { AccountingPortfolio, AccountingPosition } from "./accounting.js";
@@ -331,6 +341,12 @@ export class PaperEngine {
   }
 
   private estimateSignalSourceNotionalUsd(signal: TradeSignal): number | null {
+    if (signal.chain === "polygon") {
+      const usdcLeg = signal.side === "buy" ? signal.amountIn : signal.amountOut;
+      const decimals = signal.side === "buy" ? signal.tokenIn.decimals : signal.tokenOut.decimals;
+      const notional = rawToHumanNumber(usdcLeg, decimals);
+      return Number.isFinite(notional) && notional > 0 ? notional : null;
+    }
     const candidate: SizingCandidate = {
       side: signal.side,
       tokenInSymbol: signal.tokenIn.symbol,
@@ -466,6 +482,10 @@ export class PaperEngine {
     // manual candidate copy (reviewStatus 'copying') is an explicit human approval that bypasses this.
     if (signal.side === "buy" && signal.reviewStatus !== "copying" && this.autoCopyDisabled.has(signal.walletId)) {
       return this.recordSkip(signal, "auto-copy-off", token, quoteToken);
+    }
+
+    if (signal.chain === "polygon") {
+      return this.handlePolymarketSignal(signal, token, quoteToken);
     }
 
     // Mempool fast path: a copy-trader's edge is acting on the pre-block signal. Commit a provisional
@@ -695,6 +715,156 @@ export class PaperEngine {
     logger.info({ fillId, side: signal.side, notionalUsd, priceUsd: fillPrice, provisional }, "paper fill");
   }
 
+  private decidePolymarket(signal: TradeSignal): { action: "copy"; notionalUsd: number } | { action: "skip"; reason: string } {
+    if (this.weights.getWeight(signal.walletId) === 0) return { action: "skip", reason: "leader-weight-zero" };
+
+    if (signal.side === "buy") return this.sizeBuy(signal);
+
+    const token = signal.tokenIn;
+    const key = posKey(signal.chain, token.address, signal.walletId);
+    const pos = this.positions.get(key);
+    if (!pos || pos.qty <= 0) return { action: "skip", reason: "no-position" };
+
+    const fraction = this.estimateLeaderSellFraction(signal);
+    const sellQty = fraction * pos.qty;
+    return { action: "copy", notionalUsd: sellQty * pos.avgCostUsd };
+  }
+
+  private async handlePolymarketSignal(signal: TradeSignal, token: TokenRef, quoteToken: TokenRef): Promise<void> {
+    const decision = this.decidePolymarket(signal);
+    if (decision.action === "skip") {
+      return this.recordSkip(signal, decision.reason, token, quoteToken);
+    }
+
+    const [quote, marketStatus] = await Promise.all([
+      getPolymarketPrice(token.address, signal.side),
+      signal.side === "buy" && signal.conditionId ? getPolymarketMarketStatus(signal.conditionId) : Promise.resolve(null),
+    ]);
+
+    if (signal.side === "buy" && marketStatus?.resolved) {
+      return this.recordSkip(signal, "market-resolved", token, quoteToken);
+    }
+    if (signal.side === "buy" && (marketStatus?.closed || marketStatus?.active === false || marketStatus?.acceptingOrders === false)) {
+      return this.recordSkip(signal, "market-closed", token, quoteToken);
+    }
+    if (!quote || quote.price <= 0) {
+      return this.recordSkip(signal, "no-price-data", token, quoteToken);
+    }
+    if (signal.side === "buy" && quote.spreadBps !== null && quote.spreadBps > quote.maxSpreadBps) {
+      return this.recordSkip(signal, "max-spread", token, quoteToken);
+    }
+
+    const decidedAt = Date.now();
+    const fillId = randomUUID();
+    const slippageBps = quote.spreadBps !== null ? Math.max(0, Math.round(quote.spreadBps)) : 0;
+    let qty: number;
+    let notionalUsd: number;
+
+    if (signal.side === "buy") {
+      notionalUsd = decision.notionalUsd;
+      qty = notionalUsd / quote.price;
+      if (!Number.isFinite(qty) || qty <= 0) {
+        return this.recordSkip(signal, "no-price-data", token, quoteToken);
+      }
+      if (this.cashUsd < notionalUsd) {
+        return this.recordSkip(signal, "insufficient-balance", token, quoteToken);
+      }
+
+      const key = posKey(signal.chain, token.address, signal.walletId);
+      const existing = this.positions.get(key);
+      const existingAcct: AccountingPosition | null = existing
+        ? {
+            quantity: existing.qty,
+            averageEntryUsd: existing.avgCostUsd,
+            costBasisUsd: existing.qty * existing.avgCostUsd,
+            realizedPnlUsd: existing.realizedPnlUsd,
+            feesPaidUsd: 0,
+          }
+        : null;
+
+      const next = applyTradeToState({
+        portfolio: this.portfolio,
+        position: existingAcct,
+        trade: {
+          side: "buy",
+          quantity: qty,
+          notionalUsd,
+          gasUsd: 0,
+          slippageUsd: 0,
+          dexFeeUsd: 0,
+          totalCostUsd: notionalUsd,
+          sellProceedsUsd: 0,
+        },
+      });
+
+      this.portfolio = next.portfolio;
+      this.cashUsd = next.portfolio.cashUsd;
+      this.positions.set(key, {
+        qty: next.position.quantity,
+        avgCostUsd: next.position.averageEntryUsd,
+        realizedPnlUsd: next.position.realizedPnlUsd,
+      });
+
+      await upsertPosition(this.db, {
+        chain: signal.chain,
+        tokenAddress: token.address,
+        qty: next.position.quantity,
+        avgCostUsd: next.position.averageEntryUsd,
+        realizedPnlUsd: next.position.realizedPnlUsd,
+        sourceWalletId: signal.walletId,
+      });
+    } else {
+      const key = posKey(signal.chain, token.address, signal.walletId);
+      const existing = this.positions.get(key);
+      if (!existing || existing.qty <= 0) {
+        return this.recordSkip(signal, "no-position", token, quoteToken);
+      }
+
+      const posValue = existing.qty * existing.avgCostUsd;
+      const fraction = Math.min(1, decision.notionalUsd / Math.max(posValue, 1e-10));
+      qty = fraction * existing.qty;
+      notionalUsd = qty * quote.price;
+      await this.applySellToState({
+        chain: signal.chain,
+        tokenAddress: token.address,
+        walletId: signal.walletId,
+        posKey: key,
+        existing,
+        qty,
+        notionalUsd,
+        gasUsd: 0,
+        dexFeeUsd: 0,
+        effectiveFeeUsd: 0,
+      });
+    }
+
+    const fill: PaperFill = {
+      id: fillId,
+      signalId: signal.id,
+      decidedAt,
+      decision: "copied",
+      side: signal.side,
+      token,
+      quoteToken,
+      qty,
+      priceUsd: quote.price,
+      notionalUsd,
+      feeUsd: 0,
+      slippageBps,
+      latencyMs: decidedAt - signal.observedAt,
+      provisional: false,
+      priceSource: quote.source,
+      priceVenue: "polymarket",
+    };
+
+    await insertFill(this.db, fill);
+    await this.takeSnapshot();
+    this.bus.emit("paper-fill", fill);
+    this.rememberLeaderHolding(signal);
+    this.rememberSourceNotional(signal);
+    logger.info({ fillId, chain: signal.chain, side: signal.side, notionalUsd, priceUsd: quote.price }, "polymarket paper fill");
+  }
+
   /**
    * Mempool fast path for buys: commit a provisional fill at the leader's *implied* price with zero
    * token-side discovery — no findBestMarket fan-out, no spot price read, no 0x quote. The liquidity
@@ -831,6 +1001,18 @@ export class PaperEngine {
       // persisted candidate's reviewStatus, which the runner advances to 'copied' on success.
       reviewStatus: "copying",
     });
+  }
+
+  /**
+   * Execute a persisted, confirmed Polymarket signal through the normal engine path. The Polygon
+   * watcher writes rows directly to the database (it does not emit on the EVM bus), so the runner's
+   * auto-copy job re-enters the engine here.
+   */
+  async executePolymarketSignal(signal: TradeSignal): Promise<void> {
+    if (signal.chain !== "polygon") {
+      throw new Error(`executePolymarketSignal requires a polygon signal, got ${signal.chain}`);
+    }
+    await this.handleSignal(signal);
   }
 
   private async quoteFillPriceWithZerox(input: {
@@ -1241,18 +1423,138 @@ export class PaperEngine {
   getRealizedPnlUsd(): number {
     return this.portfolio.realizedPnlUsd;
   }
+
+  ingestPriceMark(chain: ChainId, tokenAddress: string, priceUsd: number): void {
+    if (!Number.isFinite(priceUsd) || priceUsd <= 0) return;
+    this.markPrices.set(markKey(chain, tokenAddress), priceUsd);
+  }
+
+  async settlePolymarketPosition(input: {
+    chain: "polygon";
+    tokenAddress: string;
+    qty: number;
+    avgCostUsd: number;
+    sourceWalletId: string | null;
+    conditionId: string;
+    outcomeIndex: number;
+  }): Promise<"settled" | "skipped"> {
+    if (input.sourceWalletId === null) {
+      logger.warn({ tokenAddress: input.tokenAddress, conditionId: input.conditionId }, "skipping Polymarket settlement for position without source wallet");
+      return "skipped";
+    }
+    if (input.qty <= 0) return "skipped";
+
+    const status = await getPolymarketMarketStatus(input.conditionId);
+    if (!status) return "skipped";
+
+    const payout = getPolymarketResolutionPayout(status, input.outcomeIndex);
+    if (payout === null) {
+      logger.debug({
+        conditionId: input.conditionId,
+        outcomeIndex: input.outcomeIndex,
+        closed: status.closed,
+        resolved: status.resolved,
+        outcomePrices: status.outcomePrices,
+      }, "Polymarket market not settleable yet");
+      return "skipped";
+    }
+
+    const tokenRow = await getToken(this.db, "polygon", input.tokenAddress.toLowerCase());
+    const token: TokenRef = {
+      chain: "polygon",
+      address: input.tokenAddress.toLowerCase(),
+      symbol: tokenRow?.symbol ?? "",
+      decimals: tokenRow?.decimals ?? 6,
+      ...(tokenRow?.name ? { name: tokenRow.name } : {}),
+    };
+    const quoteToken = quoteTokenFor("polygon");
+    const key = posKey("polygon", token.address, input.sourceWalletId);
+    const existing = this.positions.get(key) ?? {
+      qty: input.qty,
+      avgCostUsd: input.avgCostUsd,
+      realizedPnlUsd: 0,
+    };
+
+    const now = Date.now();
+    const signal: TradeSignal = {
+      id: randomUUID(),
+      chain: "polygon",
+      txHash: `resolution:${input.conditionId}:${input.outcomeIndex}:${token.address}:${input.sourceWalletId}`,
+      source: "confirmed",
+      side: "sell",
+      tokenIn: token,
+      tokenOut: quoteToken,
+      amountIn: toRawAmount(existing.qty, token.decimals),
+      amountOut: toRawAmount(existing.qty * payout, quoteToken.decimals),
+      venue: "polymarket-resolution",
+      observedAt: now,
+      confirmedAt: now,
+      blockNumber: null,
+      walletId: input.sourceWalletId,
+      decodeStatus: "decoded",
+      conditionId: input.conditionId,
+      outcomeIndex: input.outcomeIndex,
+    };
+    const signalId = await insertSignal(this.db, signal);
+
+    if (payout > 0) this.ingestPriceMark("polygon", token.address, payout);
+    await this.applySellToState({
+      chain: "polygon",
+      tokenAddress: token.address,
+      walletId: input.sourceWalletId,
+      posKey: key,
+      existing,
+      qty: existing.qty,
+      notionalUsd: existing.qty * payout,
+      gasUsd: 0,
+      dexFeeUsd: 0,
+      effectiveFeeUsd: 0,
+    });
+
+    const fill: PaperFill = {
+      id: randomUUID(),
+      signalId,
+      decidedAt: now,
+      decision: "copied",
+      side: "sell",
+      token,
+      quoteToken,
+      qty: existing.qty,
+      priceUsd: payout,
+      notionalUsd: existing.qty * payout,
+      feeUsd: 0,
+      slippageBps: 0,
+      latencyMs: 0,
+      provisional: false,
+      priceSource: status.source,
+      priceVenue: "polymarket-resolution",
+    };
+    await insertFill(this.db, fill);
+    await this.takeSnapshot();
+    this.bus.emit("paper-fill", fill);
+    logger.info({
+      signalId,
+      conditionId: input.conditionId,
+      outcomeIndex: input.outcomeIndex,
+      payout,
+      qty: existing.qty,
+    }, "polymarket position settled at resolution");
+    return "settled";
+  }
 }
 
 /**
- * A confirmed signal is stale when its block timestamp is older than maxAgeMs. Mempool and
- * test signals without a block timestamp are never stale (they're live by construction).
+ * A confirmed signal is stale when its source timestamp is older than maxAgeMs. EVM signals use the
+ * block timestamp (observedAt is merely WS-receipt time), while Polymarket signals use observedAt
+ * because the watcher stamps it from the trade timestamp itself. Mempool signals are never stale.
  */
 export function isStaleSignal(
-  signal: Pick<TradeSignal, "blockTimestamp">,
+  signal: Pick<TradeSignal, "blockTimestamp" | "observedAt" | "source" | "chain">,
   nowMs: number,
   maxAgeMs: number
 ): boolean {
-  const ts = signal.blockTimestamp;
+  if (signal.source === "mempool") return false;
+  const ts = signal.blockTimestamp ?? (signal.chain === "polygon" ? signal.observedAt : null);
   if (ts === undefined || ts === null) return false;
   return nowMs - ts > maxAgeMs;
 }
@@ -1349,10 +1651,16 @@ function classifyLiquidityTier(liquidityUsd: number | null): LiquidityTier {
   return "longtail";
 }
 
-function quoteTokenFor(chain: EvmChainId): TokenRef {
-  return chain === "eth"
-    ? { chain, address: "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", symbol: "USDC", decimals: 6 }
-    : { chain, address: "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913", symbol: "USDC", decimals: 6 };
+function quoteTokenFor(chain: EvmChainId): TokenRef;
+function quoteTokenFor(chain: "polygon"): TokenRef;
+function quoteTokenFor(chain: EvmChainId | "polygon"): TokenRef {
+  if (chain === "eth") {
+    return { chain, address: "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", symbol: "USDC", decimals: 6 };
+  }
+  if (chain === "base") {
+    return { chain, address: "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913", symbol: "USDC", decimals: 6 };
+  }
+  return { chain, address: "0x2791bca1f2de4661ed88a30c99a7a9449aa84174", symbol: "USDC", decimals: 6 };
 }
 
 function toRawAmount(amount: number, decimals: number): bigint {

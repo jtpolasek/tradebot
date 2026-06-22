@@ -43,12 +43,13 @@ const schema = z.object({
   HEARTBEAT_STALE_SEC: z.coerce.number().positive().default(30),
   CHAIN_STALE_SEC_ETH: z.coerce.number().positive().default(60),
   CHAIN_STALE_SEC_BASE: z.coerce.number().positive().default(30),
-  // Polymarket poller (watch+record only). Generous staleness vs the 20s poll so a brief gap
-  // between ticks isn't flagged; a genuinely stalled poller still surfaces in /health.
+  // Polymarket poller freshness threshold. Generous vs the 20s poll so a brief gap between ticks
+  // isn't flagged; a genuinely stalled poller still surfaces in /health.
   CHAIN_STALE_SEC_POLYGON: z.coerce.number().positive().default(120),
   POLYMARKET_POLL_MS: z.coerce.number().positive().default(20_000),
   POLYMARKET_DATA_API_URL: z.string().url().default("https://data-api.polymarket.com"),
   POLYMARKET_CLOB_API_URL: z.string().url().default("https://clob.polymarket.com"),
+  POLYMARKET_GAMMA_API_URL: z.string().url().default("https://gamma-api.polymarket.com"),
   POLYMARKET_MAX_SPREAD_BPS: z.coerce.number().nonnegative().default(500),
   RSS_SOFT_LIMIT_MB: z.coerce.number().positive().default(1536),
   LOG_LEVEL: z.enum(["trace", "debug", "info", "warn", "error", "fatal"]).default("info"),

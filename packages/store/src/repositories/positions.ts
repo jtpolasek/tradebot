@@ -1,6 +1,6 @@
-import { eq, and, isNull } from "drizzle-orm";
+import { eq, and, isNull, desc, isNotNull, or } from "drizzle-orm";
 import type { Db } from "../db.js";
-import { positions } from "../schema.js";
+import { positions, tradeSignals } from "../schema.js";
 import type { ChainId, TokenRef } from "@tradebot/core";
 import { getToken } from "./tokens.js";
 
@@ -15,6 +15,12 @@ export type PositionRow = {
   realizedPnlUsd: number;
   sourceWalletId: string | null;
   token?: TokenRef;
+};
+
+export type OpenPolymarketPositionForSettlement = Omit<PositionRow, "chain"> & {
+  chain: "polygon";
+  conditionId: string;
+  outcomeIndex: number;
 };
 
 export async function upsertPosition(db: Db, pos: Omit<PositionRow, "id" | "openedAt" | "closedAt">): Promise<void> {
@@ -77,6 +83,50 @@ export async function getPosition(
 export async function getOpenPositions(db: Db): Promise<PositionRow[]> {
   const rows = await db.select().from(positions).where(isNull(positions.closedAt));
   return Promise.all(rows.map((row) => hydratePosition(db, rowToPosition(row))));
+}
+
+/**
+ * Open copied Polymarket positions with the condition/outcome metadata needed for resolution
+ * settlement. The metadata is recovered from the most recent persisted Polymarket signal touching
+ * the held token for that wallet.
+ */
+export async function getOpenPolymarketPositionsForSettlement(db: Db): Promise<OpenPolymarketPositionForSettlement[]> {
+  const open = await getOpenPositions(db);
+  const results: OpenPolymarketPositionForSettlement[] = [];
+
+  for (const position of open) {
+    if (position.chain !== "polygon" || position.sourceWalletId === null) continue;
+    const rows = await db
+      .select({
+        conditionId: tradeSignals.conditionId,
+        outcomeIndex: tradeSignals.outcomeIndex,
+      })
+      .from(tradeSignals)
+      .where(and(
+        eq(tradeSignals.chain, "polygon"),
+        eq(tradeSignals.venue, "polymarket"),
+        eq(tradeSignals.walletId, position.sourceWalletId),
+        isNotNull(tradeSignals.conditionId),
+        isNotNull(tradeSignals.outcomeIndex),
+        or(
+          eq(tradeSignals.tokenIn, position.tokenAddress.toLowerCase()),
+          eq(tradeSignals.tokenOut, position.tokenAddress.toLowerCase()),
+        ),
+      ))
+      .orderBy(desc(tradeSignals.observedAt))
+      .limit(1);
+
+    const row = rows[0];
+    if (!row?.conditionId || row.outcomeIndex === null) continue;
+    results.push({
+      ...position,
+      chain: "polygon",
+      conditionId: row.conditionId,
+      outcomeIndex: row.outcomeIndex,
+    });
+  }
+
+  return results;
 }
 
 export async function closePosition(db: Db, id: string, realizedPnlUsd: number): Promise<void> {

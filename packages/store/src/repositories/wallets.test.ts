@@ -14,6 +14,7 @@ import {
   insertSignal,
   getSignalById,
   getRecentSignals,
+  getPendingPolymarketSignals,
   getCandidateSignals,
   getCandidateTriageSummary,
   getCopyRequestedCandidates,
@@ -22,7 +23,7 @@ import {
   getV4MarketHintForToken,
 } from "./signals.js";
 import { insertFill, getRecentFills } from "./paperFills.js";
-import { upsertPosition, closePositionByKey } from "./positions.js";
+import { upsertPosition, closePositionByKey, getOpenPolymarketPositionsForSettlement } from "./positions.js";
 import { getPortfolioAnalytics } from "./analytics.js";
 import { upsertToken } from "./tokens.js";
 
@@ -376,6 +377,55 @@ describe("candidate review repositories", () => {
     expect(signal?.outcomeIndex).toBe(1);
   });
 
+  it("finds open Polymarket positions with settlement metadata", async () => {
+    const wallet = await insertWallet(db as Parameters<typeof insertWallet>[0], {
+      chain: "polygon",
+      address: "0x9999999999999999999999999999999999999999",
+      label: "Poly settlement",
+      active: true,
+    });
+    const tokenAddress = "71321045679252212594626385532706912750332728571942532289631379312455583992563";
+    await upsertPosition(db as Parameters<typeof upsertPosition>[0], {
+      chain: "polygon",
+      tokenAddress,
+      qty: 100,
+      avgCostUsd: 0.42,
+      realizedPnlUsd: 0,
+      sourceWalletId: wallet.id,
+    });
+    await insertSignal(db as Parameters<typeof insertSignal>[0], {
+      id: randomUUID(),
+      chain: "polygon",
+      walletId: wallet.id,
+      txHash: "0xpolysettle",
+      source: "confirmed",
+      side: "buy",
+      tokenIn: { chain: "polygon", address: "0x2791bca1f2de4661ed88a30c99a7a9449aa84174", symbol: "USDC", decimals: 6 },
+      tokenOut: { chain: "polygon", address: tokenAddress, symbol: "YES", decimals: 6 },
+      amountIn: 42_000_000n,
+      amountOut: 100_000_000n,
+      venue: "polymarket",
+      observedAt: Date.now(),
+      confirmedAt: Date.now(),
+      blockNumber: null,
+      decodeStatus: "decoded",
+      conditionId: "0xcondition-settle",
+      outcomeIndex: 0,
+    });
+
+    const positions = await getOpenPolymarketPositionsForSettlement(
+      db as Parameters<typeof getOpenPolymarketPositionsForSettlement>[0],
+    );
+
+    expect(positions).toContainEqual(expect.objectContaining({
+      chain: "polygon",
+      tokenAddress,
+      sourceWalletId: wallet.id,
+      conditionId: "0xcondition-settle",
+      outcomeIndex: 0,
+    }));
+  });
+
   it("hydrates signal token names from stored token metadata", async () => {
     await upsertToken(db as Parameters<typeof upsertToken>[0], {
       chain: "eth",
@@ -391,6 +441,57 @@ describe("candidate review repositories", () => {
     const signal = signals.find((row) => row.id === id);
     expect(signal?.tokenOut.symbol).toBe("TEST");
     expect(signal?.tokenOut.name).toBe("Test Token");
+  });
+
+  it("lists only unfilled decoded Polymarket signals for the auto-copy job", async () => {
+    const pendingId = await insertTestSignal({
+      chain: "polygon",
+      venue: "polymarket",
+      tokenIn: { chain: "polygon", address: "0x0000000000000000000000000000000000000001", symbol: "USDC", decimals: 6 },
+      tokenOut: { chain: "polygon", address: "0x0000000000000000000000000000000000000002", symbol: "YES", decimals: 6 },
+      decodeStatus: "decoded",
+      reviewStatus: null,
+    });
+    const processedId = await insertTestSignal({
+      chain: "polygon",
+      venue: "polymarket",
+      tokenIn: { chain: "polygon", address: "0x0000000000000000000000000000000000000001", symbol: "USDC", decimals: 6 },
+      tokenOut: { chain: "polygon", address: "0x0000000000000000000000000000000000000003", symbol: "NO", decimals: 6 },
+      decodeStatus: "decoded",
+      reviewStatus: null,
+      observedAt: Date.now() + 1_000,
+      confirmedAt: Date.now() + 1_000,
+    });
+    const candidateId = await insertTestSignal({
+      chain: "polygon",
+      venue: "polymarket",
+      tokenIn: { chain: "polygon", address: "0x0000000000000000000000000000000000000001", symbol: "USDC", decimals: 6 },
+      tokenOut: { chain: "polygon", address: "0x0000000000000000000000000000000000000004", symbol: "MAYBE", decimals: 6 },
+      decodeStatus: "candidate",
+    });
+
+    await insertFill(db as Parameters<typeof insertFill>[0], {
+      id: randomUUID(),
+      signalId: processedId,
+      decidedAt: Date.now(),
+      decision: "skipped",
+      skipReason: "auto-copy-off",
+      side: "buy",
+      token: { chain: "polygon", address: "0x0000000000000000000000000000000000000003", symbol: "NO", decimals: 6 },
+      quoteToken: { chain: "polygon", address: "0x0000000000000000000000000000000000000001", symbol: "USDC", decimals: 6 },
+      qty: 0,
+      priceUsd: 0,
+      notionalUsd: 0,
+      feeUsd: 0,
+      slippageBps: 0,
+      latencyMs: 0,
+      provisional: false,
+    });
+
+    const pending = await getPendingPolymarketSignals(db as Parameters<typeof getPendingPolymarketSignals>[0], 10);
+    expect(pending.map((signal) => signal.id)).toEqual([pendingId]);
+    expect(pending.map((signal) => signal.id)).not.toContain(processedId);
+    expect(pending.map((signal) => signal.id)).not.toContain(candidateId);
   });
 
   it("hydrates native placeholder signal tokens as ETH", async () => {

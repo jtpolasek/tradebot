@@ -1,8 +1,17 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { __polymarketCacheSize, clearPolymarketPriceCache, getPolymarketPrice } from "./polymarket.js";
+import {
+  __polymarketCacheSize,
+  __polymarketMarketStatusCacheSize,
+  clearPolymarketPriceCache,
+  getPolymarketMarketStatus,
+  getPolymarketPrice,
+  getPolymarketResolutionPayout,
+} from "./polymarket.js";
 
 const BASE = "https://clob.polymarket.com";
+const GAMMA_BASE = "https://gamma-api.polymarket.com";
 const TOKEN_ID = "71321045679252212594626385532706912750332728571942532289631379312455583992563";
+const CONDITION_ID = "0x" + "ab".repeat(32);
 
 function jsonResponse(body: unknown, status = 200): Response {
   return {
@@ -118,5 +127,111 @@ describe("getPolymarketPrice", () => {
     fetchImpl.mockClear();
     await getPolymarketPrice(`token-${total - 1}`, "sell", { baseUrl: BASE, fetchImpl: fetchImpl as unknown as typeof fetch });
     expect(fetchImpl).not.toHaveBeenCalled();
+  });
+});
+
+describe("getPolymarketMarketStatus", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    clearPolymarketPriceCache();
+  });
+
+  it("parses a matching market row from Gamma and normalizes the status flags", async () => {
+    const fetchImpl = vi.fn(async () => jsonResponse([{
+      conditionId: CONDITION_ID.toUpperCase(),
+      active: false,
+      closed: true,
+      resolved: true,
+      accepting_orders: false,
+      outcomes: "[\"Yes\",\"No\"]",
+      outcomePrices: "[\"1\",\"0\"]",
+      clobTokenIds: "[\"yes-token\",\"no-token\"]",
+    }]));
+
+    const result = await getPolymarketMarketStatus(CONDITION_ID, {
+      baseUrl: GAMMA_BASE,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+
+    expect(result).toMatchObject({
+      conditionId: CONDITION_ID,
+      source: "polymarket-gamma",
+      active: false,
+      closed: true,
+      resolved: true,
+      acceptingOrders: false,
+      outcomes: ["Yes", "No"],
+      outcomePrices: [1, 0],
+      clobTokenIds: ["yes-token", "no-token"],
+    });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(String((fetchImpl.mock.calls[0] as unknown[])[0])).toContain(`/markets?condition_id=${encodeURIComponent(CONDITION_ID)}`);
+  });
+
+  it("falls back to the alternate query param when the first Gamma query misses", async () => {
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ error: "not found" }, 404))
+      .mockResolvedValueOnce(jsonResponse({
+        data: [{ condition_id: CONDITION_ID, active: "true", closed: "false", resolved: "false" }],
+      }));
+
+    const result = await getPolymarketMarketStatus(CONDITION_ID, {
+      baseUrl: GAMMA_BASE,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+
+    expect(result).toMatchObject({
+      conditionId: CONDITION_ID,
+      active: true,
+      closed: false,
+      resolved: false,
+    });
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(String((fetchImpl.mock.calls[1] as unknown[])[0])).toContain(`conditionId=${encodeURIComponent(CONDITION_ID)}`);
+  });
+
+  it("reuses the cached market status for repeated reads of the same condition", async () => {
+    const fetchImpl = vi.fn(async () => jsonResponse([{ conditionId: CONDITION_ID, active: true, closed: false, resolved: false }]));
+
+    await getPolymarketMarketStatus(CONDITION_ID, {
+      baseUrl: GAMMA_BASE,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+    await getPolymarketMarketStatus(CONDITION_ID, {
+      baseUrl: GAMMA_BASE,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(__polymarketMarketStatusCacheSize()).toBe(1);
+  });
+});
+
+describe("getPolymarketResolutionPayout", () => {
+  it("returns the terminal payout for a settled outcome", () => {
+    expect(getPolymarketResolutionPayout({
+      closed: true,
+      resolved: false,
+      outcomePrices: [1, 0],
+    }, 0)).toBe(1);
+    expect(getPolymarketResolutionPayout({
+      closed: true,
+      resolved: false,
+      outcomePrices: [1, 0],
+    }, 1)).toBe(0);
+  });
+
+  it("returns null for ambiguous or non-terminal markets", () => {
+    expect(getPolymarketResolutionPayout({
+      closed: true,
+      resolved: false,
+      outcomePrices: [0.5, 0.5],
+    }, 0)).toBeNull();
+    expect(getPolymarketResolutionPayout({
+      closed: false,
+      resolved: false,
+      outcomePrices: [1, 0],
+    }, 0)).toBeNull();
   });
 });

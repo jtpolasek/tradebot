@@ -183,7 +183,7 @@ describe("candidate review API", () => {
     expect(requestedId).toBeTruthy();
   });
 
-  it("copies a pending EVM candidate and blocks record-only candidates", async () => {
+  it("copies a pending EVM candidate and blocks non-EVM manual-review candidates", async () => {
     const evmId = await insertCandidate();
     const polygonId = await insertCandidate({
       chain: "polygon",
@@ -198,7 +198,7 @@ describe("candidate review API", () => {
 
     const blocked = await authed("POST", `/candidates/${polygonId}/copy`);
     expect(blocked.statusCode).toBe(400);
-    expect(json<{ error: string }>(blocked).error).toMatch(/record only/);
+    expect(json<{ error: string }>(blocked).error).toMatch(/manual review flow/);
   });
 
   it("dismisses pending candidates and rejects queued ones", async () => {

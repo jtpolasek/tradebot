@@ -141,6 +141,8 @@ describe("tradeToCandidateSignal", () => {
     expect(sig.reason).toContain("Will X happen by July?");
     expect(sig.reason).not.toContain("polymarket.com/event/will-x-happen-event");
     expect(sig.externalUrl).toBe("https://polymarket.com/event/will-x-happen-event");
+    expect(sig.conditionId).toBe("0xcond");
+    expect(sig.outcomeIndex).toBe(0);
   });
 
   it("maps a SELL: outcome shares in, USDC out", () => {
@@ -151,6 +153,12 @@ describe("tradeToCandidateSignal", () => {
     expect(sig.tokenOut.address).toBe(POLYGON_USDC);
     expect(sig.amountIn).toBe(50_000_000n); // shares
     expect(sig.amountOut).toBe(20_000_000n); // 50 * 0.4 * 1e6
+  });
+
+  it("preserves a missing outcomeIndex as null", () => {
+    const sig = tradeToCandidateSignal(sampleTrade({ outcomeIndex: undefined }), "wallet-1");
+    expect(sig.conditionId).toBe("0xcond");
+    expect(sig.outcomeIndex).toBeNull();
   });
 });
 

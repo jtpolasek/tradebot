@@ -57,6 +57,8 @@ function tradeKey(trade: PolymarketTrade): string {
  * Map a Polymarket Data API trade to a record-only candidate `TradeSignal`. A BUY spends USDC for
  * outcome shares (tokenIn=USDC, tokenOut=outcome); a SELL is the reverse. `decodeStatus:"candidate"`
  * makes `insertSignal` default `reviewStatus:"pending"` and keeps it out of scoring/auto-copy.
+ * Phase 10.1 persists condition metadata now even though the path is still record-only, so the later
+ * resolution-settlement job can map a held tokenId back to the market/outcome that resolves it.
  */
 export function tradeToCandidateSignal(trade: PolymarketTrade, walletId: string): TradeSignal {
   const side: "buy" | "sell" = trade.side === "BUY" ? "buy" : "sell";
@@ -101,6 +103,8 @@ export function tradeToCandidateSignal(trade: PolymarketTrade, walletId: string)
     reason,
     externalUrl,
     poolId: null,
+    conditionId: trade.conditionId,
+    outcomeIndex: trade.outcomeIndex ?? null,
   };
 }
 

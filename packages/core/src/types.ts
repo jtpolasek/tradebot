@@ -77,6 +77,16 @@ export interface TradeSignal {
    * back to value V4-only tokens via StateView. Null/undefined for every non-V4 venue.
    */
   poolId?: string | null;
+  /**
+   * Polymarket condition identifier. Persisted so a later resolution-settlement job can map a held
+   * outcome share back to the market that resolves it. Null/undefined for non-Polymarket venues.
+   */
+  conditionId?: string | null;
+  /**
+   * Polymarket outcome index within the condition. Needed alongside conditionId to decide whether a
+   * held outcome share resolves to $1 or $0. Null/undefined for non-Polymarket venues.
+   */
+  outcomeIndex?: number | null;
 }
 
 export interface TokenRef {

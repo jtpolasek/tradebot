@@ -85,6 +85,13 @@
       "when": 1781911879352,
       "tag": "0011_closed_norrin_radd",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1782087092724,
+      "tag": "0012_graceful_tag",
+      "breakpoints": true
     }
   ]
 }

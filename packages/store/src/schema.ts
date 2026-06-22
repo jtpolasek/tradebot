@@ -62,6 +62,10 @@ export const tradeSignals = pgTable("trade_signals", {
   // Uniswap V4 poolId (bytes32 hex) from the Swap event; null for non-V4 venues. Pricing reads it
   // back to value V4-only tokens, whose pools can't be discovered on-chain by token pair.
   poolId: text("pool_id"),
+  // Polymarket condition metadata for later resolution settlement. Null for all non-Polymarket
+  // venues; record-only Phase 10.1 persists it now so the later jobs have a stable join key.
+  conditionId: text("condition_id"),
+  outcomeIndex: integer("outcome_index"),
 }, (t) => [
   unique().on(t.chain, t.txHash, t.tokenIn, t.tokenOut, t.side),
   // Support recovering a V4 poolId for a held token (marks job + exit-sell depth), which look up

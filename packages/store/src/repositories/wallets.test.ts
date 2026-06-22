@@ -362,6 +362,20 @@ describe("candidate review repositories", () => {
     expect(signal?.externalUrl).toBe("https://polymarket.com/event/test-market");
   });
 
+  it("round-trips persisted Polymarket condition metadata", async () => {
+    const id = await insertTestSignal({
+      chain: "polygon",
+      venue: "polymarket",
+      tokenIn: { chain: "polygon", address: "0x0000000000000000000000000000000000000001", symbol: "USDC", decimals: 6 },
+      tokenOut: { chain: "polygon", address: "0x0000000000000000000000000000000000000002", symbol: "YES", decimals: 6 },
+      conditionId: "0xcondition",
+      outcomeIndex: 1,
+    });
+    const signal = await getSignalById(db as Parameters<typeof getSignalById>[0], id);
+    expect(signal?.conditionId).toBe("0xcondition");
+    expect(signal?.outcomeIndex).toBe(1);
+  });
+
   it("hydrates signal token names from stored token metadata", async () => {
     await upsertToken(db as Parameters<typeof upsertToken>[0], {
       chain: "eth",

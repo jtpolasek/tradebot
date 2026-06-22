@@ -1,5 +1,7 @@
 export { getUsdPrice, getUsdPriceResult, getLiquidityUsd, getLiquidityUsdResult, sqrtPriceX96ToPrice, clearCaches } from "./price.js";
 export type { PriceResult, PriceSource, LiquidityResult, MarketHint } from "./price.js";
+export { getPolymarketPrice, clearPolymarketPriceCache } from "./polymarket.js";
+export type { PolymarketPriceResult, PolymarketExecutionSide, GetPolymarketPriceOptions } from "./polymarket.js";
 export { startMarksJob } from "./marks.js";
 export { getZeroxPrice, normalizeZeroxPriceQuote, summarizeZeroxIssues, assertUsableZeroxQuote, summarizeDexFees } from "./zerox.js";
 export type { ZeroxRawQuote, ZeroxPriceParams, NormalizedZeroxQuote, UnpricedFee } from "./zerox.js";

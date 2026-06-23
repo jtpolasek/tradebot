@@ -87,6 +87,9 @@ type RuntimeConfig = Pick<Config, "BASE_TRADE_PCT" | "MAX_TRADE_PCT" | "MIN_NOTI
 
 const RECENT_NOTIONAL_WINDOW = 20;
 const DEX_FEE_BPS = 30;
+// Rate limit for the "resolved but indeterminate payout" warning so a stranded Polymarket position
+// surfaces without spamming the log on every 60s resolution sweep.
+const RESOLUTION_STRAND_WARN_INTERVAL_MS = 6 * 60 * 60_000;
 
 type ZeroxFillQuote =
   | { status: "quoted"; priceUsd: number; notionalUsd: number; dexFeeUsd: number }
@@ -97,7 +100,17 @@ export class PaperEngine {
   private positions = new Map<string, InMemoryPosition>();
   private provisionals = new Map<string, ProvisionalEntry>();
   private portfolio: AccountingPortfolio;
+  // All engine state mutations run on this queue — both the bus-driven handlers and the
+  // externally-invoked entry points (Polymarket copy/settlement, exit sells), which route here via
+  // runOnQueue() so nothing mutates portfolio/positions outside this scheduler. INVARIANT: because the
+  // queue runs at concurrency 4, two tasks can interleave at their `await` points, so the
+  // read-modify-write-then-persist of `portfolio`/`positions` inside each task MUST stay synchronous
+  // (no `await` between reading cash/position and writing it back). Introducing an await there — or
+  // making applyTradeToState async — would create a cross-task TOCTOU. commitFillAtomic preserves this
+  // by computing the next state purely, persisting, then mutating memory after the commit resolves.
   private queue: PQueue;
+  // Per-condition timestamp of the last "resolved but indeterminate payout" warning, to rate-limit it.
+  private readonly resolutionStrandWarnedAt = new Map<string, number>();
   private snapshotTimer: ReturnType<typeof setInterval> | null = null;
   private settingsTimer: ReturnType<typeof setInterval> | null = null;
   private runtimeConfig: RuntimeConfig;
@@ -199,6 +212,16 @@ export class PaperEngine {
         }
       })
       .catch((err: unknown) => logger.error({ err, ...ctx }, `${label} enqueue failed`));
+  }
+
+  /**
+   * Run state-mutating work on the shared queue and await its result. Used by externally-invoked
+   * entry points (the runner's Polymarket/exit jobs) so their state mutations are serialized through
+   * the same scheduler as the bus handlers rather than bypassing it. Errors propagate to the caller
+   * (the job's own try/catch logs them with context), unlike fire-and-forget enqueue().
+   */
+  private runOnQueue<T>(work: () => Promise<T>): Promise<T> {
+    return this.queue.add(work) as Promise<T>;
   }
 
   private async loadState(): Promise<void> {
@@ -761,6 +784,9 @@ export class PaperEngine {
 
     const decidedAt = Date.now();
     const fillId = randomUUID();
+    // Recorded for visibility only: the fill executes at the raw best ask (buy) / bid (sell), which
+    // already embeds the spread, so we do NOT additionally move `priceUsd` by this amount. It is the
+    // observed bid/ask spread at decision time, not a slippage adjustment applied to the price.
     const slippageBps = quote.spreadBps !== null ? Math.max(0, Math.round(quote.spreadBps)) : 0;
     const key = posKey(signal.chain, token.address, signal.walletId);
     let qty: number;
@@ -1020,7 +1046,9 @@ export class PaperEngine {
     if (signal.chain !== "polygon") {
       throw new Error(`executePolymarketSignal requires a polygon signal, got ${signal.chain}`);
     }
-    await this.handleSignal(signal);
+    // Serialize with the bus-driven handlers and timers via the shared queue (see the invariant on
+    // `queue`) instead of mutating engine state directly off the runner's auto-copy job.
+    await this.runOnQueue(() => this.handleSignal(signal));
   }
 
   private async quoteFillPriceWithZerox(input: {
@@ -1231,6 +1259,15 @@ export class PaperEngine {
   }
 
   async executeExitSell(
+    pos: { chain: string; tokenAddress: string; qty: number; avgCostUsd: number; sourceWalletId: string | null },
+    trigger: "tp" | "sl" | null,
+    currentPriceUsd: number
+  ): Promise<void> {
+    // Route the externally-invoked exit job through the shared queue (see the invariant on `queue`).
+    await this.runOnQueue(() => this.executeExitSellImpl(pos, trigger, currentPriceUsd));
+  }
+
+  private async executeExitSellImpl(
     pos: { chain: string; tokenAddress: string; qty: number; avgCostUsd: number; sourceWalletId: string | null },
     trigger: "tp" | "sl" | null,
     currentPriceUsd: number
@@ -1497,6 +1534,20 @@ export class PaperEngine {
     conditionId: string;
     outcomeIndex: number;
   }): Promise<"settled" | "skipped"> {
+    // Route the externally-invoked resolution job through the shared queue (see the invariant on
+    // `queue`) so settlement mutates state under the same scheduler as the copy/exit/bus paths.
+    return this.runOnQueue(() => this.settlePolymarketPositionImpl(input));
+  }
+
+  private async settlePolymarketPositionImpl(input: {
+    chain: "polygon";
+    tokenAddress: string;
+    qty: number;
+    avgCostUsd: number;
+    sourceWalletId: string | null;
+    conditionId: string;
+    outcomeIndex: number;
+  }): Promise<"settled" | "skipped"> {
     if (input.sourceWalletId === null) {
       logger.warn({ tokenAddress: input.tokenAddress, conditionId: input.conditionId }, "skipping Polymarket settlement for position without source wallet");
       return "skipped";
@@ -1508,15 +1559,38 @@ export class PaperEngine {
 
     const payout = getPolymarketResolutionPayout(status, input.outcomeIndex);
     if (payout === null) {
-      logger.debug({
-        conditionId: input.conditionId,
-        outcomeIndex: input.outcomeIndex,
-        closed: status.closed,
-        resolved: status.resolved,
-        outcomePrices: status.outcomePrices,
-      }, "Polymarket market not settleable yet");
+      // A market that's closed/resolved but whose outcome price hasn't converged to ~1/~0 (e.g. an
+      // open UMA dispute window, or a multi-outcome market) can't be settled without guessing the
+      // winner, so the position stays open and keeps marking at the CLOB midpoint. That's the safe
+      // choice, but it can strand a position indefinitely — surface it (rate-limited per condition)
+      // so the operator can investigate, rather than letting it drift silently. A still-trading
+      // market is the normal not-yet-resolved case and stays at debug.
+      if (status.closed || status.resolved) {
+        const now = Date.now();
+        const lastWarned = this.resolutionStrandWarnedAt.get(input.conditionId) ?? 0;
+        if (now - lastWarned >= RESOLUTION_STRAND_WARN_INTERVAL_MS) {
+          this.resolutionStrandWarnedAt.set(input.conditionId, now);
+          logger.warn({
+            conditionId: input.conditionId,
+            outcomeIndex: input.outcomeIndex,
+            closed: status.closed,
+            resolved: status.resolved,
+            outcomePrices: status.outcomePrices,
+          }, "Polymarket market closed/resolved but payout indeterminate; position left open");
+        }
+      } else {
+        logger.debug({
+          conditionId: input.conditionId,
+          outcomeIndex: input.outcomeIndex,
+          closed: status.closed,
+          resolved: status.resolved,
+          outcomePrices: status.outcomePrices,
+        }, "Polymarket market not settleable yet");
+      }
       return "skipped";
     }
+    // Settled cleanly — drop any stranding-warn bookkeeping for this condition.
+    this.resolutionStrandWarnedAt.delete(input.conditionId);
 
     const tokenRow = await getToken(this.db, "polygon", input.tokenAddress.toLowerCase());
     const token: TokenRef = {

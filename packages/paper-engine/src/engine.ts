@@ -90,6 +90,8 @@ const DEX_FEE_BPS = 30;
 // Rate limit for the "resolved but indeterminate payout" warning so a stranded Polymarket position
 // surfaces without spamming the log on every 60s resolution sweep.
 const RESOLUTION_STRAND_WARN_INTERVAL_MS = 6 * 60 * 60_000;
+// Cap on distinct conditions tracked for strand-warn rate-limiting (evict oldest beyond this).
+const MAX_STRAND_WARN_ENTRIES = 1_000;
 
 type ZeroxFillQuote =
   | { status: "quoted"; priceUsd: number; notionalUsd: number; dexFeeUsd: number }
@@ -107,7 +109,8 @@ export class PaperEngine {
   // read-modify-write-then-persist of `portfolio`/`positions` inside each task MUST stay synchronous
   // (no `await` between reading cash/position and writing it back). Introducing an await there — or
   // making applyTradeToState async — would create a cross-task TOCTOU. commitFillAtomic preserves this
-  // by computing the next state purely, persisting, then mutating memory after the commit resolves.
+  // by mutating memory synchronously *before* it awaits the DB commit, then reversing that mutation
+  // if the commit fails.
   private queue: PQueue;
   // Per-condition timestamp of the last "resolved but indeterminate payout" warning, to rate-limit it.
   private readonly resolutionStrandWarnedAt = new Map<string, number>();
@@ -879,11 +882,10 @@ export class PaperEngine {
       priceVenue: "polymarket",
     };
 
-    // The Polygon auto-copy job re-claims any confirmed signal that lacks a fill row, so a position
-    // write that committed without its fill would be re-processed and double-applied. Persist the
-    // position delta and the fill in one transaction and apply the in-memory mutation only after the
-    // commit succeeds — a thrown commit then leaves both the DB and memory untouched, so the re-claim
-    // retries cleanly instead of double-spending paper cash.
+    // The Polygon auto-copy job re-claims any confirmed signal that lacks a fill row, so the position
+    // delta and the fill must persist together (one transaction) — a position written without its fill
+    // would be re-processed and double-applied. commitFillAtomic also mutates in-memory state
+    // synchronously here (before its DB await) to stay atomic against concurrent tasks; see its doc.
     await this.commitFillAtomic({
       next,
       posKey: key,
@@ -1023,7 +1025,9 @@ export class PaperEngine {
    * and staleness vetoes bypassed because the reviewer explicitly approved it now.
    */
   async executeManualCandidateCopy(signal: TradeSignal): Promise<void> {
-    await this.handleSignal({
+    // Route through the shared queue like the other externally-invoked entry points so it serializes
+    // with the bus handlers/timers (see the invariant on `queue`) rather than running off the API stack.
+    await this.runOnQueue(() => this.handleSignal({
       ...signal,
       source: "confirmed",
       observedAt: Date.now(),
@@ -1034,7 +1038,7 @@ export class PaperEngine {
       // staleness, and auto-copy vetoes. It is in-memory only — insertSignal won't overwrite the
       // persisted candidate's reviewStatus, which the runner advances to 'copied' on success.
       reviewStatus: "copying",
-    });
+    }));
   }
 
   /**
@@ -1141,15 +1145,20 @@ export class PaperEngine {
   }
 
   /**
-   * Apply a sell to portfolio + position state and persist the position row (close when flat,
-   * otherwise upsert). Shared accounting path for copied sells and exit-rule sells.
-   */
-  /**
-   * Persist a position delta and its fill in a single transaction, then apply the in-memory mutation
-   * only after the commit succeeds. Used by the Polymarket path, whose signals are drained by a poll
-   * that re-claims any signal lacking a fill row: committing the position without its fill would let
-   * the poll re-process and double-apply the trade. Atomic commit plus post-commit memory mutation
-   * closes that window — a thrown commit leaves the DB and memory untouched, so the re-claim retries.
+   * Apply a computed trade to in-memory state and persist the position row + fill in one transaction.
+   *
+   * Critical ordering (this is what keeps it correct under PQueue concurrency 4 — see the invariant on
+   * `queue`): the caller computes `next` from `this.portfolio` and then calls this synchronously, and
+   * we mutate `this.portfolio`/`this.positions` here *before* the first `await`. So the whole
+   * read→compute→write of in-memory accounting state has no suspension point and is atomic against
+   * other tasks, exactly like the EVM path. The DB transaction (which would otherwise let another task
+   * interleave and clobber the cash update) runs only *after* memory is already consistent.
+   *
+   * If the commit fails, the persisted fill+position roll back, so the auto-copy poll (which re-claims
+   * any signal lacking a fill row) will retry; we therefore reverse the in-memory mutation too. The
+   * portfolio is reversed by subtracting the delta we applied from the *current* portfolio (additive,
+   * so it composes with any concurrent task's changes during the commit), and the position is restored
+   * from its pre-trade snapshot — the same snapshot-reversal the provisional-void path uses.
    */
   private async commitFillAtomic(args: {
     next: { portfolio: AccountingPortfolio; position: { quantity: number; averageEntryUsd: number; realizedPnlUsd: number } };
@@ -1161,27 +1170,10 @@ export class PaperEngine {
   }): Promise<void> {
     const { next, fill } = args;
     const closes = next.position.quantity < 1e-10;
-    await this.db.transaction(async (tx) => {
-      if (closes) {
-        await closePositionByKey(tx, {
-          chain: args.chain,
-          tokenAddress: args.tokenAddress,
-          sourceWalletId: args.walletId,
-          realizedPnlUsd: next.position.realizedPnlUsd,
-        });
-      } else {
-        await upsertPosition(tx, {
-          chain: args.chain,
-          tokenAddress: args.tokenAddress,
-          qty: next.position.quantity,
-          avgCostUsd: next.position.averageEntryUsd,
-          realizedPnlUsd: next.position.realizedPnlUsd,
-          sourceWalletId: args.walletId,
-        });
-      }
-      await insertFill(tx, fill);
-    });
 
+    // Mutate memory synchronously (no await before this point since the caller computed `next`).
+    const prevPosition = this.positions.get(args.posKey) ?? null;
+    const prevPortfolio: AccountingPortfolio = { ...this.portfolio };
     this.portfolio = next.portfolio;
     this.cashUsd = next.portfolio.cashUsd;
     if (closes) {
@@ -1193,8 +1185,48 @@ export class PaperEngine {
         realizedPnlUsd: next.position.realizedPnlUsd,
       });
     }
+
+    try {
+      await this.db.transaction(async (tx) => {
+        if (closes) {
+          await closePositionByKey(tx, {
+            chain: args.chain,
+            tokenAddress: args.tokenAddress,
+            sourceWalletId: args.walletId,
+            realizedPnlUsd: next.position.realizedPnlUsd,
+          });
+        } else {
+          await upsertPosition(tx, {
+            chain: args.chain,
+            tokenAddress: args.tokenAddress,
+            qty: next.position.quantity,
+            avgCostUsd: next.position.averageEntryUsd,
+            realizedPnlUsd: next.position.realizedPnlUsd,
+            sourceWalletId: args.walletId,
+          });
+        }
+        await insertFill(tx, fill);
+      });
+    } catch (err) {
+      // Commit rolled back → reverse our in-memory mutation so the re-claim doesn't double-apply.
+      // Subtract our delta from the current portfolio (concurrent additive changes are preserved).
+      this.portfolio = {
+        cashUsd: this.portfolio.cashUsd - (next.portfolio.cashUsd - prevPortfolio.cashUsd),
+        realizedPnlUsd: this.portfolio.realizedPnlUsd - (next.portfolio.realizedPnlUsd - prevPortfolio.realizedPnlUsd),
+        feesPaidUsd: this.portfolio.feesPaidUsd - (next.portfolio.feesPaidUsd - prevPortfolio.feesPaidUsd),
+      };
+      this.cashUsd = this.portfolio.cashUsd;
+      if (prevPosition) this.positions.set(args.posKey, prevPosition);
+      else this.positions.delete(args.posKey);
+      logger.error({ err, posKey: args.posKey, fillId: fill.id }, "commitFillAtomic persist failed; reversed in-memory mutation");
+      throw err;
+    }
   }
 
+  /**
+   * Apply a sell to portfolio + position state and persist the position row (close when flat,
+   * otherwise upsert). Shared accounting path for copied sells and exit-rule sells.
+   */
   private async applySellToState(input: {
     chain: ChainId;
     tokenAddress: string;
@@ -1569,6 +1601,12 @@ export class PaperEngine {
         const now = Date.now();
         const lastWarned = this.resolutionStrandWarnedAt.get(input.conditionId) ?? 0;
         if (now - lastWarned >= RESOLUTION_STRAND_WARN_INTERVAL_MS) {
+          // Bound the map: a condition that strands forever (never settles cleanly to trigger the
+          // delete below) would otherwise leave a permanent entry. Evict the oldest when over cap.
+          if (this.resolutionStrandWarnedAt.size >= MAX_STRAND_WARN_ENTRIES) {
+            const oldest = this.resolutionStrandWarnedAt.keys().next().value;
+            if (oldest !== undefined) this.resolutionStrandWarnedAt.delete(oldest);
+          }
           this.resolutionStrandWarnedAt.set(input.conditionId, now);
           logger.warn({
             conditionId: input.conditionId,

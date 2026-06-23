@@ -1,5 +1,5 @@
 import { eq, and, isNull, desc, isNotNull, or } from "drizzle-orm";
-import type { Db } from "../db.js";
+import type { Db, DbOrTx } from "../db.js";
 import { positions, tradeSignals } from "../schema.js";
 import type { ChainId, TokenRef } from "@tradebot/core";
 import { getToken } from "./tokens.js";
@@ -23,7 +23,7 @@ export type OpenPolymarketPositionForSettlement = Omit<PositionRow, "chain"> & {
   outcomeIndex: number;
 };
 
-export async function upsertPosition(db: Db, pos: Omit<PositionRow, "id" | "openedAt" | "closedAt">): Promise<void> {
+export async function upsertPosition(db: DbOrTx, pos: Omit<PositionRow, "id" | "openedAt" | "closedAt">): Promise<void> {
   const existing = await db
     .select()
     .from(positions)
@@ -142,7 +142,7 @@ export async function closePosition(db: Db, id: string, realizedPnlUsd: number):
  * so a sell-to-zero doesn't leave a qty-0 "open" zombie that reloads at boot.
  */
 export async function closePositionByKey(
-  db: Db,
+  db: DbOrTx,
   key: { chain: ChainId; tokenAddress: string; sourceWalletId: string | null; realizedPnlUsd: number }
 ): Promise<void> {
   await db

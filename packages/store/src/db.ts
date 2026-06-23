@@ -30,3 +30,10 @@ export async function closeDb() {
 }
 
 export type Db = ReturnType<typeof getDb>;
+
+/** The transaction handle passed to `db.transaction(async (tx) => …)`. */
+export type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
+
+/** Accepts either the root connection or an open transaction, so repository calls can be composed
+ * inside a `db.transaction(...)` for atomic multi-write operations. */
+export type DbOrTx = Db | Tx;

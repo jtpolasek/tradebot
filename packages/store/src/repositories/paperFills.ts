@@ -1,5 +1,5 @@
 import { eq, and, gte, desc } from "drizzle-orm";
-import type { Db } from "../db.js";
+import type { Db, DbOrTx } from "../db.js";
 import { paperFills, tradeSignals } from "../schema.js";
 import { NATIVE_TOKEN_PLACEHOLDER } from "@tradebot/core";
 import type { PaperFill, TokenRef, ChainId } from "@tradebot/core";
@@ -7,7 +7,7 @@ import { getToken } from "./tokens.js";
 
 export type StoredFill = PaperFill & { voided: boolean };
 
-export async function insertFill(db: Db, fill: PaperFill): Promise<void> {
+export async function insertFill(db: DbOrTx, fill: PaperFill): Promise<void> {
   await db.insert(paperFills).values({
     id: fill.id,
     signalId: fill.signalId,

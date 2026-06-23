@@ -762,8 +762,10 @@ export class PaperEngine {
     const decidedAt = Date.now();
     const fillId = randomUUID();
     const slippageBps = quote.spreadBps !== null ? Math.max(0, Math.round(quote.spreadBps)) : 0;
+    const key = posKey(signal.chain, token.address, signal.walletId);
     let qty: number;
     let notionalUsd: number;
+    let next: ReturnType<typeof applyTradeToState>;
 
     if (signal.side === "buy") {
       notionalUsd = decision.notionalUsd;
@@ -775,7 +777,6 @@ export class PaperEngine {
         return this.recordSkip(signal, "insufficient-balance", token, quoteToken);
       }
 
-      const key = posKey(signal.chain, token.address, signal.walletId);
       const existing = this.positions.get(key);
       const existingAcct: AccountingPosition | null = existing
         ? {
@@ -787,7 +788,7 @@ export class PaperEngine {
           }
         : null;
 
-      const next = applyTradeToState({
+      next = applyTradeToState({
         portfolio: this.portfolio,
         position: existingAcct,
         trade: {
@@ -801,25 +802,7 @@ export class PaperEngine {
           sellProceedsUsd: 0,
         },
       });
-
-      this.portfolio = next.portfolio;
-      this.cashUsd = next.portfolio.cashUsd;
-      this.positions.set(key, {
-        qty: next.position.quantity,
-        avgCostUsd: next.position.averageEntryUsd,
-        realizedPnlUsd: next.position.realizedPnlUsd,
-      });
-
-      await upsertPosition(this.db, {
-        chain: signal.chain,
-        tokenAddress: token.address,
-        qty: next.position.quantity,
-        avgCostUsd: next.position.averageEntryUsd,
-        realizedPnlUsd: next.position.realizedPnlUsd,
-        sourceWalletId: signal.walletId,
-      });
     } else {
-      const key = posKey(signal.chain, token.address, signal.walletId);
       const existing = this.positions.get(key);
       if (!existing || existing.qty <= 0) {
         return this.recordSkip(signal, "no-position", token, quoteToken);
@@ -829,17 +812,25 @@ export class PaperEngine {
       const fraction = Math.min(1, decision.notionalUsd / Math.max(posValue, 1e-10));
       qty = fraction * existing.qty;
       notionalUsd = qty * quote.price;
-      await this.applySellToState({
-        chain: signal.chain,
-        tokenAddress: token.address,
-        walletId: signal.walletId,
-        posKey: key,
-        existing,
-        qty,
-        notionalUsd,
-        gasUsd: 0,
-        dexFeeUsd: 0,
-        effectiveFeeUsd: 0,
+      next = applyTradeToState({
+        portfolio: this.portfolio,
+        position: {
+          quantity: existing.qty,
+          averageEntryUsd: existing.avgCostUsd,
+          costBasisUsd: existing.qty * existing.avgCostUsd,
+          realizedPnlUsd: existing.realizedPnlUsd,
+          feesPaidUsd: 0,
+        },
+        trade: {
+          side: "sell",
+          quantity: qty,
+          notionalUsd,
+          gasUsd: 0,
+          slippageUsd: 0,
+          dexFeeUsd: 0,
+          totalCostUsd: 0,
+          sellProceedsUsd: notionalUsd,
+        },
       });
     }
 
@@ -862,7 +853,19 @@ export class PaperEngine {
       priceVenue: "polymarket",
     };
 
-    await insertFill(this.db, fill);
+    // The Polygon auto-copy job re-claims any confirmed signal that lacks a fill row, so a position
+    // write that committed without its fill would be re-processed and double-applied. Persist the
+    // position delta and the fill in one transaction and apply the in-memory mutation only after the
+    // commit succeeds — a thrown commit then leaves both the DB and memory untouched, so the re-claim
+    // retries cleanly instead of double-spending paper cash.
+    await this.commitFillAtomic({
+      next,
+      posKey: key,
+      chain: signal.chain,
+      tokenAddress: token.address,
+      walletId: signal.walletId,
+      fill,
+    });
     await this.takeSnapshot();
     this.bus.emit("paper-fill", fill);
     this.rememberLeaderHolding(signal);
@@ -1113,6 +1116,57 @@ export class PaperEngine {
    * Apply a sell to portfolio + position state and persist the position row (close when flat,
    * otherwise upsert). Shared accounting path for copied sells and exit-rule sells.
    */
+  /**
+   * Persist a position delta and its fill in a single transaction, then apply the in-memory mutation
+   * only after the commit succeeds. Used by the Polymarket path, whose signals are drained by a poll
+   * that re-claims any signal lacking a fill row: committing the position without its fill would let
+   * the poll re-process and double-apply the trade. Atomic commit plus post-commit memory mutation
+   * closes that window — a thrown commit leaves the DB and memory untouched, so the re-claim retries.
+   */
+  private async commitFillAtomic(args: {
+    next: { portfolio: AccountingPortfolio; position: { quantity: number; averageEntryUsd: number; realizedPnlUsd: number } };
+    posKey: string;
+    chain: ChainId;
+    tokenAddress: string;
+    walletId: string;
+    fill: PaperFill;
+  }): Promise<void> {
+    const { next, fill } = args;
+    const closes = next.position.quantity < 1e-10;
+    await this.db.transaction(async (tx) => {
+      if (closes) {
+        await closePositionByKey(tx, {
+          chain: args.chain,
+          tokenAddress: args.tokenAddress,
+          sourceWalletId: args.walletId,
+          realizedPnlUsd: next.position.realizedPnlUsd,
+        });
+      } else {
+        await upsertPosition(tx, {
+          chain: args.chain,
+          tokenAddress: args.tokenAddress,
+          qty: next.position.quantity,
+          avgCostUsd: next.position.averageEntryUsd,
+          realizedPnlUsd: next.position.realizedPnlUsd,
+          sourceWalletId: args.walletId,
+        });
+      }
+      await insertFill(tx, fill);
+    });
+
+    this.portfolio = next.portfolio;
+    this.cashUsd = next.portfolio.cashUsd;
+    if (closes) {
+      this.positions.delete(args.posKey);
+    } else {
+      this.positions.set(args.posKey, {
+        qty: next.position.quantity,
+        avgCostUsd: next.position.averageEntryUsd,
+        realizedPnlUsd: next.position.realizedPnlUsd,
+      });
+    }
+  }
+
   private async applySellToState(input: {
     chain: ChainId;
     tokenAddress: string;

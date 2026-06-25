@@ -47,6 +47,10 @@ const schema = z.object({
   HEARTBEAT_STALE_SEC: z.coerce.number().positive().default(30),
   CHAIN_STALE_SEC_ETH: z.coerce.number().positive().default(60),
   CHAIN_STALE_SEC_BASE: z.coerce.number().positive().default(30),
+  // Liveness watchdog: force a WS reconnect if no block arrives within this window (a silently
+  // dead "zombie" subscription fires no error). Generous vs block cadence to avoid thrashing.
+  WS_STALL_SEC_ETH: z.coerce.number().positive().default(150),
+  WS_STALL_SEC_BASE: z.coerce.number().positive().default(90),
   // Polymarket poller freshness threshold. Generous vs the 20s poll so a brief gap between ticks
   // isn't flagged; a genuinely stalled poller still surfaces in /health.
   CHAIN_STALE_SEC_POLYGON: z.coerce.number().positive().default(120),

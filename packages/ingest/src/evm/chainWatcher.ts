@@ -27,6 +27,16 @@ const FAILOVER_TIMEOUT_MS = 60_000;
 const WALLET_RELOAD_MS = 60_000;
 const MEMPOOL_RECONNECT_MS = 1_000;
 const GET_LOGS_RATE_LIMIT_RETRIES = 4;
+// How often the liveness watchdog checks for a stalled subscription stream.
+const WATCHDOG_INTERVAL_MS = 15_000;
+// A "zombie WS" — socket open, subscription silently dead — fires no onError/onClose, so the
+// runLoop never reconnects. newHeads fires every block (eth ~12s, base ~2s) regardless of trade
+// activity, so a stale lastEventTs past these per-chain budgets means the stream is dead, not quiet.
+// Generous vs block cadence to avoid thrashing the connection on a brief gap.
+const DEFAULT_STALL_TIMEOUT_MS_BY_CHAIN: Record<EvmChainId, number> = {
+  eth: 150_000,
+  base: 90_000,
+};
 
 const VIEM_CHAINS = { eth: mainnet, base: base } as const;
 
@@ -85,6 +95,8 @@ export interface ChainWatcherOptions {
   db: Db;
   bus: EventBus;
   recorder: Recorder;
+  /** Override the liveness watchdog's stall timeout (ms). Defaults per chain. */
+  stallTimeoutMs?: number;
 }
 
 export class ChainWatcher {
@@ -107,6 +119,8 @@ export class ChainWatcher {
   private mempoolWs: WebSocket | null = null;
   private mempoolReconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private walletReloadTimer: ReturnType<typeof setInterval> | null = null;
+  private watchdogTimer: ReturnType<typeof setInterval> | null = null;
+  private readonly stallTimeoutMs: number;
   private lastEventTs = 0;
   private usingFallback = false;
   private primaryDownSince: number | null = null;
@@ -122,6 +136,7 @@ export class ChainWatcher {
     this.db = opts.db;
     this.bus = opts.bus;
     this.recorder = opts.recorder;
+    this.stallTimeoutMs = opts.stallTimeoutMs ?? DEFAULT_STALL_TIMEOUT_MS_BY_CHAIN[opts.chain];
     this.logger = createLogger(`ingest:${opts.chain}`);
   }
 
@@ -130,6 +145,7 @@ export class ChainWatcher {
     await this.loadWallets();
     this.logCuBudget();
     this.startWalletReload();
+    this.startWatchdog();
     void this.runLoop();
   }
 
@@ -157,6 +173,39 @@ export class ChainWatcher {
       clearInterval(this.walletReloadTimer);
       this.walletReloadTimer = null;
     }
+    if (this.watchdogTimer) {
+      clearInterval(this.watchdogTimer);
+      this.watchdogTimer = null;
+    }
+    this.teardown();
+  }
+
+  /**
+   * Liveness watchdog: a connected subscription stream that silently stops delivering (a "zombie
+   * WS") fires no onError, so runLoop never reconnects. If we believe we're connected but haven't
+   * seen a block in `stallTimeoutMs`, force a reconnect by tearing down — runLoop then re-connects
+   * and re-subscribes (same mechanism as the wallet-reload path).
+   */
+  private startWatchdog(): void {
+    const timer = setInterval(() => this.checkLiveness(), WATCHDOG_INTERVAL_MS);
+    timer.unref?.();
+    this.watchdogTimer = timer;
+  }
+
+  private checkLiveness(): void {
+    if (this.stopped) return;
+    // Only act when we believe the stream is live; during reconnect lastEventTs is being reset.
+    if (this.connectionState !== "connected" && this.connectionState !== "fallback") return;
+    // lastEventTs is set at connect time, so a freshly connected but quiet chain won't trip.
+    if (this.lastEventTs === 0) return;
+    const staleMs = Date.now() - this.lastEventTs;
+    if (staleMs <= this.stallTimeoutMs) return;
+    this.logger.error(
+      { staleMs, stallTimeoutMs: this.stallTimeoutMs, usingFallback: this.usingFallback },
+      "subscription stream stalled (no blocks) — forcing reconnect"
+    );
+    // Flip state first so a second tick during the reconnect window doesn't re-trigger.
+    this.connectionState = "reconnecting";
     this.teardown();
   }
 
@@ -282,6 +331,8 @@ export class ChainWatcher {
       // Subscriptions are live at this point; report the steady state. usingFallback distinguishes
       // the primary endpoint from a QuickNode failover.
       this.connectionState = this.usingFallback ? "fallback" : "connected";
+      // Seed the liveness clock so the watchdog measures from connect, not from the last connection.
+      this.lastEventTs = Date.now();
 
       this.cleanupFns.push(() => resolve());
     });

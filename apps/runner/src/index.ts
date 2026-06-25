@@ -137,6 +137,7 @@ async function main() {
       db,
       bus,
       recorder,
+      stallTimeoutMs: config.WS_STALL_SEC_ETH * 1000,
     }),
     new ChainWatcher({
       chain: "base",
@@ -145,6 +146,7 @@ async function main() {
       db,
       bus,
       recorder,
+      stallTimeoutMs: config.WS_STALL_SEC_BASE * 1000,
     }),
   ];
 

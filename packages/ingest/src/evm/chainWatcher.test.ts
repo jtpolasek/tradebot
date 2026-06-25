@@ -428,6 +428,73 @@ describe("ChainWatcher getHealth", () => {
   });
 });
 
+describe("ChainWatcher liveness watchdog", () => {
+  type Internals = {
+    connectionState: string;
+    lastEventTs: number;
+    stallTimeoutMs: number;
+    checkLiveness(): void;
+    teardown(): void;
+  };
+
+  function makeWatcher(chain: "eth" | "base" = "base"): { watcher: ChainWatcher; internals: Internals } {
+    const watcher = new ChainWatcher({
+      chain,
+      primaryWsUrl: "wss://primary",
+      db: makeMockDb(),
+      bus: new EventBus(),
+      recorder: makeRecorder(),
+    });
+    return { watcher, internals: watcher as unknown as Internals };
+  }
+
+  it("forces a reconnect when the stream goes stale while connected", () => {
+    const { watcher, internals } = makeWatcher();
+    const teardown = vi.spyOn(watcher as unknown as { teardown(): void }, "teardown").mockImplementation(() => {});
+    internals.connectionState = "connected";
+    internals.lastEventTs = Date.now() - (internals.stallTimeoutMs + 1_000);
+
+    internals.checkLiveness();
+
+    expect(teardown).toHaveBeenCalledTimes(1);
+    expect(internals.connectionState).toBe("reconnecting");
+  });
+
+  it("does nothing when the stream is fresh", () => {
+    const { watcher, internals } = makeWatcher();
+    const teardown = vi.spyOn(watcher as unknown as { teardown(): void }, "teardown").mockImplementation(() => {});
+    internals.connectionState = "connected";
+    internals.lastEventTs = Date.now() - 1_000;
+
+    internals.checkLiveness();
+
+    expect(teardown).not.toHaveBeenCalled();
+    expect(internals.connectionState).toBe("connected");
+  });
+
+  it("does not act while already reconnecting", () => {
+    const { watcher, internals } = makeWatcher();
+    const teardown = vi.spyOn(watcher as unknown as { teardown(): void }, "teardown").mockImplementation(() => {});
+    internals.connectionState = "reconnecting";
+    internals.lastEventTs = Date.now() - (internals.stallTimeoutMs + 1_000);
+
+    internals.checkLiveness();
+
+    expect(teardown).not.toHaveBeenCalled();
+  });
+
+  it("does not trip before the first event (lastEventTs unset)", () => {
+    const { watcher, internals } = makeWatcher();
+    const teardown = vi.spyOn(watcher as unknown as { teardown(): void }, "teardown").mockImplementation(() => {});
+    internals.connectionState = "connected";
+    internals.lastEventTs = 0;
+
+    internals.checkLiveness();
+
+    expect(teardown).not.toHaveBeenCalled();
+  });
+});
+
 describe("ChainWatcher emit", () => {
   it("emits raw-tx events on the bus", async () => {
     const bus = new EventBus();

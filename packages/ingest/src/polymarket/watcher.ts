@@ -254,6 +254,10 @@ export class PolymarketWatcher {
 
   private async pollWallet(wallet: { id: string; address: string }): Promise<PollWalletStats> {
     const cursor = this.cursor.get(wallet.address);
+    // No cursor = first sight of this wallet (fresh add or first-ever run). Copy-trading is
+    // forward-only: seed the cursor from the newest page without recording, so we don't replay
+    // the leader's trade history as signals the staleness gate would just skip as stale-signal.
+    const coldStart = !cursor;
     let newestTs = cursor?.timestamp ?? 0;
     let newestKeys = new Set(cursor?.seenKeysAtTimestamp ?? []);
     let maxSeenTs = 0;
@@ -286,8 +290,10 @@ export class PolymarketWatcher {
           continue;
         }
 
-        await this.recordTrade(trade, wallet.id);
-        recordedCount++;
+        if (!coldStart) {
+          await this.recordTrade(trade, wallet.id);
+          recordedCount++;
+        }
 
         if (trade.timestamp > newestTs) {
           newestTs = trade.timestamp;
@@ -297,7 +303,8 @@ export class PolymarketWatcher {
         }
       }
 
-      // Cold start intentionally records only the newest page rather than importing full history.
+      // Cold start only seeds the cursor from the newest page (no recording, see coldStart above);
+      // a warm cursor stops once it reaches already-seen trades or runs out of pages.
       if (!cursor || reachedCursor || trades.length < TRADE_PAGE_LIMIT) break;
 
       if (page === MAX_PAGES_PER_WALLET - 1) {

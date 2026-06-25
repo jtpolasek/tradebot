@@ -182,35 +182,44 @@ describe("PolymarketWatcher", () => {
     expect(h.walletCount).toBe(0);
   });
 
-  it("records each new trade once across re-polls (timestamp + trade-key cursor)", async () => {
+  it("seeds the cursor on cold start without recording, then records each new trade once", async () => {
     getActiveWallets.mockResolvedValue([{ id: "wallet-1", address: "0xLeader" }]);
-    const fetchImpl = vi.fn(async () => jsonResponse([sampleTrade()]));
+    const seed = sampleTrade({ timestamp: 1_700_000_000, transactionHash: "0xseed" });
+    const fresh = sampleTrade({ timestamp: 1_700_000_100, transactionHash: "0xfresh" });
+    let tick = 0;
+    const fetchImpl = vi.fn(async () => {
+      tick++;
+      // Cold tick sees only history; warm ticks surface one genuinely new trade, repeated.
+      return tick === 1 ? jsonResponse([seed]) : jsonResponse([fresh, seed]);
+    });
     const w = new PolymarketWatcher({ db: {} as never, pollMs: 1000, baseUrl: BASE, fetchImpl: fetchImpl as unknown as typeof fetch });
 
     // Manually drive ticks (don't start timers).
     await (w as unknown as { loadWallets: () => Promise<void> }).loadWallets();
-    await w.tick();
-    await w.tick();
+    await w.tick(); // cold: seed cursor, record nothing
+    await w.tick(); // warm: record the new trade once
+    await w.tick(); // warm: same trade is now a duplicate
 
-    // Same trade returned twice, but the cursor stops the second insert.
+    // Forward-only copy trading: cold start never replays the leader's history as signals.
     expect(insertSignal).toHaveBeenCalledTimes(1);
     // Both outcome + USDC token labels upserted for the one recorded trade.
     expect(upsertToken).toHaveBeenCalledTimes(2);
-    expect(upsertPolymarketPollSuccess).toHaveBeenCalledTimes(2);
+    expect(upsertPolymarketPollSuccess).toHaveBeenCalledTimes(3);
     expect(mockArg(upsertPolymarketPollSuccess.mock.calls[0], 1)).toMatchObject({
       walletId: "wallet-1",
       cursorTimestamp: 1_700_000_000,
       fetchedCount: 1,
-      recordedCount: 1,
+      recordedCount: 0, // cold start records nothing
       duplicateCount: 0,
       pageCount: 1,
     });
     expect(mockArg(upsertPolymarketPollSuccess.mock.calls[1], 1)).toMatchObject({
-      walletId: "wallet-1",
-      fetchedCount: 1,
+      recordedCount: 1, // the new trade
+      duplicateCount: 1, // the seed trade, already at the cursor
+    });
+    expect(mockArg(upsertPolymarketPollSuccess.mock.calls[2], 1)).toMatchObject({
       recordedCount: 0,
-      duplicateCount: 1,
-      pageCount: 1,
+      duplicateCount: 1, // new trade now at cursor; seed trade trips reachedCursor and breaks
     });
     expect(w.getHealth().connectionState).toBe("connected");
   });

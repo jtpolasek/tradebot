@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { TokenLink } from "@/components/TokenLink";
 import { TxLink } from "@/components/TxLink";
-import { apiFetch, streamUrl, formatUsd, timeAgo } from "@/lib/api";
+import { streamUrl, formatUsd, timeAgo } from "@/lib/api";
 
 type SignalItem = {
   type: "trade-signal";
@@ -56,20 +56,7 @@ export default function FeedPage() {
   }
 
   useEffect(() => {
-    const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-
-    Promise.all([
-      apiFetch<{ signals: HistoricalSignal[] }>(`/signals?since=${since}&limit=50`),
-      apiFetch<{ fills: HistoricalFill[] }>(`/fills?since=${since}&limit=50`),
-    ]).then(([sRes, fRes]) => {
-      const all: FeedEntry[] = [
-        ...sRes.signals.map((s): FeedEntry => ({ kind: "signal", ts: s.observedAt, data: s })),
-        ...fRes.fills.map((f): FeedEntry => ({ kind: "fill", ts: f.decidedAt, data: f })),
-      ];
-      all.sort((a, b) => b.ts - a.ts);
-      setEntries(all.slice(0, 200));
-    }).catch((err) => setError(err instanceof Error ? err.message : "Failed to load history"));
-
+    // Live-only feed: start empty, populate from the SSE stream as events arrive.
     // Server-sent events for live updates through the same-origin proxy.
     function connect() {
       setWsStatus("connecting");

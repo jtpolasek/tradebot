@@ -17,7 +17,7 @@ health_code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$BASE/healt
 metrics="$(curl -s --max-time 15 -H "X-Api-Key: $API_KEY" "$BASE/metrics" || echo '{}')"
 
 # Compact the metrics payload to a single line and prepend our own fields.
-node -e '
+line="$(node -e '
   const ts = process.argv[1];
   const healthCode = process.argv[2];
   let m = {};
@@ -46,5 +46,6 @@ node -e '
     chains,
   };
   process.stdout.write(JSON.stringify(out));
-' "$ts" "$health_code" "$metrics" | tee -a "$LOG"
-echo
+' "$ts" "$health_code" "$metrics")"
+
+printf '%s\n' "$line" | tee -a "$LOG"

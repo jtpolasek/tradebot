@@ -16,9 +16,11 @@ export function startPolymarketMarksJob(
 ): { stop: () => void } {
   const intervalMs = opts.intervalMs ?? POLYMARKET_MARKS_INTERVAL_MS;
   let stopped = false;
+  let running = false;
 
   async function tick() {
-    if (stopped) return;
+    if (stopped || running) return;
+    running = true;
     try {
       const tokens = await getOpenPositionTokens(db);
       const polygonTokens = tokens.filter((token) => token.chain === "polygon");
@@ -48,6 +50,8 @@ export function startPolymarketMarksJob(
       }
     } catch (err) {
       logger.error({ err }, "polymarket marks job tick failed");
+    } finally {
+      running = false;
     }
   }
 

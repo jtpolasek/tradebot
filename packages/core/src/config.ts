@@ -55,6 +55,10 @@ const schema = z.object({
   POLYMARKET_CLOB_API_URL: z.string().url().default("https://clob.polymarket.com"),
   POLYMARKET_GAMMA_API_URL: z.string().url().default("https://gamma-api.polymarket.com"),
   POLYMARKET_MAX_SPREAD_BPS: z.coerce.number().nonnegative().default(500),
+  // Marks/resolution job cadence (ms). Both loop serially over every open Polygon position against
+  // public Polymarket endpoints, so raise these under a large open-position count to avoid 429s.
+  POLYMARKET_MARKS_INTERVAL_MS: z.coerce.number().positive().default(60_000),
+  POLYMARKET_RESOLUTION_INTERVAL_MS: z.coerce.number().positive().default(60_000),
   RSS_SOFT_LIMIT_MB: z.coerce.number().positive().default(1536),
   LOG_LEVEL: z.enum(["trace", "debug", "info", "warn", "error", "fatal"]).default("info"),
 });

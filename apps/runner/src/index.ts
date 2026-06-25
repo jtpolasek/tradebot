@@ -107,6 +107,7 @@ async function main() {
     onMark: (mark) => engine.ingestPriceMark(mark.chain, mark.tokenAddress, mark.priceUsd),
   });
   const polymarketMarksJob = startPolymarketMarksJob(db, {
+    intervalMs: config.POLYMARKET_MARKS_INTERVAL_MS,
     onMark: (mark) => engine.ingestPriceMark(mark.chain, mark.tokenAddress, mark.priceUsd),
   });
   const exitJob = startExitJob(db, engine);
@@ -160,7 +161,9 @@ async function main() {
   });
   await polymarketWatcher.start();
   const polymarketCopyJob = startPolymarketCopyJob(db, engine);
-  const polymarketResolutionJob = startPolymarketResolutionJob(db, engine);
+  const polymarketResolutionJob = startPolymarketResolutionJob(db, engine, {
+    intervalMs: config.POLYMARKET_RESOLUTION_INTERVAL_MS,
+  });
 
   const heartbeatJob = startHeartbeatJob(db, [...watchers, polymarketWatcher]);
 

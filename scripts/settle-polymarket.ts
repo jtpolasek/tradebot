@@ -2,6 +2,8 @@ import { config, EventBus } from "../packages/core/dist/index.js";
 import { PaperEngine } from "../packages/paper-engine/dist/index.js";
 import { getPolymarketMarketStatus } from "../packages/pricing/dist/index.js";
 import { closeDb, getDb, getOpenPolymarketPositionsForSettlement } from "../packages/store/dist/index.js";
+import { mkdir, writeFile } from "fs/promises";
+import { join } from "path";
 import { pathToFileURL } from "url";
 
 const dummyRpcClient = {
@@ -16,6 +18,7 @@ export async function main(): Promise<void> {
   await engine.start();
   engine.stop();
 
+  const report: string[] = [];
   const positions = await getOpenPolymarketPositionsForSettlement(db);
   let settled = 0;
   let skipped = 0;
@@ -27,7 +30,7 @@ export async function main(): Promise<void> {
       if (result === "settled") settled += 1;
       else {
         skipped += 1;
-        await printSkipped(position);
+        report.push(await formatSkipped(position));
       }
     } catch (err) {
       failed += 1;
@@ -38,28 +41,36 @@ export async function main(): Promise<void> {
     }
   }
 
-  console.log(`Polymarket settlement: candidates=${positions.length} settled=${settled} skipped=${skipped} failed=${failed}`);
+  const summary = `Polymarket settlement: candidates=${positions.length} settled=${settled} skipped=${skipped} failed=${failed}`;
+  const reportPath = await writeReport([summary, "", ...report]);
+  console.log(summary);
+  console.log(`Report written: ${reportPath}`);
   await closeDb();
   if (failed > 0) process.exit(1);
 }
 
-async function printSkipped(position: Awaited<ReturnType<typeof getOpenPolymarketPositionsForSettlement>>[number]): Promise<void> {
+async function formatSkipped(position: Awaited<ReturnType<typeof getOpenPolymarketPositionsForSettlement>>[number]): Promise<string> {
   const status = await getPolymarketMarketStatus(position.conditionId);
   const prices = status?.outcomePrices?.join("/") ?? "";
-  console.log(
-    [
-      "skipped",
-      `symbol=${position.token?.symbol ?? ""}`,
-      `name=${position.token?.name ?? ""}`,
-      `qty=${position.qty}`,
-      `condition=${position.conditionId}`,
-      `outcome=${position.outcomeIndex}`,
-      `closed=${status?.closed ?? ""}`,
-      `resolved=${status?.resolved ?? ""}`,
-      `active=${status?.active ?? ""}`,
-      `prices=${prices}`,
-    ].join(" "),
-  );
+  return [
+    "SKIPPED",
+    `Market: ${position.token?.name ?? "(unknown)"}`,
+    `Outcome: ${position.token?.symbol ?? ""} (index ${position.outcomeIndex})`,
+    `Qty: ${position.qty}`,
+    `Avg cost: ${position.avgCostUsd}`,
+    `Condition: ${position.conditionId}`,
+    `Gamma: active=${status?.active ?? ""} closed=${status?.closed ?? ""} resolved=${status?.resolved ?? ""} prices=${prices}`,
+    "",
+  ].join("\n");
+}
+
+async function writeReport(lines: string[]): Promise<string> {
+  const dir = "reports";
+  await mkdir(dir, { recursive: true });
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const path = join(dir, `polymarket-settlement-${stamp}.txt`);
+  await writeFile(path, `${lines.join("\n")}\n`, "utf8");
+  return path;
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

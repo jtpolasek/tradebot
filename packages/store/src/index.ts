@@ -15,3 +15,4 @@ export * from "./repositories/analytics.js";
 export * from "./repositories/runnerHealth.js";
 export * from "./repositories/polymarketPollState.js";
 export * from "./repositories/polymarketLeaders.js";
+export * from "./repositories/prospects.js";

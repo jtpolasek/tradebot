@@ -1,4 +1,4 @@
-import { eq, and } from "drizzle-orm";
+import { eq, and, sql } from "drizzle-orm";
 import type { Db } from "../db.js";
 import { wallets } from "../schema.js";
 import type { TrackedWallet, ChainId } from "@tradebot/core";
@@ -6,7 +6,9 @@ import { normalizeAddress } from "@tradebot/core";
 
 export async function insertWallet(
   db: Db,
-  wallet: Omit<TrackedWallet, "id" | "addedAt" | "autoCopy"> & { autoCopy?: boolean }
+  // `autoAdded` is set only by the prospect-discovery finder; a human-added leader leaves it false
+  // (the default), which keeps it out of the retraction sweep regardless of humanTouched.
+  wallet: Omit<TrackedWallet, "id" | "addedAt" | "autoCopy"> & { autoCopy?: boolean; autoAdded?: boolean }
 ): Promise<TrackedWallet> {
   const rows = await db
     .insert(wallets)
@@ -16,6 +18,7 @@ export async function insertWallet(
       label: wallet.label,
       active: wallet.active,
       autoCopy: wallet.autoCopy ?? true,
+      autoAdded: wallet.autoAdded ?? false,
     })
     .returning();
   const row = rows[0];
@@ -55,6 +58,36 @@ export async function markWalletHumanTouched(db: Db, id: string): Promise<void> 
 export async function getAllWallets(db: Db): Promise<TrackedWallet[]> {
   const rows = await db.select().from(wallets);
   return rows.map(rowToWallet);
+}
+
+/**
+ * Active Polygon leaders eligible for the discovery retraction sweep: finder-added, never
+ * human-touched, auto-copy still off (observe-first). Human-added or human-touched leaders are
+ * sacrosanct and excluded. The sweep un-watches the weakest of these to free capacity (ADR 0005 §8).
+ */
+export async function getRetractableAutoLeaders(db: Db): Promise<TrackedWallet[]> {
+  const rows = await db
+    .select()
+    .from(wallets)
+    .where(
+      and(
+        eq(wallets.chain, "polygon"),
+        eq(wallets.active, true),
+        eq(wallets.autoAdded, true),
+        eq(wallets.humanTouched, false),
+        eq(wallets.autoCopy, false),
+      ),
+    );
+  return rows.map(rowToWallet);
+}
+
+/** Count of active Polygon leaders — the discovery cap (`PROSPECT_MAX_LEADERS`) is measured against this. */
+export async function countActivePolygonLeaders(db: Db): Promise<number> {
+  const rows = await db
+    .select({ count: sql<number>`count(*)::int` })
+    .from(wallets)
+    .where(and(eq(wallets.chain, "polygon"), eq(wallets.active, true)));
+  return rows[0]?.count ?? 0;
 }
 
 function rowToWallet(row: typeof wallets.$inferSelect): TrackedWallet {

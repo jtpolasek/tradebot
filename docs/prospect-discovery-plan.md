@@ -160,6 +160,14 @@ deferred Gamma lifetime-ROI refinement.
   `countActivePolygonLeaders(db)`.
 - Export all from `packages/store/src/index.ts`.
 
+**Status:** ✅ Step 3 shipped — `packages/store/src/repositories/prospects.ts` (`upsertProspectEvaluation`
+preserving `firstSeenAt`; `getRecentlyRejected(db, since)`; `getProspect`; singleton
+`getDiscoveryState`/`setDiscoveryState` with partial-field upsert so a good run clears `lastError`
+without losing `lastRunAt`). `wallets.ts` extended with `insertWallet({ autoAdded })`,
+`getRetractableAutoLeaders` (polygon + active + autoAdded + !humanTouched + !autoCopy), and
+`countActivePolygonLeaders`. Exported from the store index. `prospects.test.ts` covers all of it
+(6 tests). Build + tests green (523).
+
 ## The job (`apps/runner/src/prospectDiscoveryJob.ts`)
 
 `startProspectDiscoveryJob(db, { intervalMs, nominator?, fetchImpl? })` returning `{ stop }`,
@@ -202,7 +210,7 @@ Cycle (skip entirely if `!PROSPECT_DISCOVERY_ENABLED`):
 
 1. ✅ Config knobs + `.env.example`.
 2. ✅ Schema (3 changes) + generated migration; `markWalletHumanTouched` wired into human mutation paths.
-3. `prospects` repo + wallet repo extensions + exports.
+3. ✅ `prospects` repo + wallet repo extensions + exports.
 4. Nominator interface + leaderboard nominator + tests.
 5. Evaluation stage + tests.
 6. The job + runner wiring + tests.

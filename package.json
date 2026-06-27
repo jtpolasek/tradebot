@@ -11,6 +11,7 @@
     "db:up:test": "docker compose --profile test up -d db-test",
     "db:migrate": "node --import tsx/esm packages/store/src/migrate.ts",
     "verify:ledger": "node --import tsx/esm scripts/verify-ledger.ts",
+    "settle:polymarket": "node --import tsx/esm scripts/settle-polymarket.ts",
     "reprocess": "node --import tsx/esm scripts/reprocess.ts",
     "check-v4": "node --import tsx/esm packages/pricing/scripts/check-v4.ts"
   },

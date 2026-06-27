@@ -135,6 +135,14 @@ export interface Nominator { nominate(): Promise<Nomination[]>; }
   keep the MONTH row's numbers, flag whether it also appeared in ALL (corroboration boost).
 - Return `Nomination[]` (lowercased addresses).
 
+**Status:** ✅ Step 4 shipped — `nominator.ts` (`Nomination`/`Nominator` interfaces) +
+`leaderboardNominator.ts` (`fetchLeaderboard` with 429 backoff mirroring `fetchTrades`; coercing
+string `rank`; `createLeaderboardNominator` unions primary∪ALL by lowercased address, keeps the
+primary window's numbers on overlap, flags `corroborated` only when present on both boards). Exported
+from the ingest index. `leaderboardNominator.test.ts` covers zod string-`rank` coercion, 50-row cap,
+429 retry, MONTH∪ALL union + corroboration flag, and the ALL-window short-circuit (10 tests). Build +
+tests green (76 ingest / 447 total).
+
 ## Evaluation stage (`packages/ingest/src/polymarket/evaluateProspect.ts`)
 
 Pure, source-agnostic, unit-testable with injected fetch. Per nomination:

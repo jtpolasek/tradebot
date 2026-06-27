@@ -505,6 +505,76 @@ export class PaperEngine {
     if (opts.rememberHolding !== false) this.rememberLeaderHolding(signal);
   }
 
+  private async trySettleStaleEvmSell(signal: TradeSignal, token: TokenRef, quoteToken: TokenRef): Promise<boolean> {
+    if (signal.side !== "sell" || !isEvmChain(signal.chain)) return false;
+
+    const key = posKey(signal.chain, token.address, signal.walletId);
+    const existing = this.positions.get(key);
+    if (!existing || existing.qty <= 0) return false;
+
+    const soldQty = rawToHumanNumber(signal.amountIn, token.decimals);
+    const quoteQty = rawToHumanNumber(signal.amountOut, quoteToken.decimals);
+    if (!Number.isFinite(soldQty) || soldQty <= 0 || !Number.isFinite(quoteQty) || quoteQty <= 0) return false;
+
+    const quoteUsd = await this.resolveQuoteUsdPrice(quoteToken);
+    const sellPriceUsd = quoteUsd > 0 ? (quoteQty * quoteUsd) / soldQty : 0;
+    if (!Number.isFinite(sellPriceUsd) || sellPriceUsd <= 0) return false;
+
+    const fraction = this.estimateLeaderSellFraction(signal);
+    const qty = Math.min(existing.qty, Math.max(0, fraction * existing.qty));
+    if (qty <= 0) return false;
+
+    const gasUsd = signal.chain === "eth" ? this.cfg.GAS_USD_ETH : this.cfg.GAS_USD_BASE;
+    const notionalUsd = qty * sellPriceUsd;
+    const dexFeeUsd = (notionalUsd * DEX_FEE_BPS) / 10_000;
+    const feeUsd = gasUsd + dexFeeUsd;
+
+    await this.applySellToState({
+      chain: signal.chain,
+      tokenAddress: token.address,
+      walletId: signal.walletId,
+      posKey: key,
+      existing,
+      qty,
+      notionalUsd,
+      gasUsd,
+      dexFeeUsd,
+      effectiveFeeUsd: feeUsd,
+    });
+
+    const decidedAt = Date.now();
+    const fill: PaperFill = {
+      id: randomUUID(),
+      signalId: signal.id,
+      decidedAt,
+      decision: "copied",
+      side: "sell",
+      token,
+      quoteToken,
+      qty,
+      priceUsd: sellPriceUsd,
+      notionalUsd,
+      feeUsd,
+      slippageBps: 0,
+      latencyMs: decidedAt - signal.observedAt,
+      provisional: false,
+      priceSource: "leader-implied-stale-sell",
+    };
+    await insertFill(this.db, fill);
+    await this.takeSnapshot();
+    this.bus.emit("paper-fill", fill);
+    this.rememberLeaderHolding(signal);
+    logger.info({
+      fillId: fill.id,
+      chain: signal.chain,
+      tokenAddress: token.address,
+      walletId: signal.walletId,
+      priceUsd: sellPriceUsd,
+      notionalUsd,
+    }, "settled stale leader sell against open paper position");
+    return true;
+  }
+
   private async handleSignal(signal: TradeSignal): Promise<void> {
     const storedSignalId = await insertSignal(this.db, signal);
     if (storedSignalId !== signal.id) {
@@ -531,6 +601,7 @@ export class PaperEngine {
       ? this.cfg.POLYMARKET_MAX_SIGNAL_AGE_SEC
       : this.cfg.MAX_SIGNAL_AGE_SEC;
     if (isStaleSignal(signal, Date.now(), maxAgeSec * 1000)) {
+      if (await this.trySettleStaleEvmSell(signal, token, quoteToken)) return;
       return this.recordSkip(signal, "stale-signal", token, quoteToken);
     }
 

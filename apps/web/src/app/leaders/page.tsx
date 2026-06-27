@@ -14,11 +14,29 @@ type StatRow = {
 };
 type Leader = { wallet: Wallet; stats: Record<string, StatRow> };
 type LeadersData = { leaders: Leader[] };
+type PolygonLeader = {
+  wallet: Wallet;
+  signals: number;
+  copiedFills: number;
+  skippedFills: number;
+  openPositions: number;
+  closedPositions: number;
+  winningClosedPositions: number;
+  realizedPnlUsd: number;
+  openValueUsd: number;
+  unrealizedPnlUsd: number | null;
+  totalPnlUsd: number | null;
+  totalNotionalUsd: number;
+  winRate: number | null;
+  updatedAt: string | null;
+};
+type PolygonLeadersData = { leaders: PolygonLeader[] };
 
 const WINDOWS = ["7d", "30d", "all"] as const;
 
 export default function LeadersPage() {
   const [data, setData] = useState<LeadersData | null>(null);
+  const [polygonData, setPolygonData] = useState<PolygonLeadersData | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -26,8 +44,12 @@ export default function LeadersPage() {
 
   async function load() {
     try {
-      const d = await apiFetch<LeadersData>("/leaders");
+      const [d, poly] = await Promise.all([
+        apiFetch<LeadersData>("/leaders"),
+        apiFetch<PolygonLeadersData>("/polygon-leaders"),
+      ]);
       setData(d);
+      setPolygonData(poly);
       setError("");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load leaders");
@@ -53,6 +75,7 @@ export default function LeadersPage() {
   }
 
   const leaders = data?.leaders ?? [];
+  const polygonLeaders = polygonData?.leaders ?? [];
   const sorted = [...leaders].sort((a, b) => {
     const sa = a.stats[activeWindow]?.score ?? -99;
     const sb = b.stats[activeWindow]?.score ?? -99;
@@ -69,6 +92,13 @@ export default function LeadersPage() {
   function weightClass(w: number) {
     if (w >= 1.2) return "good";
     if (w <= 0.1) return "bad";
+    return "";
+  }
+
+  function moneyClass(n: number | null | undefined) {
+    if (n === null || n === undefined) return "";
+    if (n > 0) return "good";
+    if (n < 0) return "bad";
     return "";
   }
 
@@ -154,6 +184,63 @@ export default function LeadersPage() {
                     </tr>
                   );
                 })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      <div className="panel">
+        <div className="row" style={{ marginBottom: 12 }}>
+          <h2 style={{ marginBottom: 0 }}>Polygon Leaders</h2>
+          <span className="pill">{polygonLeaders.length} wallets</span>
+        </div>
+
+        {polygonLeaders.length === 0 && !loading ? (
+          <p className="subtle">No polygon wallets yet.</p>
+        ) : (
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Wallet</th>
+                  <th>Total P&L</th>
+                  <th>Realized</th>
+                  <th>Unrealized</th>
+                  <th>Open Value</th>
+                  <th>Resolved</th>
+                  <th>Open</th>
+                  <th>Win Rate</th>
+                  <th>Copied</th>
+                  <th>Skipped</th>
+                  <th>Signals</th>
+                  <th>Updated</th>
+                </tr>
+              </thead>
+              <tbody>
+                {polygonLeaders.map((l) => (
+                  <tr key={l.wallet.id}>
+                    <td>
+                      <div style={{ fontWeight: 700, fontSize: "0.82rem" }}>{l.wallet.label}</div>
+                      <WalletLink chain={l.wallet.chain} address={l.wallet.address} />
+                    </td>
+                    <td className={moneyClass(l.totalPnlUsd)}>
+                      {l.totalPnlUsd !== null ? formatUsd(l.totalPnlUsd) : "—"}
+                    </td>
+                    <td className={moneyClass(l.realizedPnlUsd)}>{formatUsd(l.realizedPnlUsd)}</td>
+                    <td className={moneyClass(l.unrealizedPnlUsd)}>
+                      {l.unrealizedPnlUsd !== null ? formatUsd(l.unrealizedPnlUsd) : "—"}
+                    </td>
+                    <td>{formatUsd(l.openValueUsd)}</td>
+                    <td>{l.closedPositions}</td>
+                    <td>{l.openPositions}</td>
+                    <td>{formatPct(l.winRate)}</td>
+                    <td>{l.copiedFills}</td>
+                    <td>{l.skippedFills}</td>
+                    <td>{l.signals}</td>
+                    <td>{l.updatedAt ? timeAgo(l.updatedAt) : "—"}</td>
+                  </tr>
+                ))}
               </tbody>
             </table>
           </div>

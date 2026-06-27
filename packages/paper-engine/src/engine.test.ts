@@ -807,6 +807,59 @@ describe("PaperEngine integration", () => {
     expect(fills[0]?.skipReason).toBe("stale-signal");
   });
 
+  it("settles a stale backfilled EVM sell against an existing open position at the leader sell price", async () => {
+    const bus = new EventBus();
+    await db.execute(sql`TRUNCATE paper_fills CASCADE`);
+    await db.execute(sql`TRUNCATE positions CASCADE`);
+    await db.execute(sql`TRUNCATE portfolio_snapshots CASCADE`);
+    await db.execute(sql`TRUNCATE trade_signals CASCADE`);
+    await upsertToken(db, {
+      chain: TOKEN_A.chain,
+      address: TOKEN_A.address,
+      symbol: TOKEN_A.symbol,
+      name: TOKEN_A.symbol,
+      decimals: TOKEN_A.decimals,
+      isBlocked: false,
+    });
+    await upsertPosition(db, {
+      chain: TOKEN_A.chain,
+      tokenAddress: TOKEN_A.address,
+      qty: 10,
+      avgCostUsd: 5,
+      realizedPnlUsd: 0,
+      sourceWalletId: walletId,
+    });
+    vi.mocked(getUsdPrice).mockImplementation(async (_chain, addr) => {
+      if (addr === USDC.address) return 1;
+      if (addr === TOKEN_A.address) return 10;
+      return 1;
+    });
+
+    const engine = new PaperEngine(db, bus, cfg() as never, mockRpcClient as never);
+    await engine.start();
+    bus.emit(
+      "trade-signal",
+      makeSignal({
+        walletId,
+        side: "sell",
+        tokenIn: TOKEN_A,
+        tokenOut: USDC,
+        amountIn: 10_000_000_000_000_000_000n,
+        amountOut: 120_000_000n,
+        blockTimestamp: Date.now() - 4 * 60 * 60_000,
+      })
+    );
+    await new Promise<void>((r) => setTimeout(r, 200));
+    engine.stop();
+
+    const fills = await getRecentFills(db, new Date(Date.now() - 60_000), 5);
+    expect(fills[0]?.decision).toBe("copied");
+    expect(fills[0]?.skipReason).toBeUndefined();
+    expect(fills[0]?.priceUsd).toBeCloseTo(12);
+    expect(fills[0]?.priceSource).toBe("leader-implied-stale-sell");
+    expect(await getOpenPositions(db)).toHaveLength(0);
+  });
+
   it("manual candidate copy executes through the normal fill path without changing the signal to decoded", async () => {
     const bus = new EventBus();
     await db.execute(sql`TRUNCATE paper_fills CASCADE`);

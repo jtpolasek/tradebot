@@ -969,6 +969,120 @@ describe("portfolio, analytics, leaders, and adaptations API", () => {
     }));
   });
 
+  it("returns polygon leaders from copied fills and resolved positions", async () => {
+    const wallet = await insertWallet(db as Parameters<typeof insertWallet>[0], {
+      chain: "polygon",
+      address: "0x7070707070707070707070707070707070707070",
+      label: "PolyGone",
+      active: true,
+      autoCopy: true,
+    });
+    await seedToken({
+      chain: "polygon",
+      address: "123456789",
+      symbol: "Yes",
+      name: "Will the test pass?",
+      decimals: 6,
+    });
+
+    const buySignalId = await insertSignal(db as Parameters<typeof insertSignal>[0], {
+      id: randomUUID(),
+      chain: "polygon",
+      walletId: wallet.id,
+      txHash: `0x${randomUUID().replace(/-/g, "").padEnd(64, "0").slice(0, 64)}`,
+      source: "confirmed",
+      side: "buy",
+      tokenIn: { chain: "polygon", address: "0x2791bca1f2de4661ed88a30c99a7a9449aa84174", symbol: "USDC", decimals: 6 },
+      tokenOut: { chain: "polygon", address: "123456789", symbol: "Yes", name: "Will the test pass?", decimals: 6 },
+      amountIn: 60_000_000n,
+      amountOut: 100_000_000n,
+      venue: "polymarket",
+      observedAt: new Date("2026-06-20T09:00:00.000Z").getTime(),
+      confirmedAt: new Date("2026-06-20T09:00:00.000Z").getTime(),
+      blockNumber: null,
+      decodeStatus: "decoded",
+      confidence: 1,
+      reason: null,
+      externalUrl: "https://polymarket.com/event/test",
+      conditionId: "0xcondition",
+      outcomeIndex: 0,
+    });
+    await insertFill(db as Parameters<typeof insertFill>[0], {
+      id: randomUUID(),
+      signalId: buySignalId,
+      decidedAt: new Date("2026-06-20T09:00:05.000Z").getTime(),
+      decision: "copied",
+      side: "buy",
+      token: { chain: "polygon", address: "123456789", symbol: "Yes", name: "Will the test pass?", decimals: 6 },
+      quoteToken: { chain: "polygon", address: "0x2791bca1f2de4661ed88a30c99a7a9449aa84174", symbol: "USDC", decimals: 6 },
+      qty: 100,
+      priceUsd: 0.6,
+      notionalUsd: 60,
+      feeUsd: 0,
+      slippageBps: 0,
+      latencyMs: 50,
+      provisional: false,
+      priceSource: "polymarket-clob",
+      priceVenue: "polymarket",
+    });
+    await db.insert(positions).values([
+      {
+        chain: "polygon",
+        tokenAddress: "123456789",
+        qty: "0",
+        avgCostUsd: "0.4",
+        openedAt: new Date("2026-06-19T09:00:00.000Z"),
+        closedAt: new Date("2026-06-20T10:00:00.000Z"),
+        realizedPnlUsd: "12",
+        sourceWalletId: wallet.id,
+      },
+      {
+        chain: "polygon",
+        tokenAddress: "123456789",
+        qty: "50",
+        avgCostUsd: "0.6",
+        openedAt: new Date("2026-06-20T09:00:00.000Z"),
+        realizedPnlUsd: "0",
+        sourceWalletId: wallet.id,
+      },
+    ]);
+    await insertPriceMark(db as Parameters<typeof insertPriceMark>[0], {
+      chain: "polygon",
+      tokenAddress: "123456789",
+      ts: new Date("2026-06-20T11:00:00.000Z"),
+      priceUsd: 0.8,
+      source: "polymarket-clob",
+    });
+
+    const res = await authed("GET", "/polygon-leaders");
+
+    expect(res.statusCode).toBe(200);
+    const body = json<{
+      leaders: Array<{
+        wallet: { id: string; label: string; chain: string };
+        signals: number;
+        copiedFills: number;
+        closedPositions: number;
+        openPositions: number;
+        realizedPnlUsd: number;
+        unrealizedPnlUsd: number | null;
+        totalPnlUsd: number | null;
+        openValueUsd: number;
+      }>;
+    }>(res);
+    expect(body.leaders).toContainEqual(expect.objectContaining({
+      wallet: expect.objectContaining({ id: wallet.id, label: "PolyGone", chain: "polygon" }),
+      signals: 1,
+      copiedFills: 1,
+      closedPositions: 1,
+      openPositions: 1,
+      realizedPnlUsd: 12,
+      unrealizedPnlUsd: 10,
+      totalPnlUsd: 22,
+      openValueUsd: 40,
+    }));
+  });
+
   it("lists adaptation logs by most recent first and validates limit", async () => {
     await db.insert(adaptationLog).values([
       {

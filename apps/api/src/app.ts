@@ -38,6 +38,7 @@ import {
   getRunnerHealth,
   getChainStatesUpdatedAt,
   getPolymarketPollHealth,
+  getPolygonLeaders,
   type CandidateReviewStatus,
   type CandidateSignalFilters,
   type Db,
@@ -318,6 +319,11 @@ export async function createApiApp(options: CreateApiAppOptions) {
       }
     }
 
+    reply.send({ leaders });
+  });
+
+  app.get("/polygon-leaders", async (_req, reply) => {
+    const leaders = await getPolygonLeaders(db);
     reply.send({ leaders });
   });
 

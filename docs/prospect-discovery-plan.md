@@ -106,6 +106,13 @@ export const prospectDiscoveryState = pgTable("prospect_discovery_state", {
 Generate the migration with `pnpm --filter @tradebot/store db:generate` (drizzle-kit) — do **not**
 hand-write SQL; follow the existing `migrations/00NN_*.sql` flow.
 
+**Status:** ✅ Step 2 shipped — `prospects` + `prospect_discovery_state` tables and `wallets.autoAdded`
+/`wallets.humanTouched` columns added; migration `drizzle/0013_lovely_mongu.sql` generated;
+`markWalletHumanTouched` added to the wallets repo and wired into the human mutation paths (`PATCH`
+and `DELETE /wallets/:id` in `apps/api/src/app.ts`, which the web settings page calls through). It is
+deliberately *not* inside `setWalletActive`/`setWalletAutoCopy` — the retraction sweep calls those and
+must not flag its own promotions touched. Build + tests green.
+
 ## Nominator interface (`packages/ingest/src/polymarket/`)
 
 ```ts
@@ -194,7 +201,7 @@ Cycle (skip entirely if `!PROSPECT_DISCOVERY_ENABLED`):
 ## Build order (each step builds + tests green before the next)
 
 1. ✅ Config knobs + `.env.example`.
-2. Schema (3 changes) + generated migration; `markWalletHumanTouched` wired into human mutation paths.
+2. ✅ Schema (3 changes) + generated migration; `markWalletHumanTouched` wired into human mutation paths.
 3. `prospects` repo + wallet repo extensions + exports.
 4. Nominator interface + leaderboard nominator + tests.
 5. Evaluation stage + tests.

@@ -16,6 +16,7 @@ import {
   insertWallet,
   setWalletActive,
   setWalletAutoCopy,
+  markWalletHumanTouched,
   getWalletById,
   getRecentSignals,
   getCandidateSignals,
@@ -155,6 +156,8 @@ export async function createApiApp(options: CreateApiAppOptions) {
     if (!wallet) return reply.code(404).send({ error: "Wallet not found" });
     if (body.data.active !== undefined) await setWalletActive(db, id, body.data.active);
     if (body.data.autoCopy !== undefined) await setWalletAutoCopy(db, id, body.data.autoCopy);
+    // A human acted on this leader → sacrosanct: the discovery retraction sweep must never touch it.
+    await markWalletHumanTouched(db, id);
     const updated = await getWalletById(db, id);
     reply.send({ wallet: updated });
   });
@@ -163,6 +166,8 @@ export async function createApiApp(options: CreateApiAppOptions) {
     const { id } = req.params as { id: string };
     const wallet = await getWalletById(db, id);
     if (!wallet) return reply.code(404).send({ error: "Wallet not found" });
+    // A human deleting (un-watching) a leader is an explicit human action → sacrosanct.
+    await markWalletHumanTouched(db, id);
     await setWalletActive(db, id, false);
     reply.send({ ok: true });
   });

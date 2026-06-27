@@ -43,6 +43,15 @@ export async function setWalletAutoCopy(db: Db, id: string, autoCopy: boolean): 
   await db.update(wallets).set({ autoCopy }).where(eq(wallets.id, id));
 }
 
+/**
+ * Mark a leader as human-touched, making it sacrosanct to the discovery retraction sweep. Call this
+ * from the human/API layer only (route handlers), never inside setWalletActive/setWalletAutoCopy —
+ * the retraction sweep calls those to un-watch its own promotions and must not flag them touched.
+ */
+export async function markWalletHumanTouched(db: Db, id: string): Promise<void> {
+  await db.update(wallets).set({ humanTouched: true }).where(eq(wallets.id, id));
+}
+
 export async function getAllWallets(db: Db): Promise<TrackedWallet[]> {
   const rows = await db.select().from(wallets);
   return rows.map(rowToWallet);

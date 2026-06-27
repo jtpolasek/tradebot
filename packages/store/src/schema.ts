@@ -7,6 +7,7 @@ import {
   numeric,
   integer,
   bigint,
+  doublePrecision,
   jsonb,
   unique,
   primaryKey,
@@ -24,6 +25,13 @@ export const wallets = pgTable("wallets", {
   // When false, the wallet is still watched and scored but the engine never opens new positions
   // from its signals (skip reason 'auto-copy-off'). Existing positions can still be sold to exit.
   autoCopy: boolean("auto_copy").notNull().default(true),
+  // True when the prospect-discovery finder inserted this leader (vs. a human). Only auto-added,
+  // untouched, non-auto-copy leaders are eligible for the retraction sweep (see humanTouched).
+  autoAdded: boolean("auto_added").notNull().default(false),
+  // Set true the moment a human acts on this leader (toggle active/auto-copy, relabel, delete). Once
+  // true the row is sacrosanct: the discovery retraction sweep must never un-watch it. Wired at the
+  // human/API layer, never inside setWalletActive/setWalletAutoCopy (the sweep calls those too).
+  humanTouched: boolean("human_touched").notNull().default(false),
   addedAt: timestamptz("added_at").notNull().defaultNow(),
 }, (t) => [unique().on(t.chain, t.address)]);
 
@@ -190,3 +198,35 @@ export const polymarketPollState = pgTable("polymarket_poll_state", {
   consecutiveFailures: integer("consecutive_failures").notNull().default(0),
   updatedAt: timestamptz("updated_at").notNull().defaultNow(),
 }, (t) => [index("polymarket_poll_state_updated_at_idx").on(t.updatedAt)]);
+
+// A wallet nominated by a discovery source (the Nominator) and run through the source-agnostic
+// evaluation stage. Every evaluation — promoted or rejected — upserts a row here for provenance and
+// audit. A rejection within the cooldown window suppresses re-evaluation; a promotion links the
+// leader it created via promotedWalletId. Polygon (Polymarket) only for v1; see ADR 0005.
+export const prospects = pgTable("prospects", {
+  address: text("address").primaryKey(), // lowercase proxyWallet
+  source: text("source").notNull(), // "leaderboard" (the Nominator)
+  userName: text("user_name"),
+  xUsername: text("x_username"),
+  // latest evaluation snapshot (provenance / audit)
+  pnlUsd: doublePrecision("pnl_usd"),
+  volUsd: doublePrecision("vol_usd"),
+  pnlPerVol: doublePrecision("pnl_per_vol"),
+  tradeCount: integer("trade_count"),
+  lastTradeTs: bigint("last_trade_ts", { mode: "number" }),
+  score: doublePrecision("score"),
+  verdict: text("verdict").notNull(), // "promoted" | "rejected"
+  rejectReason: text("reject_reason"),
+  firstSeenAt: timestamptz("first_seen_at").notNull().defaultNow(),
+  lastEvaluatedAt: timestamptz("last_evaluated_at").notNull().defaultNow(),
+  promotedWalletId: uuid("promoted_wallet_id").references(() => wallets.id),
+});
+
+// Single-row run-state for the discovery job: when it last ran (for interval gating across restarts),
+// the last error (if the cycle threw), and how many leaders it promoted on the last run.
+export const prospectDiscoveryState = pgTable("prospect_discovery_state", {
+  id: integer("id").primaryKey().default(1), // single row
+  lastRunAt: timestamptz("last_run_at"),
+  lastError: text("last_error"),
+  promotedLastRun: integer("promoted_last_run").notNull().default(0),
+});

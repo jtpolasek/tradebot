@@ -317,9 +317,7 @@ export async function getPolymarketMarketStatus(
 
     const fetchImpl = opts.fetchImpl ?? fetch;
     const markets = await fetchGammaMarket(baseUrl, normalizedConditionId, fetchImpl);
-    const matching =
-      markets.find((market) => normalizeConditionId(market.conditionId ?? market.condition_id ?? "") === normalizedConditionId) ??
-      markets[0];
+    const matching = markets.find((market) => normalizeConditionId(market.conditionId ?? market.condition_id ?? "") === normalizedConditionId);
     if (!matching) return null;
 
     const normalized = normalizeMarketStatus(normalizedConditionId, matching, Date.now());

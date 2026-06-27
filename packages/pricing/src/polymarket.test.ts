@@ -206,6 +206,19 @@ describe("getPolymarketMarketStatus", () => {
     expect(fetchImpl).toHaveBeenCalledTimes(1);
     expect(__polymarketMarketStatusCacheSize()).toBe(1);
   });
+
+  it("does not use an unrelated Gamma market when the condition filter is ignored", async () => {
+    const fetchImpl = vi.fn(async () => jsonResponse([
+      { conditionId: "0x0000000000000000000000000000000000000000000000000000000000000000", active: true, closed: false, resolved: false },
+    ]));
+
+    const result = await getPolymarketMarketStatus(CONDITION_ID, {
+      baseUrl: GAMMA_BASE,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+
+    expect(result).toBeNull();
+  });
 });
 
 describe("getPolymarketResolutionPayout", () => {

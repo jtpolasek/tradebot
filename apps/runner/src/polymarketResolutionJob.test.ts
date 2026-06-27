@@ -37,6 +37,7 @@ const samplePosition = {
   sourceWalletId: "wallet-1",
   conditionId: "0xcondition",
   outcomeIndex: 1,
+  externalUrl: "https://polymarket.com/event/test-event",
 };
 
 describe("startPolymarketResolutionJob", () => {

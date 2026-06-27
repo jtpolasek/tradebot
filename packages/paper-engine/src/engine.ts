@@ -28,6 +28,7 @@ import {
   getLiquidityUsd,
   getLiquidityUsdResult,
   getPolymarketMarketStatus,
+  getPolymarketMarketStatusByEventSlug,
   getPolymarketPrice,
   getPolymarketResolutionPayout,
   getUsdPrice,
@@ -1598,6 +1599,7 @@ export class PaperEngine {
     sourceWalletId: string | null;
     conditionId: string;
     outcomeIndex: number;
+    externalUrl?: string | null;
   }): Promise<"settled" | "skipped"> {
     // Route the externally-invoked resolution job through the shared queue (see the invariant on
     // `queue`) so settlement mutates state under the same scheduler as the copy/exit/bus paths.
@@ -1612,6 +1614,7 @@ export class PaperEngine {
     sourceWalletId: string | null;
     conditionId: string;
     outcomeIndex: number;
+    externalUrl?: string | null;
   }): Promise<"settled" | "skipped"> {
     if (input.sourceWalletId === null) {
       logger.warn({ tokenAddress: input.tokenAddress, conditionId: input.conditionId }, "skipping Polymarket settlement for position without source wallet");
@@ -1619,7 +1622,7 @@ export class PaperEngine {
     }
     if (input.qty <= 0) return "skipped";
 
-    const status = await getPolymarketMarketStatus(input.conditionId);
+    const status = await this.getPolymarketSettlementStatus(input.conditionId, input.externalUrl ?? null);
     if (!status) return "skipped";
 
     const payout = getPolymarketResolutionPayout(status, input.outcomeIndex);
@@ -1744,6 +1747,27 @@ export class PaperEngine {
       qty: existing.qty,
     }, "polymarket position settled at resolution");
     return "settled";
+  }
+
+  private async getPolymarketSettlementStatus(conditionId: string, externalUrl: string | null) {
+    const direct = await getPolymarketMarketStatus(conditionId);
+    if (direct) return direct;
+    const eventSlug = polymarketEventSlug(externalUrl);
+    if (!eventSlug) return null;
+    return getPolymarketMarketStatusByEventSlug(conditionId, eventSlug);
+  }
+}
+
+function polymarketEventSlug(externalUrl: string | null): string | null {
+  if (!externalUrl) return null;
+  try {
+    const url = new URL(externalUrl);
+    const parts = url.pathname.split("/").filter(Boolean);
+    const eventIndex = parts.indexOf("event");
+    const slug = eventIndex >= 0 ? parts[eventIndex + 1] : null;
+    return slug && slug.length > 0 ? slug : null;
+  } catch {
+    return null;
   }
 }
 

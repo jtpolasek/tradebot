@@ -21,6 +21,7 @@ export type OpenPolymarketPositionForSettlement = Omit<PositionRow, "chain"> & {
   chain: "polygon";
   conditionId: string;
   outcomeIndex: number;
+  externalUrl: string | null;
 };
 
 export async function upsertPosition(db: DbOrTx, pos: Omit<PositionRow, "id" | "openedAt" | "closedAt">): Promise<void> {
@@ -100,6 +101,7 @@ export async function getOpenPolymarketPositionsForSettlement(db: Db): Promise<O
       .select({
         conditionId: tradeSignals.conditionId,
         outcomeIndex: tradeSignals.outcomeIndex,
+        externalUrl: tradeSignals.externalUrl,
       })
       .from(tradeSignals)
       .where(and(
@@ -123,6 +125,7 @@ export async function getOpenPolymarketPositionsForSettlement(db: Db): Promise<O
       chain: "polygon",
       conditionId: row.conditionId,
       outcomeIndex: row.outcomeIndex,
+      externalUrl: row.externalUrl ?? null,
     });
   }
 

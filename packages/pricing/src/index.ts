@@ -1,6 +1,12 @@
 export { getUsdPrice, getUsdPriceResult, getLiquidityUsd, getLiquidityUsdResult, sqrtPriceX96ToPrice, clearCaches } from "./price.js";
 export type { PriceResult, PriceSource, LiquidityResult, MarketHint } from "./price.js";
-export { getPolymarketPrice, getPolymarketMarketStatus, getPolymarketResolutionPayout, clearPolymarketPriceCache } from "./polymarket.js";
+export {
+  getPolymarketPrice,
+  getPolymarketMarketStatus,
+  getPolymarketMarketStatusByEventSlug,
+  getPolymarketResolutionPayout,
+  clearPolymarketPriceCache,
+} from "./polymarket.js";
 export type { PolymarketPriceResult, PolymarketExecutionSide, GetPolymarketPriceOptions, PolymarketMarketStatus, GetPolymarketMarketStatusOptions } from "./polymarket.js";
 export { startMarksJob } from "./marks.js";
 export { startPolymarketMarksJob } from "./polymarketMarks.js";

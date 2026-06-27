@@ -1,6 +1,6 @@
 import { config, EventBus } from "../packages/core/dist/index.js";
 import { PaperEngine } from "../packages/paper-engine/dist/index.js";
-import { getPolymarketMarketStatus } from "../packages/pricing/dist/index.js";
+import { getPolymarketMarketStatus, getPolymarketMarketStatusByEventSlug } from "../packages/pricing/dist/index.js";
 import { closeDb, getDb, getOpenPolymarketPositionsForSettlement } from "../packages/store/dist/index.js";
 import { mkdir, writeFile } from "fs/promises";
 import { join } from "path";
@@ -50,7 +50,8 @@ export async function main(): Promise<void> {
 }
 
 async function formatSkipped(position: Awaited<ReturnType<typeof getOpenPolymarketPositionsForSettlement>>[number]): Promise<string> {
-  const status = await getPolymarketMarketStatus(position.conditionId);
+  const direct = await getPolymarketMarketStatus(position.conditionId);
+  const status = direct ?? await getEventStatus(position.conditionId, position.externalUrl);
   const prices = status?.outcomePrices?.join("/") ?? "";
   return [
     "SKIPPED",
@@ -59,9 +60,28 @@ async function formatSkipped(position: Awaited<ReturnType<typeof getOpenPolymark
     `Qty: ${position.qty}`,
     `Avg cost: ${position.avgCostUsd}`,
     `Condition: ${position.conditionId}`,
+    `Event URL: ${position.externalUrl ?? ""}`,
     `Gamma: active=${status?.active ?? ""} closed=${status?.closed ?? ""} resolved=${status?.resolved ?? ""} prices=${prices}`,
     "",
   ].join("\n");
+}
+
+async function getEventStatus(conditionId: string, externalUrl: string | null) {
+  const eventSlug = polymarketEventSlug(externalUrl);
+  return eventSlug ? getPolymarketMarketStatusByEventSlug(conditionId, eventSlug) : null;
+}
+
+function polymarketEventSlug(externalUrl: string | null): string | null {
+  if (!externalUrl) return null;
+  try {
+    const url = new URL(externalUrl);
+    const parts = url.pathname.split("/").filter(Boolean);
+    const eventIndex = parts.indexOf("event");
+    const slug = eventIndex >= 0 ? parts[eventIndex + 1] : null;
+    return slug && slug.length > 0 ? slug : null;
+  } catch {
+    return null;
+  }
 }
 
 async function writeReport(lines: string[]): Promise<string> {

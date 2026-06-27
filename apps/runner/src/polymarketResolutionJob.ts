@@ -13,6 +13,7 @@ type SettlementCandidate = {
   sourceWalletId: string | null;
   conditionId: string;
   outcomeIndex: number;
+  externalUrl: string | null;
 };
 
 type PolymarketSettlementEngine = {

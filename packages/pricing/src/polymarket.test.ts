@@ -4,6 +4,7 @@ import {
   __polymarketMarketStatusCacheSize,
   clearPolymarketPriceCache,
   getPolymarketMarketStatus,
+  getPolymarketMarketStatusByEventSlug,
   getPolymarketPrice,
   getPolymarketResolutionPayout,
 } from "./polymarket.js";
@@ -218,6 +219,37 @@ describe("getPolymarketMarketStatus", () => {
     });
 
     expect(result).toBeNull();
+  });
+
+  it("finds a matching condition inside a Gamma event slug response", async () => {
+    const fetchImpl = vi.fn(async () => jsonResponse({
+      slug: "event-slug",
+      markets: [
+        { conditionId: "0xother", active: true, closed: false, resolved: false },
+        {
+          conditionId: CONDITION_ID,
+          active: true,
+          closed: true,
+          resolved: false,
+          outcomes: "[\"Yes\",\"No\"]",
+          outcomePrices: "[\"0\",\"1\"]",
+          clobTokenIds: "[\"yes-token\",\"no-token\"]",
+        },
+      ],
+    }));
+
+    const result = await getPolymarketMarketStatusByEventSlug(CONDITION_ID, "event-slug", {
+      baseUrl: GAMMA_BASE,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+
+    expect(result).toMatchObject({
+      conditionId: CONDITION_ID,
+      closed: true,
+      outcomePrices: [0, 1],
+      clobTokenIds: ["yes-token", "no-token"],
+    });
+    expect(calledUrl(fetchImpl, 0)).toContain("/events?slug=event-slug");
   });
 });
 

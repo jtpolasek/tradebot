@@ -70,6 +70,7 @@ vi.mock("@tradebot/pricing", () => ({
     outcomePrices: null,
     clobTokenIds: null,
   }),
+  getPolymarketMarketStatusByEventSlug: vi.fn().mockResolvedValue(null),
   getPolymarketResolutionPayout: vi.fn((status: { closed: boolean; resolved: boolean; outcomePrices: number[] | null }, outcomeIndex: number) => {
     if (!status.closed && !status.resolved) return null;
     const price = status.outcomePrices?.[outcomeIndex];
@@ -85,6 +86,7 @@ import {
   getLiquidityUsd,
   getLiquidityUsdResult,
   getPolymarketMarketStatus,
+  getPolymarketMarketStatusByEventSlug,
   getPolymarketPrice,
   getUsdPrice,
   getUsdPriceResult,
@@ -98,6 +100,7 @@ const TOKEN_A: TokenRef = { chain: "eth", address: "0xaaaa0000000000000000000000
 const TOKEN_B: TokenRef = { chain: "eth", address: "0xbbbb000000000000000000000000000000000002", symbol: "TKNB", decimals: 18 };
 const POLYGON_USDC: TokenRef = { chain: "polygon", address: "0x2791bca1f2de4661ed88a30c99a7a9449aa84174", symbol: "USDC", decimals: 6 };
 const POLY_YES: TokenRef = { chain: "polygon", address: "71321045679252212594626385532706912750332728571942532289631379312455583992563", symbol: "YES", decimals: 6, name: "Will it happen?" };
+const POLY_NO: TokenRef = { chain: "polygon", address: "89185177767185250670283019413861399436335059635766251549068376246147763175828", symbol: "NO", decimals: 6, name: "Will it happen?" };
 
 function makeSignal(overrides: Partial<TradeSignal> & { walletId: string }): TradeSignal {
   return {
@@ -218,6 +221,7 @@ beforeEach(() => {
     outcomePrices: null,
     clobTokenIds: null,
   });
+  vi.mocked(getPolymarketMarketStatusByEventSlug).mockResolvedValue(null);
   vi.mocked(getZeroxPrice).mockReset();
   return db.execute(sql`TRUNCATE settings CASCADE`);
 });
@@ -1236,6 +1240,70 @@ describe("PaperEngine integration", () => {
     expect(signal?.venue).toBe("polymarket-resolution");
     const openRows = await getOpenPositions(db);
     expect(openRows.some((row) => row.chain === "polygon" && row.tokenAddress === POLY_YES.address)).toBe(false);
+  });
+
+  it("settles via the Polymarket event slug when direct Gamma condition lookup misses", async () => {
+    const bus = new EventBus();
+    await db.execute(sql`TRUNCATE paper_fills CASCADE`);
+    await db.execute(sql`TRUNCATE positions CASCADE`);
+    await db.execute(sql`TRUNCATE portfolio_snapshots CASCADE`);
+    await db.execute(sql`TRUNCATE trade_signals CASCADE`);
+    const polygonWallet = await insertWallet(db, {
+      chain: "polygon",
+      address: "0x8eade00000000000000000000000000000000009",
+      label: "Poly leader 6",
+      active: true,
+    });
+    await upsertToken(db, {
+      chain: "polygon",
+      address: POLY_NO.address,
+      symbol: "NO",
+      name: "Will it happen?",
+      decimals: 6,
+      isBlocked: false,
+    });
+    await upsertPosition(db, {
+      chain: "polygon",
+      tokenAddress: POLY_NO.address,
+      qty: 25,
+      avgCostUsd: 0.8,
+      realizedPnlUsd: 0,
+      sourceWalletId: polygonWallet.id,
+    });
+    vi.mocked(getPolymarketMarketStatus).mockResolvedValueOnce(null);
+    vi.mocked(getPolymarketMarketStatusByEventSlug).mockResolvedValueOnce({
+      conditionId: "0xcondition",
+      source: "polymarket-gamma",
+      fetchedAt: Date.now(),
+      active: true,
+      closed: true,
+      resolved: false,
+      acceptingOrders: false,
+      outcomes: ["Yes", "No"],
+      outcomePrices: [0, 1],
+      clobTokenIds: [POLY_YES.address, POLY_NO.address],
+    });
+
+    const engine = new PaperEngine(db, bus, cfg() as never, mockRpcClient as never);
+    await engine.start();
+    const result = await engine.settlePolymarketPosition({
+      chain: "polygon",
+      tokenAddress: POLY_NO.address,
+      qty: 25,
+      avgCostUsd: 0.8,
+      sourceWalletId: polygonWallet.id,
+      conditionId: "0xcondition",
+      outcomeIndex: 1,
+      externalUrl: "https://polymarket.com/event/test-event",
+    });
+    engine.stop();
+
+    expect(result).toBe("settled");
+    expect(getPolymarketMarketStatusByEventSlug).toHaveBeenCalledWith("0xcondition", "test-event");
+    const fill = (await getRecentFills(db, new Date(Date.now() - 60_000), 5))[0];
+    expect(fill?.priceUsd).toBe(1);
+    const openRows = await getOpenPositions(db);
+    expect(openRows.some((row) => row.chain === "polygon" && row.tokenAddress === POLY_NO.address)).toBe(false);
   });
 
   it("stores fills against the persisted signal id when duplicate tx signals arrive", async () => {

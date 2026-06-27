@@ -215,6 +215,28 @@ async function fetchGammaMarket(
   throw new Error(`Polymarket Gamma /markets ${lastStatus} for condition ${conditionId}`);
 }
 
+async function fetchGammaEventMarkets(
+  baseUrl: string,
+  eventSlug: string,
+  fetchImpl: typeof fetch,
+): Promise<z.infer<typeof GammaMarketSchema>[]> {
+  const endpoint = `${baseUrl.replace(/\/$/, "")}/events`;
+  const query = new URLSearchParams({ slug: eventSlug });
+  const res = await fetchImpl(`${endpoint}?${query.toString()}`);
+  if (!res.ok) throw new Error(`Polymarket Gamma /events ${res.status} for slug ${eventSlug}`);
+  const json: unknown = await res.json();
+  if (Array.isArray(json)) {
+    const event = json[0] as Record<string, unknown> | undefined;
+    return parseGammaEventMarkets(event);
+  }
+  if (json && typeof json === "object") {
+    const obj = json as Record<string, unknown>;
+    if (Array.isArray(obj["data"])) return parseGammaEventMarkets(obj["data"][0] as Record<string, unknown> | undefined);
+    return parseGammaEventMarkets(obj);
+  }
+  throw new Error("Polymarket Gamma /events returned an unexpected payload shape");
+}
+
 function parseGammaMarkets(json: unknown): z.infer<typeof GammaMarketSchema>[] {
   if (Array.isArray(json)) return z.array(GammaMarketSchema).parse(json);
   if (json && typeof json === "object") {
@@ -223,6 +245,12 @@ function parseGammaMarkets(json: unknown): z.infer<typeof GammaMarketSchema>[] {
     return [GammaMarketSchema.parse(obj)];
   }
   throw new Error("Polymarket Gamma /markets returned an unexpected payload shape");
+}
+
+function parseGammaEventMarkets(event: Record<string, unknown> | undefined): z.infer<typeof GammaMarketSchema>[] {
+  const markets = event?.["markets"];
+  if (!Array.isArray(markets)) return [];
+  return z.array(GammaMarketSchema).parse(markets);
 }
 
 function normalizeMarketStatus(
@@ -325,6 +353,34 @@ export async function getPolymarketMarketStatus(
     return normalized;
   } catch (err) {
     logger.warn({ err, conditionId: normalizedConditionId }, "Polymarket Gamma market-status lookup failed");
+    return null;
+  }
+}
+
+export async function getPolymarketMarketStatusByEventSlug(
+  conditionId: string,
+  eventSlug: string,
+  opts: GetPolymarketMarketStatusOptions = {},
+): Promise<PolymarketMarketStatus | null> {
+  const normalizedConditionId = normalizeConditionId(conditionId);
+  const normalizedSlug = eventSlug.trim();
+  if (!normalizedSlug) return null;
+  try {
+    const baseUrl = currentGammaBaseUrl(opts);
+    const key = cacheKey(baseUrl, `${normalizedConditionId}:event:${normalizedSlug}`);
+    const cached = marketStatusCache.get(key);
+    if (cached && Date.now() - cached.fetchedAt < MARKET_STATUS_TTL_MS) return cached;
+
+    const fetchImpl = opts.fetchImpl ?? fetch;
+    const markets = await fetchGammaEventMarkets(baseUrl, normalizedSlug, fetchImpl);
+    const matching = markets.find((market) => normalizeConditionId(market.conditionId ?? market.condition_id ?? "") === normalizedConditionId);
+    if (!matching) return null;
+
+    const normalized = normalizeMarketStatus(normalizedConditionId, matching, Date.now());
+    cappedSet(marketStatusCache, key, normalized);
+    return normalized;
+  } catch (err) {
+    logger.warn({ err, conditionId: normalizedConditionId, eventSlug: normalizedSlug }, "Polymarket Gamma event-status lookup failed");
     return null;
   }
 }

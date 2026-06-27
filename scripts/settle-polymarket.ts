@@ -1,5 +1,6 @@
 import { config, EventBus } from "../packages/core/dist/index.js";
 import { PaperEngine } from "../packages/paper-engine/dist/index.js";
+import { getPolymarketMarketStatus } from "../packages/pricing/dist/index.js";
 import { closeDb, getDb, getOpenPolymarketPositionsForSettlement } from "../packages/store/dist/index.js";
 import { pathToFileURL } from "url";
 
@@ -24,7 +25,10 @@ export async function main(): Promise<void> {
     try {
       const result = await engine.settlePolymarketPosition(position);
       if (result === "settled") settled += 1;
-      else skipped += 1;
+      else {
+        skipped += 1;
+        await printSkipped(position);
+      }
     } catch (err) {
       failed += 1;
       console.error(
@@ -37,6 +41,25 @@ export async function main(): Promise<void> {
   console.log(`Polymarket settlement: candidates=${positions.length} settled=${settled} skipped=${skipped} failed=${failed}`);
   await closeDb();
   if (failed > 0) process.exit(1);
+}
+
+async function printSkipped(position: Awaited<ReturnType<typeof getOpenPolymarketPositionsForSettlement>>[number]): Promise<void> {
+  const status = await getPolymarketMarketStatus(position.conditionId);
+  const prices = status?.outcomePrices?.join("/") ?? "";
+  console.log(
+    [
+      "skipped",
+      `symbol=${position.token?.symbol ?? ""}`,
+      `name=${position.token?.name ?? ""}`,
+      `qty=${position.qty}`,
+      `condition=${position.conditionId}`,
+      `outcome=${position.outcomeIndex}`,
+      `closed=${status?.closed ?? ""}`,
+      `resolved=${status?.resolved ?? ""}`,
+      `active=${status?.active ?? ""}`,
+      `prices=${prices}`,
+    ].join(" "),
+  );
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

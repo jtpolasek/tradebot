@@ -14,4 +14,4 @@ export * from "./repositories/settings.js";
 export * from "./repositories/analytics.js";
 export * from "./repositories/runnerHealth.js";
 export * from "./repositories/polymarketPollState.js";
-export * from "./repositories/polygonLeaders.js";
+export * from "./repositories/polymarketLeaders.js";

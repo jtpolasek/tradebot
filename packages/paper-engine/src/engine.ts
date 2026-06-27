@@ -505,6 +505,10 @@ export class PaperEngine {
     if (opts.rememberHolding !== false) this.rememberLeaderHolding(signal);
   }
 
+  // An orphaned position: we copied a leader's fresh buy at a real price, held it, and only now see
+  // the leader's matching sell — too stale to copy normally (backfill/poll lag). The position must
+  // be force-closed (leaving it open poisons equity/valuation), but at an honest price. We price the
+  // close at the *current* market, never simply at the leader's stale executed rate (see ADR 0004).
   private async trySettleStaleEvmSell(signal: TradeSignal, token: TokenRef, quoteToken: TokenRef): Promise<boolean> {
     if (signal.side !== "sell" || !isEvmChain(signal.chain)) return false;
 
@@ -512,17 +516,13 @@ export class PaperEngine {
     const existing = this.positions.get(key);
     if (!existing || existing.qty <= 0) return false;
 
-    const soldQty = rawToHumanNumber(signal.amountIn, token.decimals);
-    const quoteQty = rawToHumanNumber(signal.amountOut, quoteToken.decimals);
-    if (!Number.isFinite(soldQty) || soldQty <= 0 || !Number.isFinite(quoteQty) || quoteQty <= 0) return false;
-
-    const quoteUsd = await this.resolveQuoteUsdPrice(quoteToken);
-    const sellPriceUsd = quoteUsd > 0 ? (quoteQty * quoteUsd) / soldQty : 0;
-    if (!Number.isFinite(sellPriceUsd) || sellPriceUsd <= 0) return false;
-
     const fraction = this.estimateLeaderSellFraction(signal);
     const qty = Math.min(existing.qty, Math.max(0, fraction * existing.qty));
     if (qty <= 0) return false;
+
+    const priced = await this.resolveStaleSellPrice(signal, token, quoteToken);
+    if (!priced) return false;
+    const { priceUsd: sellPriceUsd, source: priceSource } = priced;
 
     const gasUsd = signal.chain === "eth" ? this.cfg.GAS_USD_ETH : this.cfg.GAS_USD_BASE;
     const notionalUsd = qty * sellPriceUsd;
@@ -558,7 +558,7 @@ export class PaperEngine {
       slippageBps: 0,
       latencyMs: decidedAt - signal.observedAt,
       provisional: false,
-      priceSource: "leader-implied-stale-sell",
+      priceSource,
     };
     await insertFill(this.db, fill);
     await this.takeSnapshot();
@@ -570,9 +570,51 @@ export class PaperEngine {
       tokenAddress: token.address,
       walletId: signal.walletId,
       priceUsd: sellPriceUsd,
+      priceSource,
       notionalUsd,
     }, "settled stale leader sell against open paper position");
     return true;
+  }
+
+  // Price a stale-sell force-close, most-honest source first (ADR 0004):
+  //   1. live on-chain price — exists right now, DB-independent;
+  //   2. last recorded mark — only if the DB is reachable;
+  //   3. leader's stale implied rate — last resort to guarantee the close, flagged so analytics can
+  //      isolate fills booked at a price the token may no longer trade at.
+  private async resolveStaleSellPrice(
+    signal: TradeSignal,
+    token: TokenRef,
+    quoteToken: TokenRef
+  ): Promise<{ priceUsd: number; source: string } | null> {
+    const chain = this.evm(signal.chain);
+    try {
+      const live = await getUsdPriceResult(chain, token.address, this.rpcClients[chain], v4MarketHint(signal));
+      if (live && Number.isFinite(live.priceUsd) && live.priceUsd > 0) {
+        return { priceUsd: live.priceUsd, source: live.source };
+      }
+    } catch {
+      // fall through to the next tier
+    }
+
+    try {
+      const mark = await latestMark(this.db, signal.chain, token.address);
+      if (mark && Number.isFinite(mark.priceUsd) && mark.priceUsd > 0) {
+        return { priceUsd: mark.priceUsd, source: `mark:${mark.source}` };
+      }
+    } catch {
+      // DB unreachable — fall through to the leader-implied last resort
+    }
+
+    const soldQty = rawToHumanNumber(signal.amountIn, token.decimals);
+    const quoteQty = rawToHumanNumber(signal.amountOut, quoteToken.decimals);
+    if (Number.isFinite(soldQty) && soldQty > 0 && Number.isFinite(quoteQty) && quoteQty > 0) {
+      const quoteUsd = await this.resolveQuoteUsdPrice(quoteToken);
+      const implied = quoteUsd > 0 ? (quoteQty * quoteUsd) / soldQty : 0;
+      if (Number.isFinite(implied) && implied > 0) {
+        return { priceUsd: implied, source: "leader-implied-stale-sell" };
+      }
+    }
+    return null;
   }
 
   private async handleSignal(signal: TradeSignal): Promise<void> {

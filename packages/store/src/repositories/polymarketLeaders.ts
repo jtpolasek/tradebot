@@ -4,7 +4,7 @@ import { paperFills, positions, tradeSignals, wallets } from "../schema.js";
 import { latestMark } from "./priceMarks.js";
 import type { TrackedWallet } from "@tradebot/core";
 
-export type PolygonLeaderRow = {
+export type PolymarketLeaderRow = {
   wallet: TrackedWallet;
   signals: number;
   copiedFills: number;
@@ -13,7 +13,7 @@ export type PolygonLeaderRow = {
   closedPositions: number;
   winningClosedPositions: number;
   realizedPnlUsd: number;
-  openValueUsd: number;
+  openValueUsd: number | null;
   unrealizedPnlUsd: number | null;
   totalPnlUsd: number | null;
   totalNotionalUsd: number;
@@ -21,9 +21,16 @@ export type PolygonLeaderRow = {
   updatedAt: Date | null;
 };
 
-type MutablePolygonLeader = Omit<PolygonLeaderRow, "wallet" | "winRate" | "totalPnlUsd"> & {
+type MutablePolymarketLeader = Omit<
+  PolymarketLeaderRow,
+  "wallet" | "winRate" | "totalPnlUsd" | "openValueUsd"
+> & {
   wallet: TrackedWallet;
+  openValueUsd: number;
   unrealizedPnlUsd: number | null;
+  // An open position whose current price we could not obtain (no fresh mark). When set, this
+  // leader's open-position valuation is reported as unknown rather than imputed at cost basis.
+  pricingIncomplete: boolean;
 };
 
 function walletFromRow(row: typeof wallets.$inferSelect): TrackedWallet {
@@ -38,7 +45,7 @@ function walletFromRow(row: typeof wallets.$inferSelect): TrackedWallet {
   };
 }
 
-function emptyLeader(wallet: TrackedWallet): MutablePolygonLeader {
+function emptyLeader(wallet: TrackedWallet): MutablePolymarketLeader {
   return {
     wallet,
     signals: 0,
@@ -52,10 +59,11 @@ function emptyLeader(wallet: TrackedWallet): MutablePolygonLeader {
     unrealizedPnlUsd: null,
     totalNotionalUsd: 0,
     updatedAt: null,
+    pricingIncomplete: false,
   };
 }
 
-function touch(row: MutablePolygonLeader, at: Date | null): void {
+function touch(row: MutablePolymarketLeader, at: Date | null): void {
   if (at && (!row.updatedAt || at > row.updatedAt)) row.updatedAt = at;
 }
 
@@ -63,9 +71,9 @@ function roundMoney(value: number): number {
   return Math.round(value * 1_000_000) / 1_000_000;
 }
 
-export async function getPolygonLeaders(db: Db): Promise<PolygonLeaderRow[]> {
+export async function getPolymarketLeaders(db: Db): Promise<PolymarketLeaderRow[]> {
   const walletRows = await db.select().from(wallets).where(eq(wallets.chain, "polygon"));
-  const byWallet = new Map<string, MutablePolygonLeader>();
+  const byWallet = new Map<string, MutablePolymarketLeader>();
   for (const row of walletRows) {
     const wallet = walletFromRow(row);
     byWallet.set(wallet.id, emptyLeader(wallet));
@@ -126,23 +134,49 @@ export async function getPolygonLeaders(db: Db): Promise<PolygonLeaderRow[]> {
 
     row.openPositions++;
     const mark = await latestMark(db, "polygon", position.tokenAddress);
-    const markPrice = mark?.priceUsd ?? avgCostUsd;
-    row.openValueUsd += qty * markPrice;
-    const unrealized = qty * (markPrice - avgCostUsd);
+    if (!mark || !Number.isFinite(mark.priceUsd) || mark.priceUsd <= 0) {
+      // No current price — don't impute cost basis (that fabricates a $0.00 unrealized). Flag the
+      // leader so its open valuation reports as unknown.
+      row.pricingIncomplete = true;
+      continue;
+    }
+    row.openValueUsd += qty * mark.priceUsd;
+    const unrealized = qty * (mark.priceUsd - avgCostUsd);
     row.unrealizedPnlUsd = (row.unrealizedPnlUsd ?? 0) + unrealized;
-    touch(row, mark?.ts ?? null);
+    touch(row, mark.ts);
   }
 
   return Array.from(byWallet.values())
     .map((row) => {
       const winRate = row.closedPositions > 0 ? row.winningClosedPositions / row.closedPositions : null;
-      const totalPnlUsd = row.unrealizedPnlUsd === null ? row.realizedPnlUsd : row.realizedPnlUsd + row.unrealizedPnlUsd;
+
+      // If any open position lacks a current price, open-position valuation is unknown — report it as
+      // null rather than imputing cost basis. Realized PnL and counts stay exact regardless.
+      let unrealizedPnlUsd: number | null;
+      let totalPnlUsd: number | null;
+      let openValueUsd: number | null;
+      if (row.pricingIncomplete) {
+        unrealizedPnlUsd = null;
+        totalPnlUsd = null;
+        openValueUsd = null;
+      } else if (row.openPositions === 0) {
+        unrealizedPnlUsd = null;
+        totalPnlUsd = roundMoney(row.realizedPnlUsd);
+        openValueUsd = 0;
+      } else {
+        const unrealized = row.unrealizedPnlUsd ?? 0;
+        unrealizedPnlUsd = roundMoney(unrealized);
+        totalPnlUsd = roundMoney(row.realizedPnlUsd + unrealized);
+        openValueUsd = roundMoney(row.openValueUsd);
+      }
+
+      const { pricingIncomplete: _pricingIncomplete, ...rest } = row;
       return {
-        ...row,
+        ...rest,
         realizedPnlUsd: roundMoney(row.realizedPnlUsd),
-        openValueUsd: roundMoney(row.openValueUsd),
-        unrealizedPnlUsd: row.unrealizedPnlUsd === null ? null : roundMoney(row.unrealizedPnlUsd),
-        totalPnlUsd: roundMoney(totalPnlUsd),
+        openValueUsd,
+        unrealizedPnlUsd,
+        totalPnlUsd,
         totalNotionalUsd: roundMoney(row.totalNotionalUsd),
         winRate,
       };

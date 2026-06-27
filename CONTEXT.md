@@ -32,6 +32,10 @@ _Avoid_: Selected, copy mode
 The paper engine's recorded decision on a trade signal — either a simulated execution or a skip with a reason.
 _Avoid_: Trade, order, execution
 
+**Orphaned position**:
+A copied position the bot still holds after the leader has already sold out of it — the leader's exit signal arrived too stale to copy normally. Force-closed at the current price (never the leader's stale rate; see ADR 0004), not erased.
+_Avoid_: Stuck position, stale position, dangling trade
+
 **Resolution**:
 The settlement of a Polymarket market: every outcome share becomes worth exactly $1 (winning side) or $0 (losing side). A forced close of any still-open copied position that realizes its PnL — distinct from a Fill, which is driven by a leader's trade. Has no ETH/Base analog. Detected by polling market status (Gamma API) by conditionId.
 _Avoid_: Settlement (when ambiguous with general accounting), expiry

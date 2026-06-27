@@ -14,7 +14,7 @@ type StatRow = {
 };
 type Leader = { wallet: Wallet; stats: Record<string, StatRow> };
 type LeadersData = { leaders: Leader[] };
-type PolygonLeader = {
+type PolymarketLeader = {
   wallet: Wallet;
   signals: number;
   copiedFills: number;
@@ -23,20 +23,20 @@ type PolygonLeader = {
   closedPositions: number;
   winningClosedPositions: number;
   realizedPnlUsd: number;
-  openValueUsd: number;
+  openValueUsd: number | null;
   unrealizedPnlUsd: number | null;
   totalPnlUsd: number | null;
   totalNotionalUsd: number;
   winRate: number | null;
   updatedAt: string | null;
 };
-type PolygonLeadersData = { leaders: PolygonLeader[] };
+type PolymarketLeadersData = { leaders: PolymarketLeader[] };
 
 const WINDOWS = ["7d", "30d", "all"] as const;
 
 export default function LeadersPage() {
   const [data, setData] = useState<LeadersData | null>(null);
-  const [polygonData, setPolygonData] = useState<PolygonLeadersData | null>(null);
+  const [polymarketData, setPolymarketData] = useState<PolymarketLeadersData | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -46,10 +46,10 @@ export default function LeadersPage() {
     try {
       const [d, poly] = await Promise.all([
         apiFetch<LeadersData>("/leaders"),
-        apiFetch<PolygonLeadersData>("/polygon-leaders"),
+        apiFetch<PolymarketLeadersData>("/polymarket-leaders"),
       ]);
       setData(d);
-      setPolygonData(poly);
+      setPolymarketData(poly);
       setError("");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load leaders");
@@ -75,7 +75,7 @@ export default function LeadersPage() {
   }
 
   const leaders = data?.leaders ?? [];
-  const polygonLeaders = polygonData?.leaders ?? [];
+  const polymarketLeaders = polymarketData?.leaders ?? [];
   const sorted = [...leaders].sort((a, b) => {
     const sa = a.stats[activeWindow]?.score ?? -99;
     const sb = b.stats[activeWindow]?.score ?? -99;
@@ -192,12 +192,12 @@ export default function LeadersPage() {
 
       <div className="panel">
         <div className="row" style={{ marginBottom: 12 }}>
-          <h2 style={{ marginBottom: 0 }}>Polygon Leaders</h2>
-          <span className="pill">{polygonLeaders.length} wallets</span>
+          <h2 style={{ marginBottom: 0 }}>Polymarket Leaders</h2>
+          <span className="pill">{polymarketLeaders.length} wallets</span>
         </div>
 
-        {polygonLeaders.length === 0 && !loading ? (
-          <p className="subtle">No polygon wallets yet.</p>
+        {polymarketLeaders.length === 0 && !loading ? (
+          <p className="subtle">No Polymarket leaders yet.</p>
         ) : (
           <div className="table-wrap">
             <table>
@@ -218,7 +218,7 @@ export default function LeadersPage() {
                 </tr>
               </thead>
               <tbody>
-                {polygonLeaders.map((l) => (
+                {polymarketLeaders.map((l) => (
                   <tr key={l.wallet.id}>
                     <td>
                       <div style={{ fontWeight: 700, fontSize: "0.82rem" }}>{l.wallet.label}</div>
@@ -231,7 +231,7 @@ export default function LeadersPage() {
                     <td className={moneyClass(l.unrealizedPnlUsd)}>
                       {l.unrealizedPnlUsd !== null ? formatUsd(l.unrealizedPnlUsd) : "—"}
                     </td>
-                    <td>{formatUsd(l.openValueUsd)}</td>
+                    <td>{l.openValueUsd !== null ? formatUsd(l.openValueUsd) : "—"}</td>
                     <td>{l.closedPositions}</td>
                     <td>{l.openPositions}</td>
                     <td>{formatPct(l.winRate)}</td>

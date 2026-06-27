@@ -807,7 +807,7 @@ describe("PaperEngine integration", () => {
     expect(fills[0]?.skipReason).toBe("stale-signal");
   });
 
-  it("settles a stale backfilled EVM sell against an existing open position at the leader sell price", async () => {
+  it("force-closes an orphaned position from a stale backfilled EVM sell at the current on-chain price", async () => {
     const bus = new EventBus();
     await db.execute(sql`TRUNCATE paper_fills CASCADE`);
     await db.execute(sql`TRUNCATE positions CASCADE`);
@@ -855,6 +855,57 @@ describe("PaperEngine integration", () => {
     const fills = await getRecentFills(db, new Date(Date.now() - 60_000), 5);
     expect(fills[0]?.decision).toBe("copied");
     expect(fills[0]?.skipReason).toBeUndefined();
+    expect(fills[0]?.priceUsd).toBeCloseTo(10);
+    expect(fills[0]?.priceSource).toBe("v3-spot");
+    expect(await getOpenPositions(db)).toHaveLength(0);
+  });
+
+  it("falls back to the leader-implied price to force-close an orphan when no live price is available", async () => {
+    const bus = new EventBus();
+    await db.execute(sql`TRUNCATE paper_fills CASCADE`);
+    await db.execute(sql`TRUNCATE positions CASCADE`);
+    await db.execute(sql`TRUNCATE portfolio_snapshots CASCADE`);
+    await db.execute(sql`TRUNCATE trade_signals CASCADE`);
+    await db.execute(sql`TRUNCATE price_marks CASCADE`);
+    await upsertToken(db, {
+      chain: TOKEN_A.chain,
+      address: TOKEN_A.address,
+      symbol: TOKEN_A.symbol,
+      name: TOKEN_A.symbol,
+      decimals: TOKEN_A.decimals,
+      isBlocked: false,
+    });
+    await upsertPosition(db, {
+      chain: TOKEN_A.chain,
+      tokenAddress: TOKEN_A.address,
+      qty: 10,
+      avgCostUsd: 5,
+      realizedPnlUsd: 0,
+      sourceWalletId: walletId,
+    });
+    // No live on-chain price and no recorded mark -> only the leader-implied rate remains.
+    vi.mocked(getUsdPriceResult).mockResolvedValue(null);
+    vi.mocked(getUsdPrice).mockImplementation(async (_chain, addr) => (addr === USDC.address ? 1 : 10));
+
+    const engine = new PaperEngine(db, bus, cfg() as never, mockRpcClient as never);
+    await engine.start();
+    bus.emit(
+      "trade-signal",
+      makeSignal({
+        walletId,
+        side: "sell",
+        tokenIn: TOKEN_A,
+        tokenOut: USDC,
+        amountIn: 10_000_000_000_000_000_000n,
+        amountOut: 120_000_000n,
+        blockTimestamp: Date.now() - 4 * 60 * 60_000,
+      })
+    );
+    await new Promise<void>((r) => setTimeout(r, 200));
+    engine.stop();
+
+    const fills = await getRecentFills(db, new Date(Date.now() - 60_000), 5);
+    expect(fills[0]?.decision).toBe("copied");
     expect(fills[0]?.priceUsd).toBeCloseTo(12);
     expect(fills[0]?.priceSource).toBe("leader-implied-stale-sell");
     expect(await getOpenPositions(db)).toHaveLength(0);

@@ -1054,7 +1054,7 @@ describe("portfolio, analytics, leaders, and adaptations API", () => {
       source: "polymarket-clob",
     });
 
-    const res = await authed("GET", "/polygon-leaders");
+    const res = await authed("GET", "/polymarket-leaders");
 
     expect(res.statusCode).toBe(200);
     const body = json<{

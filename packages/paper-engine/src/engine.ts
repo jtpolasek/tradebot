@@ -87,6 +87,9 @@ type RuntimeConfig = Pick<Config, "BASE_TRADE_PCT" | "MAX_TRADE_PCT" | "MIN_NOTI
 
 const RECENT_NOTIONAL_WINDOW = 20;
 const DEX_FEE_BPS = 30;
+// Rate-limit the "buying halted — cash at reserve floor" warning so a depleted book surfaces once
+// without spamming the log on every blocked buy signal.
+const BUYING_HALTED_WARN_INTERVAL_MS = 5 * 60_000;
 // Rate limit for the "resolved but indeterminate payout" warning so a stranded Polymarket position
 // surfaces without spamming the log on every 60s resolution sweep.
 const RESOLUTION_STRAND_WARN_INTERVAL_MS = 6 * 60 * 60_000;
@@ -117,6 +120,11 @@ export class PaperEngine {
   private snapshotTimer: ReturnType<typeof setInterval> | null = null;
   private settingsTimer: ReturnType<typeof setInterval> | null = null;
   private runtimeConfig: RuntimeConfig;
+  // Un-invested cash buffer: the engine opens no new positions once cash would drop below this.
+  // Fixed at PAPER_STARTING_CASH_USD × MIN_CASH_RESERVE_PCT (computed once in the constructor).
+  private readonly cashReserveUsd: number;
+  // Timestamp of the last "buying halted" warning, to rate-limit it.
+  private lastBuyingHaltedWarnedAt = 0;
   private readonly recentSourceNotionals = new Map<string, number[]>();
   private readonly leaderHoldings = new Map<string, number>();
   // Wallet IDs with auto-copy disabled: still watched and scored, but the engine opens no new
@@ -141,6 +149,7 @@ export class PaperEngine {
         : { eth: rpcClients as RpcClient, base: rpcClients as RpcClient };
     this.cashUsd = cfg.PAPER_STARTING_CASH_USD;
     this.portfolio = { cashUsd: this.cashUsd, realizedPnlUsd: 0, feesPaidUsd: 0 };
+    this.cashReserveUsd = cfg.PAPER_STARTING_CASH_USD * cfg.MIN_CASH_RESERVE_PCT;
     this.queue = new PQueue({ concurrency: 4 });
     this.runtimeConfig = {
       BASE_TRADE_PCT: cfg.BASE_TRADE_PCT,
@@ -350,20 +359,44 @@ export class PaperEngine {
     if (weight === 0) return { action: "skip", reason: "leader-weight-zero" };
 
     const eq = this.equity();
+    // Spendable cash = cash above the un-invested reserve floor. Buys are sized and gated against
+    // this, not raw cash, so a copy run halts with a buffer intact instead of grinding to zero.
+    const spendableCash = this.cashUsd - this.cashReserveUsd;
     let notional = eq * this.runtimeConfig.BASE_TRADE_PCT * weight;
     if (this.runtimeConfig.SIZING_MODE === "proportional") {
       notional *= this.proportionalScale(signal);
     }
     notional = Math.max(notional, this.runtimeConfig.MIN_NOTIONAL_USD);
     notional = Math.min(notional, eq * this.runtimeConfig.MAX_TRADE_PCT);
-    notional = Math.min(notional, this.cashUsd);
+    notional = Math.min(notional, spendableCash);
     if (notional < this.runtimeConfig.MIN_NOTIONAL_USD) {
+      const reserveBound = spendableCash < this.runtimeConfig.MIN_NOTIONAL_USD;
+      if (reserveBound) this.warnBuyingHalted();
       return {
         action: "skip",
-        reason: this.cashUsd < this.runtimeConfig.MIN_NOTIONAL_USD ? "insufficient-balance" : "below-min-notional",
+        reason: reserveBound ? "insufficient-balance" : "below-min-notional",
       };
     }
     return { action: "copy", notionalUsd: notional };
+  }
+
+  /**
+   * Surface, at most once per BUYING_HALTED_WARN_INTERVAL_MS, that the engine has stopped opening new
+   * positions because spendable cash has fallen below the reserve floor + min-notional. Sells and
+   * exits still run; buys resume once cash recovers (e.g. after positions are sold).
+   */
+  private warnBuyingHalted(): void {
+    const now = Date.now();
+    if (now - this.lastBuyingHaltedWarnedAt < BUYING_HALTED_WARN_INTERVAL_MS) return;
+    this.lastBuyingHaltedWarnedAt = now;
+    logger.warn(
+      {
+        cashUsd: this.cashUsd,
+        reserveUsd: this.cashReserveUsd,
+        minNotionalUsd: this.runtimeConfig.MIN_NOTIONAL_USD,
+      },
+      "buying halted: spendable cash below reserve floor — no new positions until cash recovers"
+    );
   }
 
   private estimateSignalSourceNotionalUsd(signal: TradeSignal): number | null {

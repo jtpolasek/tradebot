@@ -128,6 +128,7 @@ function cfg(overrides: Record<string, unknown> = {}) {
     BASE_TRADE_PCT: 0.01,
     MAX_TRADE_PCT: 0.03,
     MIN_NOTIONAL_USD: 50,
+    MIN_CASH_RESERVE_PCT: 0,
     MIN_LIQUIDITY_USD: 150_000,
     MAX_SIGNAL_AGE_SEC: 180,
     POLYMARKET_MAX_SIGNAL_AGE_SEC: 900,
@@ -351,6 +352,37 @@ describe("PaperEngine integration", () => {
     const signal = makeSignal({ walletId, tokenOut: TOKEN_A, tokenIn: USDC });
     const result = engine.decide(signal, 1_000_000);
     expect(result).toEqual({ action: "skip", reason: "insufficient-balance" });
+  });
+
+  it("decide skips buys once cash drops below the reserve floor", async () => {
+    const bus = new EventBus();
+    await db.execute(sql`TRUNCATE portfolio_snapshots CASCADE`);
+    await db.execute(sql`TRUNCATE positions CASCADE`);
+    // $10,000 book with a 99% reserve → $100 spendable. equity=$10,000, notional=10,000*0.01=$100,
+    // under the max cap (10,000*0.03=$300) and spendable ($100) → affordable.
+    const engine = new PaperEngine(
+      db,
+      bus,
+      cfg({ PAPER_STARTING_CASH_USD: 10_000, MIN_CASH_RESERVE_PCT: 0.99 }) as never,
+      mockRpcClient as never,
+    );
+    await engine.start();
+    engine.stop();
+
+    const signal = makeSignal({ walletId, tokenOut: TOKEN_A, tokenIn: USDC });
+    expect(engine.decide(signal, 1_000_000)).toEqual({ action: "copy", notionalUsd: 100 });
+
+    // Raise the reserve to 99.6% → spendable $40 < MIN_NOTIONAL → halt with insufficient-balance,
+    // even though raw cash ($10,000) is far above the trade size.
+    const halted = new PaperEngine(
+      db,
+      bus,
+      cfg({ PAPER_STARTING_CASH_USD: 10_000, MIN_CASH_RESERVE_PCT: 0.996 }) as never,
+      mockRpcClient as never,
+    );
+    await halted.start();
+    halted.stop();
+    expect(halted.decide(signal, 1_000_000)).toEqual({ action: "skip", reason: "insufficient-balance" });
   });
 
   it("decide skips buys rather than clamping minimum above the max trade cap", () => {

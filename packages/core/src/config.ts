@@ -29,6 +29,11 @@ const schema = z.object({
   BASE_TRADE_PCT: z.coerce.number().positive().default(0.01),
   MAX_TRADE_PCT: z.coerce.number().positive().default(0.03),
   MIN_NOTIONAL_USD: z.coerce.number().positive().default(50),
+  // Fraction of PAPER_STARTING_CASH_USD kept un-invested as a buffer. The engine opens no new
+  // positions once cash would drop below this floor (sells/exits still flow), so a copy run can't
+  // grind the book down to zero. 0 disables the buffer (stop only when cash literally can't cover
+  // the next trade).
+  MIN_CASH_RESERVE_PCT: z.coerce.number().min(0).max(1).default(0.05),
   MIN_LIQUIDITY_USD: z.coerce.number().positive().default(150_000),
   MAX_SIGNAL_AGE_SEC: z.coerce.number().positive().default(180),
   // Polymarket's data-api indexes trades with a multi-minute lag, so a leader's trade is already

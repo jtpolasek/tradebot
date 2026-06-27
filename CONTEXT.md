@@ -20,6 +20,14 @@ _Avoid_: Token (it has no ERC-20 decimals), share (when ambiguous with equities)
 A trade signal the decoder could not classify confidently enough to copy automatically; it is persisted and surfaced for human review with the reason it was held back.
 _Avoid_: Ambiguous signal, low-confidence decode
 
+**Prospect**:
+A wallet nominated by a discovery source (e.g. the Polymarket leaderboard) and under evaluation, not yet promoted to a Leader. Its quality is recomputed from raw trade history by a source-agnostic evaluation stage — the nominator only proposes addresses. Lifecycle: Prospect → (qualifies) → Leader (watched, auto-copy off by default).
+_Avoid_: Candidate (that is a trade signal, not a wallet), Lead (too close to Leader)
+
+**Nominator** (a.k.a. discovery source):
+A source that proposes Prospect addresses plus whatever metadata it happens to know. Pluggable: the leaderboard is the v1 nominator; counterparty-crawl and active-market-scan are future nominators behind the same seam. A nominator never decides quality — that is the evaluation stage's job.
+_Avoid_: Scanner (too scan-specific), source (when ambiguous)
+
 **Watching**:
 Whether a leader is being tracked at all — subscriptions, signal recording, and scoring. Off frees ingest capacity and parks the leader without deleting its history.
 _Avoid_: Active, enabled, deleted

@@ -17,6 +17,8 @@ export {
   createLeaderboardNominator,
   LeaderboardRowSchema,
 } from "./polymarket/leaderboardNominator.js";
+export { createCompositeNominator } from "./polymarket/compositeNominator.js";
+export type { CompositeNominatorOptions } from "./polymarket/compositeNominator.js";
 export type {
   LeaderboardRow,
   LeaderboardWindow,

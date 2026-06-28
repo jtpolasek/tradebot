@@ -5,6 +5,13 @@ export type { PolymarketWatcherOptions } from "./polymarket/watcher.js";
 export { fetchTrades, PolymarketTradeSchema } from "./polymarket/client.js";
 export type { PolymarketTrade } from "./polymarket/client.js";
 export type { Nomination, Nominator } from "./polymarket/nominator.js";
+export { evaluateProspect } from "./polymarket/evaluateProspect.js";
+export type {
+  EvaluateProspectOptions,
+  ProspectEvaluationSnapshot,
+  ProspectEvaluationThresholds,
+  ProspectEvaluationVerdict,
+} from "./polymarket/evaluateProspect.js";
 export {
   fetchLeaderboard,
   createLeaderboardNominator,

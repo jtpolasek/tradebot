@@ -158,6 +158,12 @@ Pure, source-agnostic, unit-testable with injected fetch. Per nomination:
 `/positions`/`/value` intentionally **not** called as a gate (ADR §4); leave a TODO seam for the
 deferred Gamma lifetime-ROI refinement.
 
+**Status:** ✅ Step 5 shipped — `evaluateProspect.ts` computes the Stage-1 PnL and pnl/vol gates, pulls
+`/trades` only after the cheap gates pass, records trade-count and newest-trade snapshots, rejects stale
+or undersampled prospects, and scores qualifiers from `pnlPerVol` with a corroboration boost. Tests cover
+all gate boundaries, zero-volume denominator handling, out-of-order trades, corroboration scoring, and the
+`/positions`/`/value` non-gate invariant. Full `pnpm build` + `pnpm test` green.
+
 ## Repository (`packages/store/src/repositories/prospects.ts`)
 
 - `upsertProspectEvaluation(db, snapshot)` — insert/update by address (set `lastEvaluatedAt`).
@@ -219,8 +225,8 @@ Cycle (skip entirely if `!PROSPECT_DISCOVERY_ENABLED`):
 1. ✅ Config knobs + `.env.example`.
 2. ✅ Schema (3 changes) + generated migration; `markWalletHumanTouched` wired into human mutation paths.
 3. ✅ `prospects` repo + wallet repo extensions + exports.
-4. Nominator interface + leaderboard nominator + tests.
-5. Evaluation stage + tests.
+4. ✅ Nominator interface + leaderboard nominator + tests.
+5. ✅ Evaluation stage + tests.
 6. The job + runner wiring + tests.
 7. Full `pnpm build && pnpm test`; commit per milestone; append to CHANGELOG.md.
 

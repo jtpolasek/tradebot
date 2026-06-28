@@ -138,4 +138,25 @@ describe("deriveHealth", () => {
     const report = deriveHealth(input({ dbReachable: false, heartbeat: { ts: NOW - 5_000, payload: payload({ chains }) } }), NOW, thresholds);
     expect(report.status).toBe("down");
   });
+
+  it("reports prospect discovery freshness", () => {
+    const report = deriveHealth(input({
+      prospectDiscovery: { lastRunAt: NOW - 60_000, lastError: null, promotedLastRun: 2 },
+    }), NOW, thresholds);
+
+    expect(report.status).toBe("ok");
+    expect(report.checks.find((c) => c.name === "prospect-discovery")).toEqual(expect.objectContaining({
+      status: "ok",
+      detail: expect.stringContaining("promoted 2"),
+    }));
+  });
+
+  it("is degraded when prospect discovery records an error", () => {
+    const report = deriveHealth(input({
+      prospectDiscovery: { lastRunAt: NOW - 60_000, lastError: "data api down", promotedLastRun: 0 },
+    }), NOW, thresholds);
+
+    expect(report.status).toBe("degraded");
+    expect(report.checks.find((c) => c.name === "prospect-discovery")?.detail).toBe("data api down");
+  });
 });

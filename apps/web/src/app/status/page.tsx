@@ -49,6 +49,12 @@ type PolymarketPoll = {
   updatedAt: number | null;
 };
 
+type ProspectDiscovery = {
+  lastRunAt: number | null;
+  lastError: string | null;
+  promotedLastRun: number;
+};
+
 type Metrics = {
   status: HealthStatus;
   checks: HealthCheck[];
@@ -68,6 +74,7 @@ type Metrics = {
     } | null;
     chainStateUpdatedAt: Record<string, number>;
     polymarketPolls?: PolymarketPoll[];
+    prospectDiscovery?: ProspectDiscovery | null;
   };
 };
 
@@ -127,6 +134,7 @@ export default function StatusPage() {
   const hb = data?.input.heartbeat;
   const payload = hb?.payload;
   const polymarketPolls = data?.input.polymarketPolls ?? [];
+  const discovery = data?.input.prospectDiscovery ?? null;
 
   return (
     <div className="stack">
@@ -155,6 +163,31 @@ export default function StatusPage() {
               <div className="metric-value">{value}</div>
             </div>
           ))}
+        </div>
+      )}
+
+      {discovery && (
+        <div className="panel">
+          <div className="row" style={{ marginBottom: 10 }}>
+            <h2 style={{ marginBottom: 0 }}>Prospect discovery</h2>
+            <span className={`pill ${discovery.lastError ? "bad" : discovery.lastRunAt ? "good" : "warn"}`}>
+              {discovery.lastError ? "error" : discovery.lastRunAt ? "ok" : "waiting"}
+            </span>
+          </div>
+          <div className="metric-strip">
+            <div className="metric-item">
+              <div className="metric-label">Last run</div>
+              <div className="metric-value">{discovery.lastRunAt ? timeAgo(discovery.lastRunAt) : "—"}</div>
+            </div>
+            <div className="metric-item">
+              <div className="metric-label">Promoted</div>
+              <div className="metric-value">{discovery.promotedLastRun}</div>
+            </div>
+            <div className="metric-item" style={{ minWidth: 220 }}>
+              <div className="metric-label">Last error</div>
+              <div className={`metric-value ${discovery.lastError ? "loss" : "muted"}`}>{discovery.lastError ?? "—"}</div>
+            </div>
+          </div>
         </div>
       )}
 

@@ -1,4 +1,4 @@
-import { and, eq, gte } from "drizzle-orm";
+import { and, desc, eq, gte } from "drizzle-orm";
 import type { Db } from "../db.js";
 import { prospects, prospectDiscoveryState } from "../schema.js";
 
@@ -94,6 +94,12 @@ export async function getRecentlyRejected(db: Db, since: Date): Promise<string[]
 export async function getProspect(db: Db, address: string): Promise<ProspectRow | null> {
   const rows = await db.select().from(prospects).where(eq(prospects.address, address));
   return rows[0] ? rowToProspect(rows[0]) : null;
+}
+
+/** List latest prospect evaluations, newest first, for operator review. */
+export async function getProspects(db: Db, limit = 100): Promise<ProspectRow[]> {
+  const rows = await db.select().from(prospects).orderBy(desc(prospects.lastEvaluatedAt)).limit(limit);
+  return rows.map(rowToProspect);
 }
 
 export interface DiscoveryState {

@@ -10,6 +10,7 @@ import {
   upsertProspectEvaluation,
   getRecentlyRejected,
   getProspect,
+  getProspects,
   getDiscoveryState,
   setDiscoveryState,
 } from "./prospects.js";
@@ -130,6 +131,28 @@ describe("prospects repository", () => {
     expect(recent).not.toContain(promotedAddr);
     expect(recent).not.toContain(staleAddr);
   });
+
+  it("lists prospects newest first with a limit", async () => {
+    await upsertProspectEvaluation(db as AnyDb, {
+      address: "0xabc0000000000000000000000000000000000004",
+      source: "leaderboard",
+      verdict: "rejected",
+      rejectReason: "low-pnl",
+    });
+    await new Promise((r) => setTimeout(r, 5));
+    await upsertProspectEvaluation(db as AnyDb, {
+      address: "0xabc0000000000000000000000000000000000005",
+      source: "leaderboard",
+      verdict: "promoted",
+      score: 0.42,
+    });
+
+    const listed = await getProspects(db as AnyDb, 1);
+
+    expect(listed).toHaveLength(1);
+    expect(listed[0]?.address).toBe("0xabc0000000000000000000000000000000000005");
+  });
+
 
   it("discovery state is a clearable singleton", async () => {
     expect(await getDiscoveryState(db as AnyDb)).toBeNull();

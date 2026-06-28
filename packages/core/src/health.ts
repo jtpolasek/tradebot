@@ -58,6 +58,12 @@ export interface HealthThresholds {
 }
 
 /** Everything the api gathers from Postgres before rolling up a report. */
+export interface ProspectDiscoveryHealth {
+  lastRunAt: number | null;
+  lastError: string | null;
+  promotedLastRun: number;
+}
+
 export interface HealthInput {
   /** True if `select 1` succeeded. */
   dbReachable: boolean;
@@ -67,6 +73,8 @@ export interface HealthInput {
   chainStateUpdatedAt: Partial<Record<ChainId, number>>;
   /** Active Polygon/Polymarket wallet poll state; missing when the table is unavailable. */
   polymarketPolls?: PolymarketPollHealth[];
+  /** Prospect-discovery singleton state; null before first recorded run. */
+  prospectDiscovery?: ProspectDiscoveryHealth | null;
 }
 
 export interface HealthCheck {
@@ -161,6 +169,22 @@ export function deriveHealth(
       });
     } else {
       checks.push({ name: `chain:${chain}`, status: "ok" });
+    }
+  }
+
+  if (input.prospectDiscovery) {
+    const discovery = input.prospectDiscovery;
+    if (discovery.lastError) {
+      checks.push({ name: "prospect-discovery", status: "degraded", detail: discovery.lastError });
+    } else if (discovery.lastRunAt === null) {
+      checks.push({ name: "prospect-discovery", status: "degraded", detail: "no successful run recorded" });
+    } else {
+      const ageSec = (now - discovery.lastRunAt) / 1000;
+      checks.push({
+        name: "prospect-discovery",
+        status: "ok",
+        detail: `last run ${ageSec.toFixed(0)}s ago; promoted ${discovery.promotedLastRun}`,
+      });
     }
   }
 

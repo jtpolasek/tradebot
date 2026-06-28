@@ -40,6 +40,8 @@ import {
   getChainStatesUpdatedAt,
   getPolymarketPollHealth,
   getPolymarketLeaders,
+  getProspects,
+  getDiscoveryState,
   type CandidateReviewStatus,
   type CandidateSignalFilters,
   type Db,
@@ -85,6 +87,10 @@ const CandidateQuery = z.object({
 const DismissPendingQuery = z.object({
   chain: z.enum(["eth", "base", "polygon"]).optional(),
   venue: z.string().trim().min(1).max(64).optional(),
+});
+
+const ProspectsQuery = z.object({
+  limit: z.coerce.number().int().min(1).max(500).default(100),
 });
 
 export async function createApiApp(options: CreateApiAppOptions) {
@@ -332,6 +338,13 @@ export async function createApiApp(options: CreateApiAppOptions) {
     reply.send({ leaders });
   });
 
+  app.get("/prospects", async (req, reply) => {
+    const q = ProspectsQuery.safeParse(req.query);
+    if (!q.success) return reply.code(400).send({ error: q.error.message });
+    const prospects = await getProspects(db, q.data.limit);
+    reply.send({ prospects });
+  });
+
   app.post("/leaders/refresh", async (_req, reply) => {
     if (!leaderRefresh) {
       leaderRefresh = runScorerJob(db, manualWeightProvider, rpcClients).finally(() => {
@@ -375,17 +388,23 @@ export async function createApiApp(options: CreateApiAppOptions) {
 
   async function gatherHealthInput(): Promise<HealthInput> {
     try {
-      const [heartbeat, chainStateUpdatedAt] = await Promise.all([
+      const [heartbeat, chainStateUpdatedAt, discoveryState] = await Promise.all([
         getRunnerHealth(db),
         getChainStatesUpdatedAt(db),
+        getDiscoveryState(db),
       ]);
       const polymarketPolls = await getPolymarketPollHealth(db).catch((err: unknown) => {
         app.log.warn({ err }, "polymarket poll health read failed");
         return [];
       });
-      return { dbReachable: true, heartbeat, chainStateUpdatedAt, polymarketPolls };
+      const prospectDiscovery = discoveryState ? {
+        lastRunAt: discoveryState.lastRunAt?.getTime() ?? null,
+        lastError: discoveryState.lastError,
+        promotedLastRun: discoveryState.promotedLastRun,
+      } : null;
+      return { dbReachable: true, heartbeat, chainStateUpdatedAt, polymarketPolls, prospectDiscovery };
     } catch {
-      return { dbReachable: false, heartbeat: null, chainStateUpdatedAt: {}, polymarketPolls: [] };
+      return { dbReachable: false, heartbeat: null, chainStateUpdatedAt: {}, polymarketPolls: [], prospectDiscovery: null };
     }
   }
 

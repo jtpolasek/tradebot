@@ -26,6 +26,10 @@ import {
   leaderStats,
   paperFills,
   polymarketPollState,
+  setDiscoveryState,
+  upsertProspectEvaluation,
+  prospectDiscoveryState,
+  prospects,
   portfolioSnapshots,
   positions,
   runnerHealth,
@@ -81,6 +85,8 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
+  await db.delete(prospects);
+  await db.delete(prospectDiscoveryState);
   await db.delete(chainState);
   await db.delete(polymarketPollState);
   await db.delete(runnerHealth);
@@ -1082,6 +1088,46 @@ describe("portfolio, analytics, leaders, and adaptations API", () => {
       openValueUsd: 40,
     }));
   });
+
+  it("returns prospect discovery state and prospects", async () => {
+    const ran = new Date("2026-06-20T12:00:00.000Z");
+    await setDiscoveryState(db as Parameters<typeof setDiscoveryState>[0], {
+      lastRunAt: ran,
+      lastError: null,
+      promotedLastRun: 1,
+    });
+    await upsertProspectEvaluation(db as Parameters<typeof upsertProspectEvaluation>[0], {
+      address: "0x8080808080808080808080808080808080808080",
+      source: "leaderboard",
+      userName: "poly-alpha",
+      pnlUsd: 25000,
+      volUsd: 50000,
+      pnlPerVol: 0.5,
+      tradeCount: 40,
+      score: 0.55,
+      verdict: "promoted",
+    });
+
+    const metrics = await authed("GET", "/metrics");
+    expect(metrics.statusCode).toBe(200);
+    expect(json<{ input: { prospectDiscovery: { lastRunAt: number; promotedLastRun: number; lastError: string | null } } }>(metrics).input.prospectDiscovery).toEqual({
+      lastRunAt: ran.getTime(),
+      promotedLastRun: 1,
+      lastError: null,
+    });
+
+    const listed = await authed("GET", "/prospects?limit=10");
+    expect(listed.statusCode).toBe(200);
+    expect(json<{ prospects: Array<{ address: string; userName: string; verdict: string; score: number }> }>(listed).prospects).toContainEqual(
+      expect.objectContaining({
+        address: "0x8080808080808080808080808080808080808080",
+        userName: "poly-alpha",
+        verdict: "promoted",
+        score: 0.55,
+      }),
+    );
+  });
+
 
   it("lists adaptation logs by most recent first and validates limit", async () => {
     await db.insert(adaptationLog).values([

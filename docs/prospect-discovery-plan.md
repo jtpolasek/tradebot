@@ -140,7 +140,7 @@ export interface Nominator { nominate(): Promise<Nomination[]>; }
 string `rank`; `createLeaderboardNominator` unions primary∪ALL by lowercased address, keeps the
 primary window's numbers on overlap, flags `corroborated` only when present on both boards). Exported
 from the ingest index. `leaderboardNominator.test.ts` covers zod string-`rank` coercion, 50-row cap,
-429 retry, MONTH∪ALL union + corroboration flag, and the ALL-window short-circuit (10 tests). Build +
+429 retry, MONTH∪ALL union + corroboration flag, and the ALL-window short-circuit (11 tests). Build +
 tests green (76 ingest / 447 total).
 
 ## Evaluation stage (`packages/ingest/src/polymarket/evaluateProspect.ts`)
@@ -203,6 +203,12 @@ Cycle (skip entirely if `!PROSPECT_DISCOVERY_ENABLED`):
    Link `prospects.promotedWalletId`.
 7. `setDiscoveryState({ lastRunAt: now, promotedLastRun, lastError:null })`. Wrap in try/catch →
    record `lastError`. Use timeouts on all HTTP (consistent with ADR 0003's hang-isolation note).
+**Status:** ✅ Step 6 shipped — `apps/runner/src/prospectDiscoveryJob.ts` now runs the discovery cycle on boot
+and interval when enabled, honors persisted last-run gating, skips existing/recently rejected prospects,
+upserts every evaluation, promotes observe-first leaders with `autoCopy:false`, retracts only eligible
+untouched auto-added observe-only Polygon leaders when a stronger qualifier is waiting, records run-state
+success/error, and wraps HTTP fetches with a timeout. Wired into runner startup/shutdown. Runner build +
+runner tests green (11 tests).
 
 ## Observability
 
@@ -227,8 +233,8 @@ Cycle (skip entirely if `!PROSPECT_DISCOVERY_ENABLED`):
 3. ✅ `prospects` repo + wallet repo extensions + exports.
 4. ✅ Nominator interface + leaderboard nominator + tests.
 5. ✅ Evaluation stage + tests.
-6. The job + runner wiring + tests.
-7. Full `pnpm build && pnpm test`; commit per milestone; append to CHANGELOG.md.
+6. ✅ The job + runner wiring + tests.
+7. ✅ Full `pnpm build && pnpm test`; commit per milestone; append to CHANGELOG.md.
 
 ## Workflow note (CLAUDE.md multi-model)
 
@@ -242,3 +248,6 @@ invariants are money-adjacent — **Opus reviews** the diff (`/code-review`) bef
 - `/trades`+Gamma lifetime realized-ROI reconstruction (evaluation-stage TODO).
 - Separate-cohort scoring of Polymarket leaders (still ADR 0003 §6).
 - Auto-enabling auto-copy (always a human action).
+
+
+

@@ -24,6 +24,7 @@ import { join } from "path";
 import { fileURLToPath } from "url";
 import { startPolymarketCopyJob } from "./polymarketCopyJob.js";
 import { startPolymarketResolutionJob } from "./polymarketResolutionJob.js";
+import { startProspectDiscoveryJob } from "./prospectDiscoveryJob.js";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 
@@ -166,6 +167,7 @@ async function main() {
   const polymarketResolutionJob = startPolymarketResolutionJob(db, engine, {
     intervalMs: config.POLYMARKET_RESOLUTION_INTERVAL_MS,
   });
+  const prospectDiscoveryJob = startProspectDiscoveryJob(db);
 
   const heartbeatJob = startHeartbeatJob(db, [...watchers, polymarketWatcher]);
 
@@ -182,6 +184,7 @@ async function main() {
     heartbeatJob.stop();
     polymarketCopyJob.stop();
     polymarketResolutionJob.stop();
+    prospectDiscoveryJob.stop();
     decoder.stop();
     for (const watcher of watchers) watcher.stop();
     polymarketWatcher.stop();
@@ -309,3 +312,4 @@ function booleanSetting(settings: Record<string, unknown>, keys: string[], fallb
   }
   return fallback;
 }
+

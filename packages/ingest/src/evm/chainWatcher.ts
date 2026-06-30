@@ -97,6 +97,11 @@ export interface ChainWatcherOptions {
   recorder: Recorder;
   /** Override the liveness watchdog's stall timeout (ms). Defaults per chain. */
   stallTimeoutMs?: number;
+  /**
+   * Enable the mempool fast-path (Alchemy `alchemy_pendingTransactions`). Requires a paid Alchemy
+   * tier — a free key has the socket closed on subscribe, which fails the whole connect. Default off.
+   */
+  mempoolEnabled?: boolean;
 }
 
 export class ChainWatcher {
@@ -121,6 +126,7 @@ export class ChainWatcher {
   private walletReloadTimer: ReturnType<typeof setInterval> | null = null;
   private watchdogTimer: ReturnType<typeof setInterval> | null = null;
   private readonly stallTimeoutMs: number;
+  private readonly mempoolEnabled: boolean;
   private lastEventTs = 0;
   private usingFallback = false;
   private primaryDownSince: number | null = null;
@@ -137,6 +143,7 @@ export class ChainWatcher {
     this.bus = opts.bus;
     this.recorder = opts.recorder;
     this.stallTimeoutMs = opts.stallTimeoutMs ?? DEFAULT_STALL_TIMEOUT_MS_BY_CHAIN[opts.chain];
+    this.mempoolEnabled = opts.mempoolEnabled ?? false;
     this.logger = createLogger(`ingest:${opts.chain}`);
   }
 
@@ -326,7 +333,9 @@ export class ChainWatcher {
 
       this.subscribeConfirmedLogs(onError);
       this.subscribeNewHeads(onError);
-      this.subscribeMempoolPending();
+      // Mempool fast-path needs a paid Alchemy tier; on a free key the pending-tx subscribe closes
+      // the socket and fails the whole connect. Gated off by default (CODE_REVIEW / WS debugging).
+      if (this.mempoolEnabled) this.subscribeMempoolPending();
 
       // Subscriptions are live at this point; report the steady state. usingFallback distinguishes
       // the primary endpoint from a QuickNode failover.

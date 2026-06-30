@@ -56,6 +56,10 @@ const schema = z.object({
   // dead "zombie" subscription fires no error). Generous vs block cadence to avoid thrashing.
   WS_STALL_SEC_ETH: z.coerce.number().positive().default(150),
   WS_STALL_SEC_BASE: z.coerce.number().positive().default(90),
+  // Mempool fast-path (provisional fills at the leader's implied price). Subscribes to Alchemy's
+  // `alchemy_pendingTransactions`, which requires a PAID Alchemy tier — on a free key Alchemy closes
+  // the socket, wedging the whole chain watcher. Off by default; only enable with a paid key.
+  MEMPOOL_FAST_PATH_ENABLED: envBoolean.default(false),
   // Polymarket poller freshness threshold. Generous vs the 20s poll so a brief gap between ticks
   // isn't flagged; a genuinely stalled poller still surfaces in /health.
   CHAIN_STALE_SEC_POLYGON: z.coerce.number().positive().default(120),

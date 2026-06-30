@@ -139,6 +139,7 @@ async function main() {
       bus,
       recorder,
       stallTimeoutMs: config.WS_STALL_SEC_ETH * 1000,
+      mempoolEnabled: config.MEMPOOL_FAST_PATH_ENABLED,
     }),
     new ChainWatcher({
       chain: "base",
@@ -148,6 +149,7 @@ async function main() {
       bus,
       recorder,
       stallTimeoutMs: config.WS_STALL_SEC_BASE * 1000,
+      mempoolEnabled: config.MEMPOOL_FAST_PATH_ENABLED,
     }),
   ];
 

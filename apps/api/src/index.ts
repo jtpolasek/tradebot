@@ -1,7 +1,7 @@
 import { createPublicClient, webSocket } from "viem";
 import { mainnet, base as baseChain } from "viem/chains";
 import { BrainWeightProvider } from "@tradebot/brain";
-import { config } from "@tradebot/core";
+import { config, installCrashHandlers } from "@tradebot/core";
 import { getDb } from "@tradebot/store";
 import { createApiApp } from "./app.js";
 import { apiConfig } from "./config.js";
@@ -37,6 +37,8 @@ const app = await createApiApp({
   rpcClients,
   manualWeightProvider: new BrainWeightProvider(),
 });
+
+installCrashHandlers(app.log);
 
 try {
   await app.listen({ port: apiConfig.API_PORT, host: "0.0.0.0" });

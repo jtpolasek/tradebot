@@ -1,4 +1,4 @@
-import { config, createLogger, EventBus, isEvmChain } from "@tradebot/core";
+import { config, createLogger, installCrashHandlers, EventBus, isEvmChain } from "@tradebot/core";
 import {
   getDb,
   closeDb,
@@ -29,6 +29,7 @@ import { startProspectDiscoveryJob } from "./prospectDiscoveryJob.js";
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 
 const logger = createLogger("runner");
+installCrashHandlers(logger);
 const bus = new EventBus();
 
 function parseArgs(): { replayFile: string | null; speed: number } {

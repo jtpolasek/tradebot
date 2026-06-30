@@ -12,6 +12,15 @@ The unbounded caches (grow per distinct token):
 - `llamaCache` — key `` `${chain}:${address}` ``, 30s TTL (`LLAMA_TTL_MS`)
 - `marketCache` — key `` `${chain}:${token}` ``, 5min TTL (`MARKET_TTL_MS`) — this is the plan's "poolCache" (renamed)
 
+**Also bound the two Polymarket caches in `packages/pricing/src/polymarket.ts`** — same TTL-on-read,
+never-evicted leak, and they grow per distinct *market* (Polymarket markets churn continuously, and
+prospect discovery keeps adding Polygon leaders):
+- `quoteCache` — key per market, TTL-checked on read at `polymarket.ts:174`, written but never evicted
+- `marketStatusCache` — key per market, read at `polymarket.ts:343`/`371`, same pattern
+
+Route both through the same `cacheSet` helper. Their `clearCaches()`-equivalent reset
+(`polymarket.ts:389-390`) and size getters (`413`/`418`) must keep working unchanged.
+
 **Leave `chainlinkCache` alone** — it is keyed by `EvmChainId`, so it holds at most 2 entries. Not a leak.
 
 ## Requirement
@@ -43,7 +52,7 @@ Then replace the two `llamaCache.set(...)` / `marketCache.set(...)` call sites w
 
 ## Acceptance
 
-- [ ] `llamaCache` and `marketCache` writes go through the size-bounded helper; `chainlinkCache` untouched.
+- [ ] `llamaCache`, `marketCache`, `quoteCache`, and `marketStatusCache` writes go through the size-bounded helper; `chainlinkCache` untouched.
 - [ ] A new unit test in `packages/pricing/src/price.test.ts` proves the bound: insert > `MAX_CACHE_ENTRIES` distinct keys (temporarily lower the cap or insert via the real price path with mocked fetches) and assert the Map size never exceeds the cap and the oldest key was evicted. Use the existing `clearCaches()` in `beforeEach`.
 - [ ] `pnpm build` (10 pkgs) and `pnpm test` (17 tasks) green.
 - [ ] Updated entry in CLAUDE.md "Status" and `status.md` noting the follow-up is closed.

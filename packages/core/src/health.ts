@@ -77,6 +77,9 @@ export interface HealthInput {
   polymarketPolls?: PolymarketPollHealth[];
   /** Prospect-discovery singleton state; null before first recorded run. */
   prospectDiscovery?: ProspectDiscoveryHealth | null;
+  /** Whether the discovery feature is enabled. When false the prospect-discovery check is not
+   * reported at all — a disabled feature is not a fault, regardless of any stale state row. */
+  prospectDiscoveryEnabled?: boolean;
 }
 
 export interface HealthCheck {
@@ -174,7 +177,7 @@ export function deriveHealth(
     }
   }
 
-  if (input.prospectDiscovery) {
+  if (input.prospectDiscovery && input.prospectDiscoveryEnabled) {
     const discovery = input.prospectDiscovery;
     if (discovery.lastError) {
       checks.push({ name: "prospect-discovery", status: "degraded", detail: discovery.lastError });

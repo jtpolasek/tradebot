@@ -3,6 +3,7 @@ import wsPlugin from "@fastify/websocket";
 import { z } from "zod";
 import { BrainWeightProvider, runScorerJob } from "@tradebot/brain";
 import {
+  config,
   normalizeAddressInput,
   deriveHealth,
   estimateCuBudget,
@@ -407,7 +408,14 @@ export async function createApiApp(options: CreateApiAppOptions) {
         lastError: discoveryState.lastError,
         promotedLastRun: discoveryState.promotedLastRun,
       } : null;
-      return { dbReachable: true, heartbeat, chainStateUpdatedAt, polymarketPolls, prospectDiscovery };
+      return {
+        dbReachable: true,
+        heartbeat,
+        chainStateUpdatedAt,
+        polymarketPolls,
+        prospectDiscovery,
+        prospectDiscoveryEnabled: config.PROSPECT_DISCOVERY_ENABLED,
+      };
     } catch {
       return { dbReachable: false, heartbeat: null, chainStateUpdatedAt: {}, polymarketPolls: [], prospectDiscovery: null };
     }

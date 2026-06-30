@@ -29,6 +29,7 @@ function input(over: Partial<HealthInput> = {}): HealthInput {
     dbReachable: true,
     heartbeat: { ts: NOW - 5_000, payload: payload() },
     chainStateUpdatedAt: { eth: NOW - 10_000, base: NOW - 5_000 },
+    prospectDiscoveryEnabled: true,
     ...over,
   };
 }
@@ -150,6 +151,17 @@ describe("deriveHealth", () => {
       status: "ok",
       detail: expect.stringContaining("promoted 2"),
     }));
+  });
+
+  it("does not report prospect discovery when the feature is disabled", () => {
+    const report = deriveHealth(input({
+      prospectDiscoveryEnabled: false,
+      // A stale state row (e.g. left by a prior run, or never run) must not surface as a fault.
+      prospectDiscovery: { lastRunAt: null, lastError: "old error", promotedLastRun: 0 },
+    }), NOW, thresholds);
+
+    expect(report.checks.find((c) => c.name === "prospect-discovery")).toBeUndefined();
+    expect(report.status).toBe("ok");
   });
 
   it("is degraded when the last prospect discovery run is stale", () => {

@@ -66,21 +66,12 @@ export function startProspectDiscoveryJob(
     fetchImpl,
   });
   let running = false;
-  let clearedOnDisable = false;
 
   const run = () => {
     if (running) return;
-    if (!jobConfig.PROSPECT_DISCOVERY_ENABLED) {
-      // A prior run may have left lastError set; clear it once so health doesn't report the disabled
-      // feature 'degraded' forever (CODE_REVIEW PD.5). One write, guarded against the interval loop.
-      if (!clearedOnDisable) {
-        clearedOnDisable = true;
-        void setDiscoveryState(db, { lastError: null }).catch((err: unknown) => {
-          logger.error({ err }, "failed to clear discovery error on disable");
-        });
-      }
-      return;
-    }
+    // When disabled the job records nothing — health gates the prospect-discovery check on the
+    // enabled flag (CODE_REVIEW PD.5), so a stale state row can't pin the status page 'degraded'.
+    if (!jobConfig.PROSPECT_DISCOVERY_ENABLED) return;
     running = true;
     void runDiscoveryCycle(db, { config: jobConfig, nominator, fetchImpl, now })
       .catch((err: unknown) => {

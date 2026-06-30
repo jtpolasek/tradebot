@@ -29,6 +29,54 @@ const TradesResponseSchema = z.array(PolymarketTradeSchema);
 
 const RATE_LIMIT_RETRIES = 4;
 
+export interface FetchPolymarketJsonOptions<T> {
+  /** Injectable for tests; defaults to global fetch. */
+  fetchImpl?: typeof fetch | undefined;
+  retries?: number | undefined;
+  /**
+   * Invoked on a non-2xx, non-429 response before throwing. Return a value to short-circuit with it
+   * (e.g. treat a known 400 as an empty page); return undefined to fall through to the thrown error.
+   */
+  onError?: ((status: number, bodyText: string) => T | undefined) | undefined;
+}
+
+/**
+ * Single rate-limit-aware fetch+validate for the Polymarket Data API. Retries 429s with exponential
+ * backoff and parses the body through `schema`. `fetchTrades` and `fetchLeaderboard` both delegate here
+ * so the 429 policy lives in exactly one place (the two previously diverged — see CODE_REVIEW PD.8).
+ */
+export async function fetchPolymarketJson<T>(
+  baseUrl: string,
+  path: string,
+  // Input left unconstrained so schemas with `.default()` (output ≠ input shape) still bind T to the
+  // parsed output type cleanly.
+  schema: z.ZodType<T, z.ZodTypeDef, unknown>,
+  opts: FetchPolymarketJsonOptions<T> = {}
+): Promise<T> {
+  const doFetch = opts.fetchImpl ?? fetch;
+  const retries = opts.retries ?? RATE_LIMIT_RETRIES;
+  const url = `${baseUrl.replace(/\/$/, "")}${path}`;
+
+  for (let attempt = 0; ; attempt++) {
+    const res = await doFetch(url);
+    if (res.status === 429 && attempt < retries) {
+      await sleep(backoffMs(attempt, 1_000, 15_000));
+      continue;
+    }
+    if (!res.ok) {
+      if (opts.onError) {
+        // Guard against a body reader that throws synchronously (e.g. a partial mock with no text()).
+        const body = await Promise.resolve().then(() => res.text()).catch(() => "");
+        const fallback = opts.onError(res.status, body);
+        if (fallback !== undefined) return fallback;
+      }
+      throw new Error(`Polymarket Data API ${res.status} for ${path}`);
+    }
+    const json: unknown = await res.json();
+    return schema.parse(json);
+  }
+}
+
 export interface FetchTradesOptions {
   limit?: number;
   offset?: number;
@@ -48,27 +96,15 @@ export async function fetchTrades(
 ): Promise<PolymarketTrade[]> {
   const limit = opts.limit ?? 100;
   const offset = opts.offset ?? 0;
-  const doFetch = opts.fetchImpl ?? fetch;
-  const url = `${baseUrl.replace(/\/$/, "")}/trades?user=${encodeURIComponent(user)}&limit=${limit}&offset=${offset}`;
+  const path = `/trades?user=${encodeURIComponent(user)}&limit=${limit}&offset=${offset}`;
 
-  for (let attempt = 0; ; attempt++) {
-    const res = await doFetch(url);
-    if (res.status === 429 && attempt < RATE_LIMIT_RETRIES) {
-      await sleep(backoffMs(attempt, 1_000, 15_000));
-      continue;
-    }
-    if (!res.ok) {
-      // The Data API caps pagination at a fixed history depth and rejects deeper offsets with a 400
-      // ("max historical activity offset of 3000 exceeded"). That is a hard ceiling, not a transient
-      // failure: treat it as "no more history" (empty page) so a very active wallet whose new trades
-      // since the last cursor exceed that depth can't wedge the poller in a permanent failure loop.
-      if (res.status === 400) {
-        const body = await res.text().catch(() => "");
-        if (body.includes("max historical activity offset")) return [];
-      }
-      throw new Error(`Polymarket Data API ${res.status} for user ${user}`);
-    }
-    const json: unknown = await res.json();
-    return TradesResponseSchema.parse(json);
-  }
+  return fetchPolymarketJson(baseUrl, path, TradesResponseSchema, {
+    fetchImpl: opts.fetchImpl,
+    // The Data API caps pagination at a fixed history depth and rejects deeper offsets with a 400
+    // ("max historical activity offset of 3000 exceeded"). That is a hard ceiling, not a transient
+    // failure: treat it as "no more history" (empty page) so a very active wallet whose new trades
+    // since the last cursor exceed that depth can't wedge the poller in a permanent failure loop.
+    onError: (status, body) =>
+      status === 400 && body.includes("max historical activity offset") ? [] : undefined,
+  });
 }

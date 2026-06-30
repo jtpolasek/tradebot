@@ -43,7 +43,8 @@ function numberCell(n: number | null): string {
 
 function lastTrade(ts: number | null): string {
   if (ts === null) return "-";
-  return timeAgo(ts * 1000);
+  // lastTradeTs is already epoch-ms (evaluateProspect stores trade.timestamp * 1000).
+  return timeAgo(ts);
 }
 
 export default function ProspectsPage() {

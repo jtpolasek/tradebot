@@ -3,9 +3,8 @@ import type { Nominator, Nomination, ProspectEvaluationSnapshot } from "@tradebo
 
 const storeMocks = vi.hoisted(() => ({
   countActivePolygonLeaders: vi.fn(async () => 0),
-  getAllWallets: vi.fn(async () => []),
+  getDiscoveryExcludedAddresses: vi.fn(async (): Promise<string[]> => []),
   getDiscoveryState: vi.fn(async () => null),
-  getProspect: vi.fn(async () => null),
   getRecentlyRejected: vi.fn(async () => []),
   getRetractableAutoLeaders: vi.fn(async () => []),
   insertWallet: vi.fn(async (_db: unknown, wallet: { address: string }) => ({
@@ -39,9 +38,8 @@ vi.mock("@tradebot/ingest", async (importOriginal) => {
 
 import {
   countActivePolygonLeaders,
-  getAllWallets,
+  getDiscoveryExcludedAddresses,
   getDiscoveryState,
-  getProspect,
   getRecentlyRejected,
   getRetractableAutoLeaders,
   insertWallet,
@@ -204,9 +202,7 @@ describe("startProspectDiscoveryJob", () => {
     }));
   });
   it("drops existing leaders and recently rejected prospects before evaluation", async () => {
-    (storeMocks.getAllWallets as any).mockResolvedValueOnce([
-      { id: "existing", chain: "polygon", address: nominations[0]!.address, label: "existing", active: true, autoCopy: true, addedAt: new Date(0) },
-    ]);
+    (storeMocks.getDiscoveryExcludedAddresses as any).mockResolvedValueOnce([nominations[0]!.address]);
     (storeMocks.getRecentlyRejected as any).mockResolvedValueOnce([nominations[1]!.address]);
 
     const job = startProspectDiscoveryJob({} as never, {
@@ -227,31 +223,27 @@ describe("startProspectDiscoveryJob", () => {
     }));
   });
 
-  it("retracts only eligible weak auto leaders to free promotion slots", async () => {
+  it("retracts the weakest auto leader by re-scoring against the current leaderboard", async () => {
+    const weakAddr = "0x1000000000000000000000000000000000000000";
+    const strongAddr = "0x2000000000000000000000000000000000000000";
     (storeMocks.countActivePolygonLeaders as any).mockResolvedValueOnce(25);
+    // Active auto leaders are excluded from candidates but present in the leaderboard, so the sweep
+    // re-evaluates them on current data (PD.1) instead of a frozen getProspect score.
+    (storeMocks.getDiscoveryExcludedAddresses as any).mockResolvedValueOnce([weakAddr, strongAddr]);
     (storeMocks.getRetractableAutoLeaders as any).mockResolvedValueOnce([
-      { id: "weak", chain: "polygon", address: "0x1000000000000000000000000000000000000000", label: "weak", active: true, autoCopy: false, addedAt: new Date(0) },
-      { id: "strong", chain: "polygon", address: "0x2000000000000000000000000000000000000000", label: "strong", active: true, autoCopy: false, addedAt: new Date(0) },
+      { id: "weak", chain: "polygon", address: weakAddr, label: "weak", active: true, autoCopy: false, addedAt: new Date(0) },
+      { id: "strong", chain: "polygon", address: strongAddr, label: "strong", active: true, autoCopy: false, addedAt: new Date(0) },
     ]);
-    (storeMocks.getProspect as any).mockImplementation(async (_db: unknown, address: string) => ({
-      address,
-      source: "leaderboard",
-      pnlUsd: null,
-      volUsd: null,
-      pnlPerVol: null,
-      tradeCount: null,
-      lastTradeTs: null,
-      score: address.startsWith("0x1") ? 0.01 : 0.9,
-      verdict: "promoted",
-      rejectReason: null,
-      promotedWalletId: null,
-      firstSeenAt: new Date(0),
-      lastEvaluatedAt: new Date(0),
-    }));
 
     const job = startProspectDiscoveryJob({} as never, {
       config: testConfig,
-      nominator: nominator(nominations.slice(0, 1)),
+      // qualifier (0x..0001, score 0.5) plus the two retractable leaders, now collapsed (weak) and
+      // still strong on the live board.
+      nominator: nominator([
+        nominations[0]!,
+        nomination(weakAddr, 1_000),
+        nomination(strongAddr, 90_000),
+      ]),
       now: () => NOW_MS,
     });
     await flush();
@@ -259,6 +251,11 @@ describe("startProspectDiscoveryJob", () => {
 
     expect(storeMocks.setWalletActive).toHaveBeenCalledTimes(1);
     expect(storeMocks.setWalletActive).toHaveBeenCalledWith(expect.anything(), "weak", false);
+    // Re-scored leaders keep their promotion link on the refreshed snapshot.
+    expect(storeMocks.upsertProspectEvaluation).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ address: weakAddr, promotedWalletId: "weak" }),
+    );
     expect(storeMocks.insertWallet).toHaveBeenCalledTimes(1);
   });
 

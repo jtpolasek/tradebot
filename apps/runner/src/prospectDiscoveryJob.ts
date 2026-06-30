@@ -1,9 +1,8 @@
 import { config, createLogger, type Config } from "@tradebot/core";
 import {
   countActivePolygonLeaders,
-  getAllWallets,
+  getDiscoveryExcludedAddresses,
   getDiscoveryState,
-  getProspect,
   getRecentlyRejected,
   getRetractableAutoLeaders,
   insertWallet,
@@ -14,6 +13,8 @@ import {
 import {
   createLeaderboardNominator,
   evaluateProspect,
+  type EvaluateProspectOptions,
+  type Nomination,
   type Nominator,
   type ProspectEvaluationSnapshot,
 } from "@tradebot/ingest";
@@ -65,10 +66,21 @@ export function startProspectDiscoveryJob(
     fetchImpl,
   });
   let running = false;
+  let clearedOnDisable = false;
 
   const run = () => {
     if (running) return;
-    if (!jobConfig.PROSPECT_DISCOVERY_ENABLED) return;
+    if (!jobConfig.PROSPECT_DISCOVERY_ENABLED) {
+      // A prior run may have left lastError set; clear it once so health doesn't report the disabled
+      // feature 'degraded' forever (CODE_REVIEW PD.5). One write, guarded against the interval loop.
+      if (!clearedOnDisable) {
+        clearedOnDisable = true;
+        void setDiscoveryState(db, { lastError: null }).catch((err: unknown) => {
+          logger.error({ err }, "failed to clear discovery error on disable");
+        });
+      }
+      return;
+    }
     running = true;
     void runDiscoveryCycle(db, { config: jobConfig, nominator, fetchImpl, now })
       .catch((err: unknown) => {
@@ -100,10 +112,12 @@ async function runDiscoveryCycle(db: RunnerDb, opts: RunDiscoveryCycleOptions): 
 
   try {
     const nominations = await opts.nominator.nominate();
-    const wallets = await getAllWallets(db);
-    const existingPolygonAddresses = new Set(
-      wallets.filter((wallet) => wallet.chain === "polygon").map((wallet) => wallet.address.toLowerCase()),
+    const nominationsByAddress = new Map<string, Nomination>(
+      nominations.map((nomination) => [nomination.address.toLowerCase(), nomination]),
     );
+    // Excludes active leaders and human-touched wallets only — auto-retracted (inactive) wallets
+    // remain eligible for re-discovery (CODE_REVIEW PD.2).
+    const existingPolygonAddresses = new Set(await getDiscoveryExcludedAddresses(db));
     const cooldownSince = new Date(startedAtMs - opts.config.PROSPECT_REJECT_COOLDOWN_DAYS * DAY_MS);
     const recentlyRejected = new Set((await getRecentlyRejected(db, cooldownSince)).map((addr) => addr.toLowerCase()));
     const candidates = nominations.filter(
@@ -112,17 +126,19 @@ async function runDiscoveryCycle(db: RunnerDb, opts: RunDiscoveryCycleOptions): 
         !recentlyRejected.has(nomination.address.toLowerCase()),
     );
 
+    const evalOpts: EvaluateProspectOptions = {
+      baseUrl: opts.config.POLYMARKET_DATA_API_URL,
+      fetchImpl: opts.fetchImpl,
+      minPnlUsd: opts.config.PROSPECT_MIN_PNL_USD,
+      minPnlPerVol: opts.config.PROSPECT_MIN_PNL_PER_VOL,
+      minTrades: opts.config.PROSPECT_MIN_TRADES,
+      recencyDays: opts.config.PROSPECT_RECENCY_DAYS,
+      nowMs: startedAtMs,
+    };
+
     const evaluations: ProspectEvaluationSnapshot[] = [];
     for (const nomination of candidates) {
-      const evaluation = await evaluateProspect(nomination, {
-        baseUrl: opts.config.POLYMARKET_DATA_API_URL,
-        fetchImpl: opts.fetchImpl,
-        minPnlUsd: opts.config.PROSPECT_MIN_PNL_USD,
-        minPnlPerVol: opts.config.PROSPECT_MIN_PNL_PER_VOL,
-        minTrades: opts.config.PROSPECT_MIN_TRADES,
-        recencyDays: opts.config.PROSPECT_RECENCY_DAYS,
-        nowMs: startedAtMs,
-      });
+      const evaluation = await evaluateProspect(nomination, evalOpts);
       evaluations.push(evaluation);
       await upsertProspectEvaluation(db, evaluation);
     }
@@ -136,7 +152,10 @@ async function runDiscoveryCycle(db: RunnerDb, opts: RunDiscoveryCycleOptions): 
     let retracted = 0;
 
     if (capacity < promotionTarget) {
-      retracted = await retractWeakAutoLeaders(db, qualifiers, capacity, promotionTarget, opts.config);
+      retracted = await retractWeakAutoLeaders(db, qualifiers, capacity, promotionTarget, opts.config, {
+        nominationsByAddress,
+        evalOpts,
+      });
       activePolygonLeaders -= retracted;
       capacity = Math.max(0, opts.config.PROSPECT_MAX_LEADERS - activePolygonLeaders);
     }
@@ -173,21 +192,37 @@ async function runDiscoveryCycle(db: RunnerDb, opts: RunDiscoveryCycleOptions): 
   }
 }
 
+interface RetractContext {
+  nominationsByAddress: Map<string, Nomination>;
+  evalOpts: EvaluateProspectOptions;
+}
+
 async function retractWeakAutoLeaders(
   db: RunnerDb,
   qualifiers: ProspectEvaluationSnapshot[],
   initialCapacity: number,
   promotionTarget: number,
   jobConfig: DiscoveryConfig,
+  ctx: RetractContext,
 ): Promise<number> {
   const retractable = await getRetractableAutoLeaders(db);
+  // Re-evaluate each active auto leader against the *current* leaderboard rather than ranking on the
+  // score frozen at promotion time (CODE_REVIEW PD.1). A leader still on the board is re-scored on
+  // live data; one that has fallen off entirely has no current nomination → null score → ranked
+  // weakest, so a decayed leader is the first to be un-watched. The refreshed snapshot keeps its
+  // promotion link (promotedWalletId) so the audit row isn't orphaned.
   const withScores = await Promise.all(
     retractable.map(async (wallet) => {
-      const prospect = await getProspect(db, wallet.address.toLowerCase());
-      return { wallet, score: prospect?.score ?? null };
+      const nomination = ctx.nominationsByAddress.get(wallet.address.toLowerCase());
+      if (!nomination) return { wallet, score: null as number | null };
+      const evaluation = await evaluateProspect(nomination, ctx.evalOpts);
+      await upsertProspectEvaluation(db, { ...evaluation, promotedWalletId: wallet.id });
+      return { wallet, score: evaluation.score };
     }),
   );
-  withScores.sort((a, b) => (a.score ?? Number.NEGATIVE_INFINITY) - (b.score ?? Number.NEGATIVE_INFINITY));
+  // Total-order ascending (weakest first); null ranks below any real score. Avoids the NaN that
+  // subtracting two -Infinity sentinels produced (CODE_REVIEW PD.7).
+  withScores.sort((a, b) => compareScores(a.score, b.score));
 
   let capacity = initialCapacity;
   let retracted = 0;
@@ -202,6 +237,15 @@ async function retractWeakAutoLeaders(
     capacity++;
   }
   return retracted;
+}
+
+/** Total-order ascending comparator treating null as lower than any real score. */
+function compareScores(a: number | null, b: number | null): number {
+  const av = a ?? Number.NEGATIVE_INFINITY;
+  const bv = b ?? Number.NEGATIVE_INFINITY;
+  if (av < bv) return -1;
+  if (av > bv) return 1;
+  return 0;
 }
 
 function withTimeout(fetchImpl: typeof fetch, timeoutMs: number): typeof fetch {

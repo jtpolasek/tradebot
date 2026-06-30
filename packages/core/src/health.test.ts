@@ -7,6 +7,7 @@ const thresholds: HealthThresholds = {
   heartbeatStaleSec: 30,
   chainStaleSecByChain: { eth: 60, base: 30, polygon: 120 },
   rssSoftLimitBytes: 1536 * 1024 * 1024,
+  prospectStaleSec: 172_800,
 };
 
 function payload(over: Partial<RunnerHealthPayload> = {}): RunnerHealthPayload {
@@ -148,6 +149,18 @@ describe("deriveHealth", () => {
     expect(report.checks.find((c) => c.name === "prospect-discovery")).toEqual(expect.objectContaining({
       status: "ok",
       detail: expect.stringContaining("promoted 2"),
+    }));
+  });
+
+  it("is degraded when the last prospect discovery run is stale", () => {
+    const report = deriveHealth(input({
+      prospectDiscovery: { lastRunAt: NOW - 200_000_000, lastError: null, promotedLastRun: 1 },
+    }), NOW, thresholds);
+
+    expect(report.status).toBe("degraded");
+    expect(report.checks.find((c) => c.name === "prospect-discovery")).toEqual(expect.objectContaining({
+      status: "degraded",
+      detail: expect.stringContaining("limit 172800s"),
     }));
   });
 

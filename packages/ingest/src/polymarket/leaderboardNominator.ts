@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { backoffMs, sleep } from "../backoff.js";
+import { fetchPolymarketJson } from "./client.js";
 import type { Nomination, Nominator } from "./nominator.js";
 
 /**
@@ -21,8 +21,6 @@ export type LeaderboardRow = z.infer<typeof LeaderboardRowSchema>;
 
 const LeaderboardResponseSchema = z.array(LeaderboardRowSchema);
 
-const RATE_LIMIT_RETRIES = 4;
-
 export type LeaderboardWindow = "DAY" | "WEEK" | "MONTH" | "ALL";
 
 export interface FetchLeaderboardOptions {
@@ -33,8 +31,8 @@ export interface FetchLeaderboardOptions {
 }
 
 /**
- * Fetch a leaderboard page. Mirrors `fetchTrades`'s 429 backoff. The `limit` is passed through but the
- * API caps the board at 50 rows regardless.
+ * Fetch a leaderboard page. Shares the Data API's 429 backoff/parse policy with `fetchTrades` via
+ * `fetchPolymarketJson`. The `limit` is passed through but the API caps the board at 50 rows regardless.
  */
 export async function fetchLeaderboard(
   baseUrl: string,
@@ -42,21 +40,8 @@ export async function fetchLeaderboard(
 ): Promise<LeaderboardRow[]> {
   const orderBy = opts.orderBy ?? "PNL";
   const limit = opts.limit ?? 50;
-  const doFetch = opts.fetchImpl ?? fetch;
-  const url = `${baseUrl.replace(/\/$/, "")}/v1/leaderboard?timePeriod=${opts.timePeriod}&orderBy=${orderBy}&limit=${limit}`;
-
-  for (let attempt = 0; ; attempt++) {
-    const res = await doFetch(url);
-    if (res.status === 429 && attempt < RATE_LIMIT_RETRIES) {
-      await sleep(backoffMs(attempt, 1_000, 15_000));
-      continue;
-    }
-    if (!res.ok) {
-      throw new Error(`Polymarket Data API ${res.status} for leaderboard ${opts.timePeriod}/${orderBy}`);
-    }
-    const json: unknown = await res.json();
-    return LeaderboardResponseSchema.parse(json);
-  }
+  const path = `/v1/leaderboard?timePeriod=${opts.timePeriod}&orderBy=${orderBy}&limit=${limit}`;
+  return fetchPolymarketJson(baseUrl, path, LeaderboardResponseSchema, { fetchImpl: opts.fetchImpl });
 }
 
 export interface LeaderboardNominatorOptions {

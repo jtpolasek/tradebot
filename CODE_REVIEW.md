@@ -131,3 +131,39 @@ Multi-angle review of `fix/code-review-2026-06-11` (main...HEAD, 20 commits). Ev
 - `rawToHumanNumber`/`toRawAmount` (`engine.ts:999/1030`) re-implement `money.ts` `fromBaseUnits`/`toBaseUnits`; `classifyLiquidityTier` and the stablecoin address tables are each maintained in two packages (move shared copies to `@tradebot/core`).
 - `this.cashUsd` mirrors `portfolio.cashUsd` across six sync sites — replace with a getter.
 - Efficiency: `takeSnapshot` fetches 288 rows per fill; scorer does sequential N+1 token lookups per window; the SSE route polls upstream per-client every 2s while the API's old WebSocket poller runs for zero clients (pick one stream mechanism); `subscribeNewHeads` writes `upsertLastBlock` on every ~2s head.
+
+---
+
+# Code Review — Prospect Discovery feature (2026-06-28)
+
+Review of the 8-commit prospect-discovery branch (`e9c8b43`..`9623b5a`, ~3700 lines) vs PLAN/ADR 0005. Verified against source, not just finder output. Ordered by severity.
+
+## Status legend
+- [ ] not started · [~] in progress · [x] fixed
+
+## PD-P0 — Feature does not work as specified
+
+- [x] **PD.1 Decay-based retraction never fires.** `apps/runner/src/prospectDiscoveryJob.ts:109`: promoted leaders are in `existingPolygonAddresses` (built from `getAllWallets`, line 103-106) and filtered out of `candidates`, so `evaluateProspect`/`upsertProspectEvaluation` never re-runs for an active leader. `retractWeakAutoLeaders` (line 186) ranks by `getProspect(...).score`, which is the stale leaderboard snapshot frozen at promotion time. A leader whose real performance collapses keeps its high frozen score forever and is never retracted on decay — the centerpiece trigger of the retraction sweep (ADR 0005 §8) is structurally inert. Tests miss it because they stub `getProspect` with hand-set scores. Fix: re-evaluate active auto leaders each cycle (or refresh their score) so the sweep ranks on current data.
+
+- [x] **PD.2 Retracted/deleted leaders are permanently excluded from re-discovery.** `prospectDiscoveryJob.ts:105`: `existingPolygonAddresses` includes wallets regardless of `active`. After the sweep un-watches an auto leader (`setWalletActive(false)`, line 200) or a human deletes one (`app.ts:177`), that address stays in the wallets table and in the filter set, so a recovered top performer can never be re-promoted. (Even if the filter were relaxed, `insertWallet` does a plain insert with no `onConflict`, so the `unique(chain,address)` index — `schema.ts:36` — would throw.) Retraction is a one-way permanent burn, not the bounded churn ADR 0005 §8 describes. Fix: scope the existing-address set to active wallets and make `insertWallet` upsert (or reactivate) on conflict.
+
+## PD-P1 — Display & observability
+
+- [x] **PD.3 'Last trade' column renders garbage.** `apps/web/src/app/prospects/page.tsx:46`: `lastTradeTs` is already epoch-ms (`evaluateProspect.newestTradeTsMs` returns `trade.timestamp * 1000`, stored verbatim and returned by GET /prospects), but `lastTrade()` calls `timeAgo(ts * 1000)`. `timeAgo` (`api.ts:128`) treats a number as epoch-ms, so it sees a value ~1000× too large, computes a large negative diff, and falls through to `new Date(ms).toLocaleDateString()` — every row shows a nonsensical far-future date instead of e.g. '3d ago'. Fix: `timeAgo(ts)` (drop the `* 1000`).
+
+- [x] **PD.4 Stalled discovery job reports 'ok' forever.** `packages/core/src/health.ts:175`: the prospect-discovery check only branches on `lastError` and `lastRunAt === null`; when `lastError` is null and `lastRunAt` is any non-null value it always pushes status 'ok' regardless of age — unlike the runner/chain/polymarket checks, which all gate on `ageSec`. If the 24h job wedges (e.g. the `running` flag never resets because a fetch hangs past the AbortController) `lastRunAt` stays at its last-good value and the PLAN §10 soak monitor shows green for a silently dead job. Fix: degrade when `now - lastRunAt` exceeds a staleness threshold (~2× the interval).
+
+- [x] **PD.5 lastError pins health 'degraded' after discovery is disabled.** `prospectDiscoveryJob.ts:71` + `app.ts:391`: a failed cycle writes `lastError` (line 171). If the operator then sets `PROSPECT_DISCOVERY_ENABLED=false`, `run()` short-circuits at line 71 and never clears `lastError`, but `gatherHealthInput` reads the singleton row unconditionally, so /metrics and the Status page report prospect-discovery 'degraded' permanently — recoverable only by a manual DB edit. Fix: treat the disabled state as not-reported, or clear `lastError` on disable.
+
+- [x] **PD.6 Discovery-state read can falsely report the whole runner 'down' (503).** `app.ts:391`: `getDiscoveryState` was added to the bare `Promise.all`, unlike the equally-optional `getPolymarketPollHealth` which has its own `.catch`. If that single read throws (transient lock, or the table queried before migration 0013 is applied) the outer catch returns `dbReachable:false` → deriveHealth 'down' → GET /health returns 503 on an otherwise-healthy runner. Fix: isolate `getDiscoveryState` with its own `.catch(() => null)` like the polymarket read.
+
+## PD-P2 — Latent / cleanup
+
+- [x] **PD.7 NaN sort comparator on null scores.** `prospectDiscoveryJob.ts:190`: when two retractable leaders both lack a prospects row, `(a.score ?? -Infinity) - (b.score ?? -Infinity)` computes `-Infinity - -Infinity = NaN`; an Array.sort comparator returning NaN gives engine-dependent ordering, so which weak leader is un-watched becomes nondeterministic. Fix: rank null as a sentinel low value via a total-order comparator, not subtraction.
+
+- [x] **PD.8 `fetchLeaderboard` duplicates `fetchTrades`'s rate-limit policy.** `packages/ingest/src/polymarket/leaderboardNominator.ts:~48`: the 429-retry/backoff loop (`RATE_LIMIT_RETRIES`, `backoffMs`, `res.status === 429`, `baseUrl.replace(/\/$/, "")`) is a near-verbatim copy of `fetchTrades` in `client.ts` and has already diverged (client.ts's 400-handling is absent). Extract a shared `fetchPolymarketJson(baseUrl, path, schema, opts)` and have both call it.
+
+## PD — Candidates dropped after verification (not bugs)
+- "no-op PATCH marks humanTouched": `PatchWalletBody.refine` (`app.ts:71`) rejects empty bodies, and toggling is by-design a human action.
+- "capacity deadlock when humans fill the cap": promoting nobody is correct sacrosanct behavior.
+- TSDoc-missing on exports: repo is not uniformly strict; not a clear rule violation.

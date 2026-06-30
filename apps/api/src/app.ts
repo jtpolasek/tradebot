@@ -388,14 +388,19 @@ export async function createApiApp(options: CreateApiAppOptions) {
 
   async function gatherHealthInput(): Promise<HealthInput> {
     try {
-      const [heartbeat, chainStateUpdatedAt, discoveryState] = await Promise.all([
+      const [heartbeat, chainStateUpdatedAt] = await Promise.all([
         getRunnerHealth(db),
         getChainStatesUpdatedAt(db),
-        getDiscoveryState(db),
       ]);
       const polymarketPolls = await getPolymarketPollHealth(db).catch((err: unknown) => {
         app.log.warn({ err }, "polymarket poll health read failed");
         return [];
+      });
+      // Optional read: isolate it like polymarketPolls so a transient failure (lock, pre-migration
+      // table) can't flip the whole runner to dbReachable:false → 'down'/503 (CODE_REVIEW PD.6).
+      const discoveryState = await getDiscoveryState(db).catch((err: unknown) => {
+        app.log.warn({ err }, "discovery state read failed");
+        return null;
       });
       const prospectDiscovery = discoveryState ? {
         lastRunAt: discoveryState.lastRunAt?.getTime() ?? null,

@@ -14,6 +14,7 @@ const healthThresholds = {
     polygon: config.CHAIN_STALE_SEC_POLYGON,
   },
   rssSoftLimitBytes: config.RSS_SOFT_LIMIT_MB * 1024 * 1024,
+  prospectStaleSec: (config.PROSPECT_DISCOVERY_INTERVAL_MS * 2) / 1000,
 };
 
 const rpcClients = {

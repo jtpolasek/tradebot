@@ -55,6 +55,8 @@ export interface HealthThresholds {
   heartbeatStaleSec: number;
   chainStaleSecByChain: Record<ChainId, number>;
   rssSoftLimitBytes: number;
+  /** Age (seconds) past which a recorded prospect-discovery run is considered stale (~2× interval). */
+  prospectStaleSec: number;
 }
 
 /** Everything the api gathers from Postgres before rolling up a report. */
@@ -180,11 +182,19 @@ export function deriveHealth(
       checks.push({ name: "prospect-discovery", status: "degraded", detail: "no successful run recorded" });
     } else {
       const ageSec = (now - discovery.lastRunAt) / 1000;
-      checks.push({
-        name: "prospect-discovery",
-        status: "ok",
-        detail: `last run ${ageSec.toFixed(0)}s ago; promoted ${discovery.promotedLastRun}`,
-      });
+      if (ageSec > thresholds.prospectStaleSec) {
+        checks.push({
+          name: "prospect-discovery",
+          status: "degraded",
+          detail: `last run ${ageSec.toFixed(0)}s ago (limit ${thresholds.prospectStaleSec}s)`,
+        });
+      } else {
+        checks.push({
+          name: "prospect-discovery",
+          status: "ok",
+          detail: `last run ${ageSec.toFixed(0)}s ago; promoted ${discovery.promotedLastRun}`,
+        });
+      }
     }
   }
 

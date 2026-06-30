@@ -1,4 +1,4 @@
-import { eq, and, sql } from "drizzle-orm";
+import { eq, and, or, sql } from "drizzle-orm";
 import type { Db } from "../db.js";
 import { wallets } from "../schema.js";
 import type { TrackedWallet, ChainId } from "@tradebot/core";
@@ -10,16 +10,22 @@ export async function insertWallet(
   // (the default), which keeps it out of the retraction sweep regardless of humanTouched.
   wallet: Omit<TrackedWallet, "id" | "addedAt" | "autoCopy"> & { autoCopy?: boolean; autoAdded?: boolean }
 ): Promise<TrackedWallet> {
+  const values = {
+    chain: wallet.chain,
+    address: normalizeAddress(wallet.address),
+    label: wallet.label,
+    active: wallet.active,
+    autoCopy: wallet.autoCopy ?? true,
+    autoAdded: wallet.autoAdded ?? false,
+  };
+  // Upsert on (chain, address): re-promoting an auto-retracted (inactive) wallet reactivates it
+  // instead of throwing the unique violation (CODE_REVIEW PD.2). `humanTouched` is intentionally not
+  // in the update set — a human-touched wallet stays sacrosanct and is excluded from re-discovery
+  // upstream, so this path only reactivates finder-managed rows in practice.
   const rows = await db
     .insert(wallets)
-    .values({
-      chain: wallet.chain,
-      address: normalizeAddress(wallet.address),
-      label: wallet.label,
-      active: wallet.active,
-      autoCopy: wallet.autoCopy ?? true,
-      autoAdded: wallet.autoAdded ?? false,
-    })
+    .values(values)
+    .onConflictDoUpdate({ target: [wallets.chain, wallets.address], set: values })
     .returning();
   const row = rows[0];
   if (!row) throw new Error("Insert failed");
@@ -79,6 +85,25 @@ export async function getRetractableAutoLeaders(db: Db): Promise<TrackedWallet[]
       ),
     );
   return rows.map(rowToWallet);
+}
+
+/**
+ * Polygon addresses ineligible for (re-)discovery: every active leader, plus any human-touched wallet
+ * (human deletes/edits are sacrosanct — ADR 0005 §8). Auto-retracted wallets (inactive, never
+ * human-touched) are deliberately *not* returned, so a recovered top performer can be re-promoted
+ * (CODE_REVIEW PD.2). Addresses are lowercased for direct membership tests against nominations.
+ */
+export async function getDiscoveryExcludedAddresses(db: Db): Promise<string[]> {
+  const rows = await db
+    .select({ address: wallets.address })
+    .from(wallets)
+    .where(
+      and(
+        eq(wallets.chain, "polygon"),
+        or(eq(wallets.active, true), eq(wallets.humanTouched, true)),
+      ),
+    );
+  return rows.map((r) => r.address.toLowerCase());
 }
 
 /** Count of active Polygon leaders — the discovery cap (`PROSPECT_MAX_LEADERS`) is measured against this. */

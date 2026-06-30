@@ -7,7 +7,7 @@ import { randomUUID } from "crypto";
 import { resolve, dirname } from "path";
 import { fileURLToPath } from "url";
 import * as schema from "../schema.js";
-import { insertWallet, getActiveWallets, getAllWallets, setWalletActive, setWalletAutoCopy } from "./wallets.js";
+import { insertWallet, getActiveWallets, getAllWallets, setWalletActive, setWalletAutoCopy, markWalletHumanTouched, getDiscoveryExcludedAddresses } from "./wallets.js";
 import { getLastBlock, upsertLastBlock } from "./chainState.js";
 import { closeDb, getDb } from "../db.js";
 import {
@@ -137,6 +137,40 @@ describe("wallets repository", () => {
     expect(reloaded?.autoCopy).toBe(false);
     // Auto-copy off must not affect watching: the wallet is still active/scored.
     expect(reloaded?.active).toBe(true);
+  });
+
+  it("re-inserting an auto-retracted wallet reactivates it instead of throwing (PD.2)", async () => {
+    const address = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+    const first = await insertWallet(db as Parameters<typeof insertWallet>[0], {
+      chain: "polygon", address, label: "auto leader", active: true, autoCopy: false, autoAdded: true,
+    });
+    await setWalletActive(db as Parameters<typeof setWalletActive>[0], first.id, false);
+
+    const reinserted = await insertWallet(db as Parameters<typeof insertWallet>[0], {
+      chain: "polygon", address, label: "auto leader", active: true, autoCopy: false, autoAdded: true,
+    });
+    expect(reinserted.id).toBe(first.id);
+    expect(reinserted.active).toBe(true);
+  });
+
+  it("getDiscoveryExcludedAddresses excludes active and human-touched, but not auto-retracted (PD.2)", async () => {
+    const active = await insertWallet(db as Parameters<typeof insertWallet>[0], {
+      chain: "polygon", address: "0x1111111111111111111111111111111111111110", label: "active", active: true, autoAdded: true,
+    });
+    const retracted = await insertWallet(db as Parameters<typeof insertWallet>[0], {
+      chain: "polygon", address: "0x2222222222222222222222222222222222222220", label: "retracted", active: true, autoAdded: true,
+    });
+    await setWalletActive(db as Parameters<typeof setWalletActive>[0], retracted.id, false);
+    const deleted = await insertWallet(db as Parameters<typeof insertWallet>[0], {
+      chain: "polygon", address: "0x3333333333333333333333333333333333333330", label: "deleted", active: true, autoAdded: true,
+    });
+    await markWalletHumanTouched(db as Parameters<typeof markWalletHumanTouched>[0], deleted.id);
+    await setWalletActive(db as Parameters<typeof setWalletActive>[0], deleted.id, false);
+
+    const excluded = await getDiscoveryExcludedAddresses(db as Parameters<typeof getDiscoveryExcludedAddresses>[0]);
+    expect(excluded).toContain(active.address);
+    expect(excluded).toContain(deleted.address); // human-touched stays sacrosanct
+    expect(excluded).not.toContain(retracted.address); // re-discoverable
   });
 });
 

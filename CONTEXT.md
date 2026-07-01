@@ -44,6 +44,14 @@ _Avoid_: Trade, order, execution
 A copied position the bot still holds after the leader has already sold out of it — the leader's exit signal arrived too stale to copy normally. Force-closed at the current price (never the leader's stale rate; see ADR 0004), not erased.
 _Avoid_: Stuck position, stale position, dangling trade
 
+**Decision Journal**:
+The persisted record of every trade signal's decision — copied or vetoed — capturing the full feature vector known at decision time plus the eventual outcome. Vetoed signals receive a counterfactual outcome (what the copy would have returned, marked later) so the dataset is free of survivor bias. The training corpus for any future learned copy filter.
+_Avoid_: Log (ambiguous with app logs), fills (only covers copied signals)
+
+**Shadow Quote**:
+A real executable quote fetched at fill time (aggregator quote on ETH/Base; CLOB book on Polymarket) and persisted alongside the paper fill, purely to measure fill-model error. Never executed, never affects the fill decision — instrumentation only.
+_Avoid_: Quote (ambiguous with pricing quotes used in the fill path), benchmark price
+
 **Resolution**:
 The settlement of a Polymarket market: every outcome share becomes worth exactly $1 (winning side) or $0 (losing side). A forced close of any still-open copied position that realizes its PnL — distinct from a Fill, which is driven by a leader's trade. Has no ETH/Base analog. Detected by polling market status (Gamma API) by conditionId.
 _Avoid_: Settlement (when ambiguous with general accounting), expiry

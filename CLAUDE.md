@@ -13,18 +13,18 @@ Paper-trading copy-trader (ETH + Base). **`PLAN.md` is the single source of trut
 - If a command fails twice with the same error, stop and report instead of retrying.
 - Ask before adding any dependency not listed in PLAN.md §2.
 
-## Multi-model workflow (GLM drafts, Opus reviews)
+## Multi-model workflow (Sonnet drafts, Opus reviews)
 
-Two assistants work this repo: **Opus 4.8** (`claude`) and **GLM 5.2** (`ccr code`, via OpenRouter). They share no conversation context — **all handoff happens through git**.
+Two models work this repo, both via native Claude Code: **Opus 4.8** and **Sonnet 5** (Sonnet replaced GLM 5.2 as the drafting model on 2026-07-01). Sessions share no conversation context — **all handoff happens through git** (or task docs in `docs/tasks/`).
 
-- **GLM 5.2 drafts.** Use it for boilerplate, test scaffolding, repetitive refactors, first-draft features, and large-file/log summaries. It must **not** be the final word on anything touching the non-negotiable rules above (money simulation, key handling, pricing/engine accounting).
-- **Opus reviews.** Architecture, ADRs, debugging subtle bugs, security, and the final `/code-review` gate before merge are Opus's job. Opus verifies GLM's work against the non-negotiable rules before it lands on `main`.
-- **Handoff = a branch + a clear commit.** Name drafting branches `glm/<short-description>`; review/fix branches `opus/<short-description>`. Never have both models editing the same files simultaneously — split by branch or task.
+- **Sonnet 5 drafts.** Use it for boilerplate, test scaffolding, repetitive refactors, first-draft features, and large-file/log summaries. It must **not** be the final word on anything touching the non-negotiable rules above (money simulation, key handling, pricing/engine accounting).
+- **Opus reviews.** Architecture, ADRs, debugging subtle bugs, security, and the final `/code-review` gate before merge are Opus's job. Opus verifies Sonnet's work against the non-negotiable rules before it lands on `main`.
+- **Handoff = a branch + a clear commit.** Name drafting branches `sonnet/<short-description>`; review/fix branches `opus/<short-description>`. Never have both models editing the same files simultaneously — split by branch or task.
 - **Nothing merges to `main` without `pnpm build && pnpm test` green** (already a non-negotiable) **and** an Opus review pass on the diff.
 
-**Which model to use (rule of thumb):** default to **GLM** for "just do it" work (tests, scaffolding, refactors, first drafts, summaries); switch to **Opus** for "be careful here" work (money/keys/pricing accounting, phase design, subtle bugs, pre-merge review). If unsure which bucket a task is in, that hesitation is the signal — use Opus. Inside an Opus session, Opus should flag cheap grunt work as GLM-suitable; anything GLM produces that touches the non-negotiable rules goes through an Opus `/code-review` pass before it merges.
+**Which model to use (rule of thumb):** default to **Sonnet** for "just do it" work (tests, scaffolding, refactors, first drafts, summaries); switch to **Opus** for "be careful here" work (money/keys/pricing accounting, phase design, subtle bugs, pre-merge review). If unsure which bucket a task is in, that hesitation is the signal — use Opus. Inside an Opus session, Opus should flag cheap grunt work as Sonnet-suitable; anything Sonnet produces that touches the non-negotiable rules goes through an Opus `/code-review` pass before it merges.
 
-**Enforcement:** a versioned pre-commit hook (`.githooks/pre-commit`) gates commits to `main`. GLM (which runs via `ccr code` / claude-code-router, detected by its exported `ANTHROPIC_BASE_URL`) is blocked from `main` and must work on a `glm/*` branch; Opus (native Claude Code, no base-url override) and the human may land on `main` after a review pass. The hook is active via `git config core.hooksPath .githooks` — **a fresh clone must run that once** to enable it. Override a one-off with `git commit --no-verify`, or set `TRADEBOT_ALLOW_MAIN=1` (use sparingly).
+**Enforcement:** a versioned pre-commit hook (`.githooks/pre-commit`) gates commits to `main`. It detects router-based sessions (`ccr code` / claude-code-router, via their exported `ANTHROPIC_BASE_URL`) and blocks them from `main` — this still covers any legacy GLM session. **Sonnet 5 runs as native Claude Code, so the hook cannot distinguish it from Opus — the `sonnet/*` branch discipline is convention, not machine-enforced.** A Sonnet session must never commit to `main`; keep drafting on `sonnet/*` and let an Opus review pass land the merge. The hook is active via `git config core.hooksPath .githooks` — **a fresh clone must run that once** to enable it. Override a one-off with `git commit --no-verify`, or set `TRADEBOT_ALLOW_MAIN=1` (use sparingly).
 
 ## Status
 

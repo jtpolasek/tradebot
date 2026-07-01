@@ -1,8 +1,8 @@
 # Task: bound the in-memory pricing caches
 
-**Lane:** GLM draft → Opus review (mechanical, no non-negotiable rules touched).
+**Lane:** Sonnet 5 draft → Opus review (mechanical, no non-negotiable rules touched).
 **Source:** PLAN.md Phase 9 item 8, deferred follow-up (b) — "bound the TTL-only pricing caches (`llamaCache`/`poolCache`) — low risk, TTL-bounded."
-**Branch:** `glm/bound-pricing-caches` (do NOT commit to `main` — a pre-commit hook blocks it).
+**Branch:** `sonnet/bound-pricing-caches` (do NOT commit to `main` — convention; see CLAUDE.md).
 
 ## Problem
 
@@ -64,4 +64,4 @@ Then replace the two `llamaCache.set(...)` / `marketCache.set(...)` call sites w
 
 ## Handoff back to Opus
 
-Push `glm/bound-pricing-caches`, then it gets an Opus `/code-review` pass before merge to `main`.
+Push `sonnet/bound-pricing-caches`, then it gets an Opus `/code-review` pass before merge to `main`.
